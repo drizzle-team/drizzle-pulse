@@ -11,18 +11,18 @@ Type-safe realtime SDK shared by server, client, React, and embedded layers.
 
 ## Package Name
 
-`@drizzle-pulse/client` — workspace package with built `dist/` exports.
+`drizzle-pulse` — workspace package with built `dist/` exports.
 
 ## Source Layout
 
 | Path | Purpose |
 |------|---------|
-| `src/types.ts` | shared public types such as `QueryDescriptor`, `PulseQuery`, `WhereClause`, `PullResponse`, `LoadMoreResponse` |
-| `src/shared/` | protocol request/response types, filter AST helpers, PK utilities |
-| `src/react/create-client.ts` | proxy-based typed client |
-| `src/react/pulse-query.ts` | framework-agnostic subscribe/poll/load-more state machine |
-| `src/react/superjson.ts` | response deserialization helper |
-| `src/react/use-pulse-query.ts` | `usePulseQuery` wrapper around `PulseQuery` |
+| `src/types.ts` | shared public types such as `QueryDescriptor`, `ResolvedPulseQuery`, `WhereClause`, `PullResponse`, `LoadMoreResponse` |
+| `src/shared/` | protocol request/response types, filter AST helpers, PK utilities, `pulse-merge-core.ts` (merge state machine reused by HTTP `PulseQuery` and embedded `PulseCollection`) |
+| `src/client/create-client.ts` | proxy-based typed client |
+| `src/client/pulse-query.ts` | framework-agnostic subscribe/poll/load-more state machine (`PulseQuery` class) |
+| `src/client/superjson.ts` | response deserialization helper |
+| `src/client/react/use-pulse-query.ts` | `usePulseQuery` wrapper around `PulseQuery` |
 | `src/server/pulse.ts` | `createPulse` factory |
 | `src/server/pulse-builder.ts` | immutable query builder |
 | `src/server/pulse-registry.ts` | registry finalization + `$client` phantom contract |
@@ -30,7 +30,7 @@ Type-safe realtime SDK shared by server, client, React, and embedded layers.
 | `src/server/expose.ts` | Hono router + runtime assembly |
 | `src/server/realtime-store.ts` | `RealtimeService` and `SubscriptionManager` |
 | `src/server/wal-listener.ts` | logical replication listener |
-| `src/embedded/index.ts` | in-process embedded client: `createPulseClient(runtime)` → `PulseCollection` live collections fed directly by the WAL tap (no HTTP) |
+| `src/client/embedded/index.ts` | in-process embedded client: `createPulseClient(runtime)` → `PulseCollection` live collections fed directly by the WAL tap (no HTTP) |
 | `src/__tests__/` | runtime/unit tests for SDK internals |
 
 ## Contract Flow
@@ -68,30 +68,33 @@ React:
 ## Public Imports
 
 ```ts
-// @drizzle-pulse/client
+// drizzle-pulse (root)
 QueryDescriptor
-usePulseQuery
-type ColumnOperators, WhereClause, WhereCondition
-type PulseQuery, RealtimeEvent, PullResponse, LoadMoreResponse
+type ColumnOperators, ResolvedPulseQuery, RealtimeEvent, WhereClause, WhereCondition
+type SubscribeRequest, SubscribeResponse, PullRequest, PullResponse, LoadMoreRequest, LoadMoreResponse
 
-// @drizzle-pulse/client/react
+// drizzle-pulse/client
 createPulseClient
 PulseQuery
 deserializeResponse
-usePulseQuery
-type CreatePulseQueryOptions, PulseQueryState, PulseEvent, UsePulseQueryResult
+type CreatePulseQueryOptions, PulseQueryState, PulseEvent, PulseInsertEvent, PulseUpdateEvent, PulseDeleteEvent
 
-// @drizzle-pulse/client/server
+// drizzle-pulse/client/react
+usePulseQuery
+type UsePulseQueryResult
+
+// drizzle-pulse/server
 createPulse
 createPulseRegistry
 PulseBuilder
 PulseRegistry
 expose
+RealtimeRuntime
 RealtimeService
 SubscriptionManager
-evaluateCondition
+buildSelectQuery
 
-// @drizzle-pulse/client/embedded
+// drizzle-pulse/client/embedded
 createPulseClient
 PulseCollection
 type EmbeddedPulseClient, PulseCollectionOptions, PulseCollectionChange, PulseRow
@@ -100,7 +103,7 @@ type EmbeddedPulseClient, PulseCollectionOptions, PulseCollectionChange, PulseRo
 ## Import Rules
 
 - Internal source imports require explicit `.js` extensions
-- Keep server-only code out of client/react entrypoints
+- Keep server-only code out of the `client` and `client/react` entrypoints
 - If `PulseQuery` or protocol types change, update both runtime handlers and client consumers together
 
 ## DO NOT
