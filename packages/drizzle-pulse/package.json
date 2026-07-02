@@ -1,5 +1,5 @@
 {
-  "name": "@drizzle-pulse/client",
+  "name": "drizzle-pulse",
   "version": "0.0.1",
   "description": "Type-safe realtime client SDK for drizzle-pulse with drizzle-style API",
   "type": "module",
@@ -10,18 +10,23 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "import": "./dist/client/index.js"
+    },
+    "./client/react": {
+      "types": "./dist/client/react/index.d.ts",
+      "import": "./dist/client/react/index.js"
+    },
+    "./client/embedded": {
+      "types": "./dist/client/embedded/index.d.ts",
+      "import": "./dist/client/embedded/index.js"
+    },
     "./server": {
       "types": "./dist/server/index.d.ts",
       "import": "./dist/server/index.js"
     },
-    "./react": {
-      "types": "./dist/react/index.d.ts",
-      "import": "./dist/react/index.js"
-    },
-    "./embedded": {
-      "types": "./dist/embedded/index.d.ts",
-      "import": "./dist/embedded/index.js"
-    }
+    "./package.json": "./package.json"
   },
   "files": [
     "dist"

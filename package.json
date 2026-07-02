@@ -7,9 +7,9 @@
   "scripts": {
     "docker:up": "docker compose up -d --wait",
     "docker:down": "docker compose down",
-    "build": "bun run --filter @drizzle-pulse/client build",
-    "test": "bun run --filter @drizzle-pulse/client test",
-    "test:types": "bun run --filter @drizzle-pulse/client test:types",
+    "build": "bun run --filter drizzle-pulse build",
+    "test": "bun run --filter drizzle-pulse test",
+    "test:types": "bun run --filter drizzle-pulse test:types",
     "typecheck": "bun run build && bun run --filter '*' typecheck",
     "test:integration": "bun run build && DATABASE_URL=postgresql://postgres:postgres@localhost:5433/postgres bun run --filter @drizzle-pulse/integration-tests test",
     "lint": "bunx --bun biome lint --write .",
