@@ -1,0 +1,49 @@
+export type {
+  ColumnOperators,
+  PulseQuery,
+  QueryDescriptor,
+  WhereClause,
+  WhereCondition,
+} from '../types.js';
+
+// ---------------------------------------------------------------------------
+// Pulse API
+// ---------------------------------------------------------------------------
+
+export type {
+  LoadMoreRequest,
+  PullRequest,
+  SubscribeRequest,
+  SubscribeResponse,
+} from '../shared/protocol-types.js';
+export type { PulseAuthContext } from '../types.js';
+export type { WalListenerConfig } from './expose.js';
+export {
+  type ExposeConfig,
+  expose,
+  RealtimeRuntime,
+} from './expose.js';
+export { createPulse } from './pulse.js';
+// Builder
+export { PulseBuilder } from './pulse-builder.js';
+export type { AnyPulseBuilder, AnyPulseBuilders as AnyQueries } from './pulse-registry.js';
+// Registry
+export { createPulseRegistry, PulseRegistry } from './pulse-registry.js';
+export { buildSelectQuery } from './pulse-sql.js';
+// Pulse types (public API surface)
+export type {
+  ApplyColumns,
+  ColumnsSelection,
+  InferColumnSelection,
+  IsIncludeMode,
+  PulseClientContract,
+  PulseColumnSelection,
+  PulseQueryConfig,
+  PulseQueryContext,
+  PulseTransformFn,
+  WithPk,
+} from './pulse-types.js';
+export { applyColumnFilter } from './pulse-types.js';
+export type { Subscription } from './realtime-store.js';
+export { RealtimeService, SubscriptionManager } from './realtime-store.js';
+export { serializeResponse } from './superjson-utils.js';
