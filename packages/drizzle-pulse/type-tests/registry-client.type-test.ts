@@ -1,5 +1,5 @@
 import { expectTypeOf } from 'bun:test';
-import { createPulseClient } from '../src/react/index.js';
+import { createPulseClient } from '../src/client/index.js';
 import { createPulse } from '../src/server/pulse.js';
 import { createPulseRegistry } from '../src/server/pulse-registry.js';
 import type { QueryDescriptor } from '../src/types.js';
@@ -8,7 +8,7 @@ import { driverSchema, orders, statusSchema } from './fixtures.js';
 const pulse = createPulse();
 
 // @ts-expect-error legacy client API was removed
-import('../src/react/index.js').then(({ createRealtimeClient }) => createRealtimeClient);
+import('../src/client/index.js').then(({ createRealtimeClient }) => createRealtimeClient);
 
 const withArgs = pulse(orders)
   .args(statusSchema)

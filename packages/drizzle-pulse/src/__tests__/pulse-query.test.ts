@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import SuperJSON from 'superjson';
-import { createPulseClient } from '../react/create-client.js';
-import { PulseQuery } from '../react/pulse-query.js';
+import { createPulseClient } from '../client/create-client.js';
+import { PulseQuery } from '../client/pulse-query.js';
 import type { PullResponse } from '../shared/protocol-types.js';
 import type { QueryDescriptor } from '../types.js';
 

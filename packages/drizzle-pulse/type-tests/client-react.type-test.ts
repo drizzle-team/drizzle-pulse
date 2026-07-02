@@ -1,8 +1,8 @@
 import { expectTypeOf } from 'bun:test';
-import type { UsePulseQueryResult, usePulseQuery } from '../src/index.js';
-import type { QueryDescriptor } from '../src/react/index.js';
-import { createPulseClient } from '../src/react/index.js';
-import type { usePulseQuery as usePulseQueryFromReact } from '../src/react/use-pulse-query.js';
+import { createPulseClient } from '../src/client/index.js';
+import type { UsePulseQueryResult, usePulseQuery } from '../src/client/react/index.js';
+import type { usePulseQuery as usePulseQueryFromReact } from '../src/client/react/use-pulse-query.js';
+import type { QueryDescriptor } from '../src/index.js';
 import { createPulse } from '../src/server/pulse.js';
 import { createPulseRegistry } from '../src/server/pulse-registry.js';
 import type { WithPk } from '../src/server/pulse-types.js';

@@ -1,13 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 import { getColumns } from 'drizzle-orm';
 import { integer, pgTable, serial, text } from 'drizzle-orm/pg-core';
-import { PulseCollection } from '../embedded/index.js';
+import { PulseCollection } from '../client/embedded/index.js';
 import { RealtimeRuntime } from '../server/expose.js';
 import { createPulseRegistry } from '../server/pulse-registry.js';
 import type { PulseSourceDb } from '../server/pulse-sql.js';
 import type { WalTapPayload } from '../server/wal-event-emitter.js';
 import { WalEventEmitter } from '../server/wal-event-emitter.js';
-import type { PulseAuthContext, PulseQuery, PulseRegistryQuery } from '../types.js';
+import type { PulseAuthContext, PulseRegistryQuery, ResolvedPulseQuery } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Inline table fixtures (no DB required)
@@ -121,7 +121,7 @@ function makeBlockingDb(rows: Record<string, unknown>[]): {
   return { db, release: releaseRebaseline, state };
 }
 
-function makeResolvedQuery(overrides: Partial<PulseQuery> = {}): PulseQuery {
+function makeResolvedQuery(overrides: Partial<ResolvedPulseQuery> = {}): ResolvedPulseQuery {
   return {
     table: ordersTable,
     eventsTable: eventsOrdersTable,
@@ -164,7 +164,7 @@ type MockRuntime = {
   sourceDb: PulseSourceDb;
   registry: {
     getPulseQuery(name: string): PulseRegistryQuery | null;
-    resolve(name: string, args: unknown, auth: PulseAuthContext): PulseQuery;
+    resolve(name: string, args: unknown, auth: PulseAuthContext): ResolvedPulseQuery;
   };
 };
 

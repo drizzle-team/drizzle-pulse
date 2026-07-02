@@ -4,9 +4,9 @@ import type {
   PullResponse as ProtocolPullResponse,
   SubscribeResponse as ProtocolSubscribeResponse,
 } from '../shared/protocol-types.js';
+import { PulseMergeCore } from '../shared/pulse-merge-core.js';
 import type { QueryDescriptor } from '../types.js';
 import type { PullClient } from './create-client.js';
-import { PulseMergeCore } from './pulse-merge-core.js';
 import { deserializeResponse } from './superjson.js';
 
 export interface PulseQueryState<TResult> {

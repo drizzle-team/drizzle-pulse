@@ -1,14 +1,14 @@
 import { getTableUniqueName } from 'drizzle-orm';
-import { PulseMergeCore } from '../react/pulse-merge-core.js';
-import type { PulseEvent } from '../react/pulse-query.js';
-import type { RealtimeRuntime } from '../server/expose.js';
-import { type AnyPulseBuilders, applyProjectionPipeline } from '../server/pulse-registry.js';
-import { buildSelectQuery } from '../server/pulse-sql.js';
-import type { PulseClientContract } from '../server/pulse-types.js';
-import type { WalTapPayload } from '../server/wal-event-emitter.js';
-import { extractRow } from '../shared/event-normalization.js';
-import { evaluateCondition } from '../shared/filter-ast.js';
-import type { PulseAuthContext, PulseQuery, QueryDescriptor } from '../types.js';
+import type { RealtimeRuntime } from '../../server/expose.js';
+import { type AnyPulseBuilders, applyProjectionPipeline } from '../../server/pulse-registry.js';
+import { buildSelectQuery } from '../../server/pulse-sql.js';
+import type { PulseClientContract } from '../../server/pulse-types.js';
+import type { WalTapPayload } from '../../server/wal-event-emitter.js';
+import { extractRow } from '../../shared/event-normalization.js';
+import { evaluateCondition } from '../../shared/filter-ast.js';
+import { PulseMergeCore } from '../../shared/pulse-merge-core.js';
+import type { PulseAuthContext, QueryDescriptor, ResolvedPulseQuery } from '../../types.js';
+import type { PulseEvent } from '../pulse-query.js';
 
 // ---------------------------------------------------------------------------
 // Public type surface
@@ -61,7 +61,7 @@ export class PulseCollection<TRow extends { $pk: unknown }> {
     /** @internal */
     readonly runtime: RealtimeRuntime<AnyPulseBuilders>,
     /** @internal */
-    readonly query: PulseQuery,
+    readonly query: ResolvedPulseQuery,
     private readonly deregister: () => void = () => {},
   ) {
     this.core = new PulseMergeCore<TRow & Record<string, unknown>>({
@@ -343,7 +343,7 @@ class PulseClient {
     this.unsubscribeStop = runtime.onStop(() => this.disposeAll());
   }
 
-  async create(resolved: PulseQuery): Promise<AnyPulseCollection> {
+  async create(resolved: ResolvedPulseQuery): Promise<AnyPulseCollection> {
     const collection: AnyPulseCollection = new PulseCollection(this.runtime, resolved, () => {
       this.collections.delete(collection);
     });

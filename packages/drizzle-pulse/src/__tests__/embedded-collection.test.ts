@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import { getColumns } from 'drizzle-orm';
 import { integer, pgTable, serial, text } from 'drizzle-orm/pg-core';
-import { createPulseClient, PulseCollection } from '../embedded/index.js';
+import { createPulseClient, PulseCollection } from '../client/embedded/index.js';
 import type { PulseSourceDb } from '../server/pulse-sql.js';
 import { WalEventEmitter } from '../server/wal-event-emitter.js';
-import type { PulseQuery, PulseRegistryQuery } from '../types.js';
+import type { PulseRegistryQuery, ResolvedPulseQuery } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Minimal inline fixtures — no DB required. Real WAL/rebaseline scenarios are
@@ -137,7 +137,7 @@ function makeMockSourceDbThatThrows(error: Error): PulseSourceDb {
 
 const ordersColumns = getColumns(ordersTable);
 
-function makeResolvedQuery(overrides: Partial<PulseQuery> = {}): PulseQuery {
+function makeResolvedQuery(overrides: Partial<ResolvedPulseQuery> = {}): ResolvedPulseQuery {
   return {
     table: ordersTable,
     eventsTable: eventsOrdersTable,

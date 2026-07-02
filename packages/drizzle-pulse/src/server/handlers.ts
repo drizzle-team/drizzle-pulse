@@ -15,7 +15,7 @@ import type {
   SubscribeResponse,
 } from '../shared/protocol-types.js';
 
-import type { PulseAuthContext, PulseQuery, RealtimeEvent, WhereClause } from '../types.js';
+import type { PulseAuthContext, RealtimeEvent, ResolvedPulseQuery, WhereClause } from '../types.js';
 import { buildWhereClausePredicate } from './drizzle-utils.js';
 import type { AnyPulseBuilders, PulseRegistry } from './pulse-registry.js';
 import { applyResponsePipeline } from './pulse-registry.js';
@@ -70,7 +70,7 @@ export class RealtimeRequestHandler {
       const { clientId: rawClientId, queryName, args, subscriptionId } = request;
       const clientId = this.getClientId(rawClientId);
 
-      let resolvedQuery: PulseQuery;
+      let resolvedQuery: ResolvedPulseQuery;
       let sourceTable: PgTable;
       try {
         resolvedQuery = this.registry.resolve(queryName, args, auth);
@@ -175,7 +175,7 @@ export class RealtimeRequestHandler {
       const cursorWhere: WhereClause = subscription.query.where
         ? { AND: [subscription.query.where, cursorCondition] }
         : cursorCondition;
-      const fetchQuery: PulseQuery = {
+      const fetchQuery: ResolvedPulseQuery = {
         ...subscription.query,
         where: cursorWhere,
         allowedColumnNames: this.getInternalAllowedColumnNames(subscription.query),
@@ -326,7 +326,7 @@ export class RealtimeRequestHandler {
     return rawClientId && rawClientId.length > 0 ? rawClientId : crypto.randomUUID();
   }
 
-  private getInternalAllowedColumnNames(query: PulseQuery): ReadonlySet<string> {
+  private getInternalAllowedColumnNames(query: ResolvedPulseQuery): ReadonlySet<string> {
     const pkQueryKey = getQueryColumnKey(query.columns, query.pkColumn);
     return pkQueryKey
       ? new Set([...query.allowedColumnNames, pkQueryKey])
@@ -340,7 +340,7 @@ export class RealtimeRequestHandler {
       $matches_new?: unknown;
       $matches_old?: unknown;
     },
-    query: PulseQuery,
+    query: ResolvedPulseQuery,
   ): NormalizedEvent {
     return {
       snapshot: Number(rawEvent.$snapshot ?? 0),
@@ -354,7 +354,7 @@ export class RealtimeRequestHandler {
   }
 
   private async applyPipelineToRow(
-    query: PulseQuery,
+    query: ResolvedPulseQuery,
     row: Record<string, unknown> | null,
   ): Promise<Record<string, unknown> | null> {
     if (!row) {
@@ -434,7 +434,7 @@ export class RealtimeRequestHandler {
     if (!sourceTable) {
       return { error: 'source_table_not_found' };
     }
-    const rerunQuery: PulseQuery = {
+    const rerunQuery: ResolvedPulseQuery = {
       ...subscription.query,
       where: this.buildResetWhereClause(subscription),
       allowedColumnNames: this.getInternalAllowedColumnNames(subscription.query),

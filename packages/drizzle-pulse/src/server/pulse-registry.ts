@@ -1,6 +1,11 @@
 import { getColumns, getTableUniqueName } from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
-import type { PulseAuthContext, PulseQuery, PulseRegistryQuery, WhereClause } from '../types.js';
+import type {
+  PulseAuthContext,
+  PulseRegistryQuery,
+  ResolvedPulseQuery,
+  WhereClause,
+} from '../types.js';
 import type { PulseBuilder } from './pulse-builder.js';
 import { applyColumnFilter, type PulseClientContract } from './pulse-types.js';
 
@@ -106,7 +111,7 @@ function buildPulseQuery(query: AnyPulseBuilder) {
   };
 }
 
-export function addPrimaryKey(row: Record<string, unknown>, pulseQuery: PulseQuery) {
+export function addPrimaryKey(row: Record<string, unknown>, pulseQuery: ResolvedPulseQuery) {
   const pkValue = row[pulseQuery.pkColumn.name];
   if (pkValue === undefined) {
     throw new Error(
@@ -119,7 +124,7 @@ export function addPrimaryKey(row: Record<string, unknown>, pulseQuery: PulseQue
 
 export async function applyResponsePipeline(
   rows: Record<string, unknown>[],
-  pulseQuery: PulseQuery,
+  pulseQuery: ResolvedPulseQuery,
 ) {
   const transformedRows = await pulseQuery.transformRows(rows);
   return applyProjectionPipeline(transformedRows, pulseQuery);
@@ -128,10 +133,10 @@ export async function applyResponsePipeline(
 // Synchronous projection helper for the embedded path — skips async transformRows.
 export function applyProjectionPipeline(
   rows: Record<string, unknown>[],
-  pulseQuery: Pick<PulseQuery, 'pkColumn' | 'selectedColumns' | 'table'>,
+  pulseQuery: Pick<ResolvedPulseQuery, 'pkColumn' | 'selectedColumns' | 'table'>,
 ): Record<string, unknown>[] {
   return rows
-    .map((row) => addPrimaryKey(row, pulseQuery as PulseQuery))
+    .map((row) => addPrimaryKey(row, pulseQuery as ResolvedPulseQuery))
     .map((row) => applyColumnFilter(row, pulseQuery.selectedColumns));
 }
 
@@ -174,7 +179,7 @@ export class PulseRegistry<TQueries extends AnyPulseBuilders> {
     return Object.keys(this.pulseQueries);
   }
 
-  resolve(name: string, rawArgs: unknown, auth: PulseAuthContext): PulseQuery {
+  resolve(name: string, rawArgs: unknown, auth: PulseAuthContext): ResolvedPulseQuery {
     const registryQuery = this.pulseQueries[name];
     if (!registryQuery) throw new Error(`Unknown query: "${name}"`);
     const args = registryQuery.argsSchema

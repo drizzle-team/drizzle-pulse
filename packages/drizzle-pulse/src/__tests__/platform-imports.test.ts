@@ -10,7 +10,12 @@ import ts from 'typescript';
 // (drizzle-orm) for the philosophy this port is based on.
 
 const SRC_ROOT = resolve(import.meta.dir, '..');
-const ENTRY_POINTS = [join(SRC_ROOT, 'react/index.ts'), join(SRC_ROOT, 'embedded/index.ts')];
+const ENTRY_POINTS = [
+  join(SRC_ROOT, 'client/index.ts'),
+  join(SRC_ROOT, 'client/react/index.ts'),
+  join(SRC_ROOT, 'client/embedded/index.ts'),
+  join(SRC_ROOT, 'index.ts'),
+];
 
 const NODE_BUILTINS = new Set([
   'assert',

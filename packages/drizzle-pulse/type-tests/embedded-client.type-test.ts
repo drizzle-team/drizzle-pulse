@@ -5,7 +5,7 @@ import {
   type PulseCollection,
   type PulseCollectionOptions,
   type PulseRow,
-} from '../src/embedded/index.js';
+} from '../src/client/embedded/index.js';
 import type { RealtimeRuntime } from '../src/server/expose.js';
 import { createPulse } from '../src/server/pulse.js';
 import { createPulseRegistry } from '../src/server/pulse-registry.js';

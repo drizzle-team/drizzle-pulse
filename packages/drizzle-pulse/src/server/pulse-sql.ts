@@ -1,6 +1,6 @@
 import { asc, desc } from 'drizzle-orm';
 import type { PgAsyncDatabase, PgQueryResultHKT, PgTable } from 'drizzle-orm/pg-core';
-import type { PulseQuery } from '../types.js';
+import type { ResolvedPulseQuery } from '../types.js';
 import { buildWhereClausePredicate } from './drizzle-utils.js';
 import { getQueryColumnKey } from './pulse-types.js';
 
@@ -8,7 +8,7 @@ import { getQueryColumnKey } from './pulse-types.js';
 export type PulseSourceDb = PgAsyncDatabase<PgQueryResultHKT, any>;
 
 type SelectQueryConfig = Pick<
-  PulseQuery,
+  ResolvedPulseQuery,
   | 'table'
   | 'pkColumn'
   | 'columns'

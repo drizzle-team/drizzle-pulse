@@ -1,5 +1,5 @@
-import { comparePkValues, isPkComparable } from '../shared/pk-utils.js';
-import type { PulseEvent } from './pulse-query.js';
+import type { PulseEvent } from '../client/pulse-query.js';
+import { comparePkValues, isPkComparable } from './pk-utils.js';
 
 type PulsePk = string | number;
 

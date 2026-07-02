@@ -1,5 +1,5 @@
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
-import type { PullClient } from './react/create-client';
+import type { PullClient } from './client/create-client';
 
 /** Column filter operators */
 export type ColumnOperators<V> = {
@@ -102,7 +102,7 @@ export interface PulseRegistryQuery {
   ) => Promise<Record<string, unknown>[]> | Record<string, unknown>[];
 }
 
-export type PulseQuery = Omit<PulseRegistryQuery, 'queryFn'> & {
+export type ResolvedPulseQuery = Omit<PulseRegistryQuery, 'queryFn'> & {
   readonly where: WhereClause | null;
 };
 

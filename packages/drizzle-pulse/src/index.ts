@@ -1,12 +1,23 @@
-export { type UsePulseQueryResult, usePulseQuery } from './react/use-pulse-query.js';
-export type { LoadMoreResponse, PullResponse } from './shared/protocol-types.js';
+export type {
+  LoadMoreRequest,
+  LoadMoreResponse,
+  PullIncrementalResponse,
+  PullRequest,
+  PullResetResponse,
+  PullResponse,
+  PullResponseError,
+  PullResponseErrorResult,
+  PullSubscriptionRequest,
+  SubscribeRequest,
+  SubscribeResponse,
+} from './shared/protocol-types.js';
 export type {
   ColumnOperators,
-  PulseQuery,
   RealtimeDeleteEvent,
   RealtimeEvent,
   RealtimeInsertEvent,
   RealtimeUpdateEvent,
+  ResolvedPulseQuery,
   WhereClause,
   WhereCondition,
 } from './types.js';

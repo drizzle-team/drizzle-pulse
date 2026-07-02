@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { PulseMergeCore } from '../react/pulse-merge-core.js';
+import { PulseMergeCore } from '../shared/pulse-merge-core.js';
 
 type TestRow = {
   $pk: number;

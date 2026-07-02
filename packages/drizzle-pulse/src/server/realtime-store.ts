@@ -4,13 +4,13 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { getTableConfig } from 'drizzle-orm/pg-core';
 import type { Pool } from 'pg';
-import type { PulseAuthContext, PulseQuery } from '../types.js';
+import type { PulseAuthContext, ResolvedPulseQuery } from '../types.js';
 
 export interface Subscription {
   id: string;
   clientId: string;
   queryName: string;
-  query: PulseQuery;
+  query: ResolvedPulseQuery;
   auth: PulseAuthContext;
   rangeStart: unknown | null;
   rangeEnd: unknown | null;
@@ -28,7 +28,7 @@ export class SubscriptionManager {
   create(
     clientId: string,
     queryName: string,
-    query: PulseQuery,
+    query: ResolvedPulseQuery,
     auth: PulseAuthContext,
     id?: string,
   ): Subscription {

@@ -1,7 +1,7 @@
 export type {
   ColumnOperators,
-  PulseQuery,
   QueryDescriptor,
+  ResolvedPulseQuery,
   WhereClause,
   WhereCondition,
 } from '../types.js';

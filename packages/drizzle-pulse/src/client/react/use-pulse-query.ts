@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { WithPk } from '../server/pulse-types.js';
-import type { QueryDescriptor } from '../types.js';
-import { PulseQuery, type PulseQueryState } from './pulse-query.js';
+import type { WithPk } from '../../server/pulse-types.js';
+import type { QueryDescriptor } from '../../types.js';
+import { PulseQuery, type PulseQueryState } from '../pulse-query.js';
 
 function getDescriptorKey(descriptor: QueryDescriptor<unknown>) {
   return JSON.stringify({
