@@ -2,7 +2,7 @@
 
 ## Role
 
-Live PostgreSQL + WAL integration coverage for the realtime SDK runtime. These tests validate subscribe, pull, load-more, fetch-adapter, and event-merging behavior against a real database and logical replication slot.
+Live PostgreSQL + WAL integration coverage for the realtime SDK runtime. These tests validate subscribe, pull, load-more, fetch-adapter, event-merging, embedded-collection, HTTP-vs-embedded consistency, and WAL-reconnect resilience behavior against a real database and logical replication slot.
 
 ## Entry Points
 
@@ -19,6 +19,9 @@ Live PostgreSQL + WAL integration coverage for the realtime SDK runtime. These t
 | `src/runtime-contracts.test.ts` | lower-level subscribe/pull/load-more/reset protocol coverage |
 | `src/property.test.ts` | property-based WAL/state validation via `fast-check` |
 | `src/router-fetch-adapter.test.ts` | verifies `createRouterFetchAdapter()` and selected `PulseQuery` integration paths |
+| `src/embedded-collection.test.ts` | embedded client (`@drizzle-pulse/client/embedded`) `PulseCollection` behavior, lifecycle, and PG data-type normalization through the WAL tap |
+| `src/consistency-oracle.test.ts` | oracle asserting embedded `list()` state equals both the HTTP baseline-subscribe rows and the HTTP incremental-pull merged state per operator |
+| `src/resilience.test.ts` | embedded-collection rebaseline behavior across WAL reconnect gaps |
 | `src/fixtures/` | fixture variants, migrations path, source table wiring |
 
 ## Harness Lifecycle

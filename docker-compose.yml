@@ -1,8 +1,8 @@
 services:
   postgres:
     build:
-      context: .
-      dockerfile: docker/postgres.Dockerfile
+      context: ./docker
+      dockerfile: postgres.Dockerfile
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres

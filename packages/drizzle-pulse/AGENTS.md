@@ -1,12 +1,13 @@
-# AGENTS.md — packages/client
+# AGENTS.md — packages/drizzle-pulse
 
 ## Role
 
-Type-safe realtime SDK shared by server, client, and React layers.
+Type-safe realtime SDK shared by server, client, React, and embedded layers.
 
 - server side: `createPulse`, `PulseBuilder`, `createPulseRegistry`, `expose`
 - client side: `createPulseClient`, `PulseQuery`
 - React side: `usePulseQuery`
+- embedded side: `createPulseClient` (in-process, runtime-backed), `PulseCollection`
 
 ## Package Name
 
@@ -29,6 +30,7 @@ Type-safe realtime SDK shared by server, client, and React layers.
 | `src/server/expose.ts` | Hono router + runtime assembly |
 | `src/server/realtime-store.ts` | `RealtimeService` and `SubscriptionManager` |
 | `src/server/wal-listener.ts` | logical replication listener |
+| `src/embedded/index.ts` | in-process embedded client: `createPulseClient(runtime)` → `PulseCollection` live collections fed directly by the WAL tap (no HTTP) |
 | `src/__tests__/` | runtime/unit tests for SDK internals |
 
 ## Contract Flow
@@ -88,6 +90,11 @@ expose
 RealtimeService
 SubscriptionManager
 evaluateCondition
+
+// @drizzle-pulse/client/embedded
+createPulseClient
+PulseCollection
+type EmbeddedPulseClient, PulseCollectionOptions, PulseCollectionChange, PulseRow
 ```
 
 ## Import Rules
