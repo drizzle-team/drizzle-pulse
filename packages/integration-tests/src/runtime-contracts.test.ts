@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { createPulse, createPulseRegistry } from '@drizzle-pulse/client/server';
 import { eq, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import { createPulse, createPulseRegistry } from 'drizzle-pulse/server';
 import type { Hono } from 'hono';
 import type { Pool } from 'pg';
 import SuperJSON from 'superjson';

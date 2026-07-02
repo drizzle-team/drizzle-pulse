@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { createPulseClient } from '@drizzle-pulse/client/react';
-import { createPulse, createPulseRegistry } from '@drizzle-pulse/client/server';
 import { eq, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import { createPulseClient } from 'drizzle-pulse/client';
+import { createPulse, createPulseRegistry } from 'drizzle-pulse/server';
 import type { Pool } from 'pg';
 import { fullOrdersFixture } from './fixtures/full-orders/index.js';
 import { minimalOrdersFixture } from './fixtures/minimal-orders/index.js';

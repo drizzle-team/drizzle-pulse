@@ -8,16 +8,13 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import type { PulseCollection } from '@drizzle-pulse/client/embedded';
-import { createPulseClient as createEmbeddedClient } from '@drizzle-pulse/client/embedded';
-import {
-  createPulseClient as createHttpClient,
-  type PulseQuery,
-} from '@drizzle-pulse/client/react';
-import type { PulseAuthContext } from '@drizzle-pulse/client/server';
-import { createPulse, createPulseRegistry } from '@drizzle-pulse/client/server';
 import { eq } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import { createPulseClient as createHttpClient, type PulseQuery } from 'drizzle-pulse/client';
+import type { PulseCollection } from 'drizzle-pulse/client/embedded';
+import { createPulseClient as createEmbeddedClient } from 'drizzle-pulse/client/embedded';
+import type { PulseAuthContext } from 'drizzle-pulse/server';
+import { createPulse, createPulseRegistry } from 'drizzle-pulse/server';
 import type { Pool } from 'pg';
 import { fullOrdersFixture } from './fixtures/full-orders/index.js';
 import type {

@@ -6,9 +6,9 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { createPulseClient, PulseQuery } from '@drizzle-pulse/client/react';
-import { createPulse, createPulseRegistry } from '@drizzle-pulse/client/server';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import { createPulseClient, PulseQuery } from 'drizzle-pulse/client';
+import { createPulse, createPulseRegistry } from 'drizzle-pulse/server';
 import type { Hono } from 'hono';
 import type { Pool } from 'pg';
 import SuperJSON from 'superjson';

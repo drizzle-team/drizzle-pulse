@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import type { QueryDescriptor } from '@drizzle-pulse/client';
-import { createPulseClient, PulseQuery } from '@drizzle-pulse/client/react';
+import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
+import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import { migrate } from 'drizzle-orm/postgres-js/migrator';
+import type { QueryDescriptor } from 'drizzle-pulse';
+import { createPulseClient, PulseQuery } from 'drizzle-pulse/client';
 import {
   type AnyQueries,
   expose,
@@ -11,10 +14,7 @@ import {
   type RealtimeRuntime,
   type SubscribeRequest,
   serializeResponse,
-} from '@drizzle-pulse/client/server';
-import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
-import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js';
-import { migrate } from 'drizzle-orm/postgres-js/migrator';
+} from 'drizzle-pulse/server';
 import type { Hono } from 'hono';
 import { Hono as HonoRouter } from 'hono';
 import { Pool } from 'pg';

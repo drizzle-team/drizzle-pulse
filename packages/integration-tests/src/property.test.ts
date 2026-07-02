@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { createPulseClient, PulseQuery } from '@drizzle-pulse/client/react';
-import { createPulse, createPulseRegistry } from '@drizzle-pulse/client/server';
 import { eq } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import { createPulseClient, PulseQuery } from 'drizzle-pulse/client';
+import { createPulse, createPulseRegistry } from 'drizzle-pulse/server';
 import fc from 'fast-check';
 import type { Hono } from 'hono';
 import type { Pool } from 'pg';
