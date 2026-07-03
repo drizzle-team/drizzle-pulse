@@ -1,15 +1,15 @@
 {
   "name": "drizzle-pulse",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Type-safe realtime SDK for Drizzle — server runtime, HTTP client, React hook, and embedded client",
   "type": "module",
   "license": "Apache-2.0",
   "author": "Dan Kochetov",
-  "homepage": "https://github.com/dankochetov/drizzle-pulse#readme",
-  "bugs": "https://github.com/dankochetov/drizzle-pulse/issues",
+  "homepage": "https://github.com/drizzle-team/drizzle-pulse#readme",
+  "bugs": "https://github.com/drizzle-team/drizzle-pulse/issues",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dankochetov/drizzle-pulse.git"
+    "url": "git+https://github.com/drizzle-team/drizzle-pulse.git"
   },
   "keywords": [
     "drizzle",
