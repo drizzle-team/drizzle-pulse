@@ -3,6 +3,30 @@
   "version": "0.0.1",
   "description": "Type-safe realtime SDK for Drizzle — server runtime, HTTP client, React hook, and embedded client",
   "type": "module",
+  "license": "Apache-2.0",
+  "author": "Dan Kochetov",
+  "homepage": "https://github.com/dankochetov/drizzle-pulse#readme",
+  "bugs": "https://github.com/dankochetov/drizzle-pulse/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dankochetov/drizzle-pulse.git"
+  },
+  "keywords": [
+    "drizzle",
+    "drizzle-orm",
+    "postgres",
+    "postgresql",
+    "realtime",
+    "wal",
+    "logical-replication",
+    "live-query",
+    "typescript",
+    "esm"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "sideEffects": false,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
