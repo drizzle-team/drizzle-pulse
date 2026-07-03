@@ -25,7 +25,7 @@ npm install drizzle-orm zod
 import { createPulse, createPulseRegistry, expose } from 'drizzle-pulse/server';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
-import { orders } from './schema.js';
+import { orders, ordersEvents } from './schema.js';
 
 const pulse = createPulse();
 
