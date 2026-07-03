@@ -1,7 +1,7 @@
 {
   "name": "drizzle-pulse",
   "version": "0.0.1",
-  "description": "Type-safe realtime client SDK for drizzle-pulse with drizzle-style API",
+  "description": "Type-safe realtime SDK for Drizzle — server runtime, HTTP client, React hook, and embedded client",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
