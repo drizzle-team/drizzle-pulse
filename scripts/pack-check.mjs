@@ -40,6 +40,13 @@ if (mapPaths.length > 0) {
 }
 
 const packedSet = new Set(packedPaths);
+
+const requiredExact = ['package.json', 'LICENSE', 'README.md'];
+const missingRequired = requiredExact.filter((path) => !packedSet.has(path));
+if (missingRequired.length > 0) {
+  errors.push(`Required files missing from the packed tarball: ${missingRequired.join(', ')}`);
+}
+
 const missingEntrypointFiles = [];
 for (const target of Object.values(manifest.exports ?? {})) {
   if (typeof target !== 'object' || target === null) continue;
