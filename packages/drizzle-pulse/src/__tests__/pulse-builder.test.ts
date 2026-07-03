@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { getColumns, getTableUniqueName } from 'drizzle-orm';
-import { boolean, integer, pgSchema, primaryKey, serial, text } from 'drizzle-orm/pg-core';
+import { boolean, integer, pgSchema, primaryKey, serial, text, varchar } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import { createPulse } from '../server/pulse.js';
 import { PulseBuilder } from '../server/pulse-builder.js';
@@ -64,6 +64,11 @@ const compositePkTable = testSchema.table(
 
 const unsupportedPkTable = testSchema.table('unsupported_items', {
   id: boolean('id').primaryKey(),
+  name: text('name').notNull(),
+});
+
+const varcharPkTable = testSchema.table('varchar_items', {
+  code: varchar('code', { length: 64 }).primaryKey(),
   name: text('name').notNull(),
 });
 
@@ -218,5 +223,11 @@ describe('createPulse', () => {
     const pulse = createPulse();
 
     expect(() => pulse(unsupportedPkTable)).toThrowError('unsupported SQL type');
+  });
+
+  test('pulse(table) accepts PK types with length modifiers', () => {
+    const pulse = createPulse();
+
+    expect(() => pulse(varcharPkTable)).not.toThrow();
   });
 });

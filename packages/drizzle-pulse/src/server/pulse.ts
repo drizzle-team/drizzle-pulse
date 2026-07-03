@@ -60,6 +60,8 @@ function makeConfig<TTable extends PgTableWithColumns<TableConfig>>(
   const pkColumn = getPrimaryKeyColumn(table);
 
   const pkSqlType = pkColumn.getSQLType().toLowerCase();
+  // getSQLType() includes length modifiers, e.g. "varchar(64)"
+  const pkBaseSqlType = pkSqlType.replace(/\s*\(.*\)$/, '');
   const supportedPkSqlTypes = new Set([
     'smallint',
     'integer',
@@ -73,7 +75,7 @@ function makeConfig<TTable extends PgTableWithColumns<TableConfig>>(
     'character',
     'uuid',
   ]);
-  if (!supportedPkSqlTypes.has(pkSqlType)) {
+  if (!supportedPkSqlTypes.has(pkBaseSqlType)) {
     throw new Error(
       `Table "${getTableUniqueName(table)}" primary key "${pkColumn.name}" has unsupported SQL type "${pkSqlType}". Supported types: ${Array.from(
         supportedPkSqlTypes,
