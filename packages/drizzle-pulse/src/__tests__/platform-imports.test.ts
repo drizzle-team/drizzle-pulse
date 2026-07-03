@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { existsSync, readFileSync } from 'node:fs';
+import { builtinModules } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import ts from 'typescript';
 
@@ -17,30 +18,9 @@ const ENTRY_POINTS = [
   join(SRC_ROOT, 'index.ts'),
 ];
 
-const NODE_BUILTINS = new Set([
-  'assert',
-  'buffer',
-  'child_process',
-  'cluster',
-  'crypto',
-  'dns',
-  'events',
-  'fs',
-  'http',
-  'https',
-  'net',
-  'os',
-  'path',
-  'process',
-  'querystring',
-  'readline',
-  'stream',
-  'tls',
-  'url',
-  'util',
-  'worker_threads',
-  'zlib',
-]);
+// Covers every bare (non-`node:`-prefixed) builtin specifier, including subpaths
+// like `fs/promises`; `node:`-prefixed specifiers are caught separately below.
+const NODE_BUILTINS = new Set(builtinModules);
 
 function bannedReason(specifier: string): string | null {
   if (specifier.startsWith('.') || specifier.startsWith('/')) return null;
