@@ -4,10 +4,18 @@ import type {
   PullResponse as ProtocolPullResponse,
   SubscribeResponse as ProtocolSubscribeResponse,
 } from '../shared/protocol-types.js';
+import type { PulseEvent } from '../shared/pulse-events.js';
 import { PulseMergeCore } from '../shared/pulse-merge-core.js';
 import type { QueryDescriptor } from '../types.js';
 import type { PullClient } from './create-client.js';
 import { deserializeResponse } from './superjson.js';
+
+export type {
+  PulseDeleteEvent,
+  PulseEvent,
+  PulseInsertEvent,
+  PulseUpdateEvent,
+} from '../shared/pulse-events.js';
 
 export interface PulseQueryState<TResult> {
   data: readonly TResult[];
@@ -20,33 +28,6 @@ export interface PulseQueryState<TResult> {
 export type CreatePulseQueryOptions<TResult extends Record<string, unknown> & { $pk: unknown }> = {
   onStateChange?: (state: PulseQueryState<TResult>) => void;
 };
-
-export type PulseInsertEvent<TResult> = {
-  op: 'insert';
-  row: TResult;
-  pk: unknown;
-};
-
-export type PulseUpdateEvent<TResult> = {
-  op: 'update';
-  row: TResult;
-  old_row: Record<string, unknown>;
-  pk: unknown;
-  matchesNew: boolean;
-  matchesOld: boolean;
-};
-
-export type PulseDeleteEvent = {
-  op: 'delete';
-  old_row: Record<string, unknown>;
-  pk: unknown;
-  matchesOld: boolean;
-};
-
-export type PulseEvent<TResult> =
-  | PulseInsertEvent<TResult>
-  | PulseUpdateEvent<TResult>
-  | PulseDeleteEvent;
 
 export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown }> {
   private readonly onStateChange?: (state: PulseQueryState<TResult>) => void;
