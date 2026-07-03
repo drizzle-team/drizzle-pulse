@@ -1,5 +1,5 @@
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
-import type { PullClient } from './client/create-client';
+import type { PullClient } from './client/create-client.js';
 
 /** Column filter operators */
 export type ColumnOperators<V> = {
