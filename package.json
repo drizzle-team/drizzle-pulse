@@ -15,7 +15,8 @@
     "lint": "bunx --bun biome lint --write .",
     "format": "bunx --bun biome format --write .",
     "ci:lint": "bunx --bun biome ci .",
-    "check": "bun run ci:lint"
+    "check": "bun run ci:lint",
+    "verify:publish": "bun run build && bun run --filter drizzle-pulse verify:publish"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.4"
