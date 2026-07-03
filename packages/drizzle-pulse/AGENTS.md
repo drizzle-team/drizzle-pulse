@@ -74,8 +74,11 @@ React:
 ```ts
 // drizzle-pulse (root)
 QueryDescriptor
-type ColumnOperators, ResolvedPulseQuery, RealtimeEvent, WhereClause, WhereCondition
-type SubscribeRequest, SubscribeResponse, PullRequest, PullResponse, LoadMoreRequest, LoadMoreResponse
+type ColumnOperators, ResolvedPulseQuery, WhereClause, WhereCondition
+type RealtimeEvent, RealtimeInsertEvent, RealtimeUpdateEvent, RealtimeDeleteEvent
+type SubscribeRequest, SubscribeResponse, PullRequest, PullSubscriptionRequest
+type PullResponse, PullIncrementalResponse, PullResetResponse, PullResponseError, PullResponseErrorResult
+type LoadMoreRequest, LoadMoreResponse
 
 // drizzle-pulse/client
 createPulseClient
