@@ -13,6 +13,10 @@ Type-safe realtime SDK shared by server, client, React, and embedded layers.
 
 `drizzle-pulse` — workspace package with built `dist/` exports.
 
+## Dependencies
+
+`pg`, `pg-logical-replication`, and `hono` are hard `dependencies` even though only the `./server` entrypoint imports them. Client-only consumers (`./client`, `./client/react`, `./client/embedded` type surface) therefore install them but never bundle them — nothing on a client value-import path references them (enforced by the platform-imports purity test). Making them optional peer dependencies (as done for `react`) would slim client installs but changes consumer install semantics; that decision is deliberately deferred to the publish-readiness pass and must not be made silently.
+
 ## Source Layout
 
 | Path | Purpose |
