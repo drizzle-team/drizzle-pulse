@@ -373,7 +373,12 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       }
 
       this.log(`[WAL Listener] Subscribing to slot '${this.config.wal.slotName}'`);
-      await replicationService.subscribe(plugin, this.config.wal.slotName);
+      const streaming = replicationService.subscribe(plugin, this.config.wal.slotName);
+      await Promise.race([
+        new Promise((resolve) => replicationService.once('start', resolve)),
+        streaming, // settles first only on immediate failure → propagates the error
+      ]);
+      void streaming.catch(() => {}); // stream-end errors already handled via the 'error' listener
     } catch (error) {
       this.error('[WAL Listener] Connection error:', error);
       await this.handleDisconnect(this.replicationService);
