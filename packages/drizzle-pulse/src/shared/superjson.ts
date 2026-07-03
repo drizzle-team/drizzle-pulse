@@ -19,6 +19,10 @@ function ensureBufferSupport() {
   isBufferRegistered = true;
 }
 
-ensureBufferSupport();
+// Buffer is a Node-only global; skip registration in browsers so importing this
+// module (reachable from the platform-agnostic client entrypoints) never throws.
+if (typeof Buffer !== 'undefined') {
+  ensureBufferSupport();
+}
 
 export { SuperJSON };
