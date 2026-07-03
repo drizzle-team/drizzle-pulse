@@ -206,8 +206,20 @@ describe('platform-agnostic entrypoint import purity', () => {
     const { visited, violations } = walkImportGraph(ENTRY_POINTS);
 
     // Sanity check: the traversal must actually walk a real subgraph, not just the
-    // two entry files, or this test would pass vacuously.
-    expect(visited.length).toBeGreaterThan(5);
+    // four entry files, or this test would pass vacuously. Assert one known-reachable
+    // module per layer (client, react, shared, and — via embedded — server) so a
+    // partially broken traversal can't hide behind a raw count.
+    expect(visited.length).toBeGreaterThan(10);
+    const KNOWN_REACHABLE = [
+      join(SRC_ROOT, 'client/pulse-query.ts'),
+      join(SRC_ROOT, 'client/react/use-pulse-query.ts'),
+      join(SRC_ROOT, 'shared/pulse-merge-core.ts'),
+      join(SRC_ROOT, 'shared/superjson.ts'),
+      join(SRC_ROOT, 'server/pulse-sql.ts'),
+    ];
+    for (const file of KNOWN_REACHABLE) {
+      expect(visited).toContain(file);
+    }
 
     if (violations.length > 0) {
       const report = violations
