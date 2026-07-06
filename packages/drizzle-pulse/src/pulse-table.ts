@@ -74,10 +74,13 @@ export class PulseTable<TTable extends PgTable = PgTable> {
   /**
    * `ctx.args` is typed `any` here (not `Record<never, never>`) so the user-canonical
    * spelling `pulse(t).query(({ args }) => ...)` can read args before `.args()` has
-   * seeded a schema anywhere in the chain. This is runtime-safe because args are
-   * schema-parsed at `resolve()` time; callers who want a fully-typed `ctx.args` use
-   * `pulse(t).query().args(schema).query(fn)` instead, where the builder-level
-   * `.query()` sees the real `TArgs` generic.
+   * seeded a schema anywhere in the chain. This is runtime-safe ONLY if a schema is
+   * later chained via `.args()` — `resolve()` schema-parses args when an `argsSchema`
+   * is present, but otherwise substitutes an empty object rather than passing raw
+   * client input through, so `ctx.args` is safe to read but will always be `{}` for a
+   * query that never chains `.args(schema)`. Callers who want a fully-typed, non-empty
+   * `ctx.args` use `pulse(t).query().args(schema).query(fn)` instead, where the
+   * builder-level `.query()` sees the real `TArgs` generic.
    */
   query(
     fn?: (

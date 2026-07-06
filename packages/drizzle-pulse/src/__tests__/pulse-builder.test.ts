@@ -243,4 +243,39 @@ describe('createPulseRegistry — derived-queries-only contract (D-04, D-06)', (
     expect(Object.keys(query.selectedColumns).length).toBe(4);
     expect(query.order).toBe('asc');
   });
+
+  test('resolve() substitutes an empty object for args on a schemaless query — client-supplied operator payloads never reach queryFn (CR-03)', () => {
+    // Collection-level spelling: no `.args()` is ever chained, matching the pattern
+    // pulse-table.ts's doc-comment describes and the one CR-03 flagged as unsafe.
+    const registry = createPulseRegistry({
+      ordersByTenant: pulse(testTable).query((ctx) => ctx.query({ status: ctx.args.status })),
+    });
+
+    // Attacker-controlled JSON straight off an HTTP body, shaped as an operator
+    // object rather than a plain value — pre-fix this reached `ctx.args` verbatim and
+    // widened the filter (`{ status: { isNotNull: true } }` matches every row).
+    const maliciousRawArgs = { status: { isNotNull: true } };
+    const query = registry.resolve('ordersByTenant', maliciousRawArgs, { userId: null });
+
+    // The queryFn read `ctx.args.status`, which must be undefined (args resolved to
+    // `{}`), so the resulting where clause carries no filter value at all — never the
+    // attacker's operator object.
+    expect(query.where).toEqual({ status: undefined });
+  });
+
+  test('resolve() still validates and forwards args when .args(schema) is chained', () => {
+    const registry = createPulseRegistry({
+      ordersByStatus: pulse(testTable)
+        .query()
+        .args(z.object({ status: z.string() }))
+        .query((ctx) => ctx.query({ status: ctx.args.status })),
+    });
+
+    const query = registry.resolve('ordersByStatus', { status: 'active' }, { userId: null });
+    expect(query.where).toEqual({ status: 'active' });
+
+    expect(() =>
+      registry.resolve('ordersByStatus', { status: { isNotNull: true } }, { userId: null }),
+    ).toThrow();
+  });
 });

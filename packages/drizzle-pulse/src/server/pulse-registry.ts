@@ -122,9 +122,11 @@ export class PulseRegistry<TQueries extends AnyPulseBuilders> {
   resolve(name: string, rawArgs: unknown, auth: PulseAuthContext): ResolvedPulseQuery {
     const registryQuery = this.pulseQueries[name];
     if (!registryQuery) throw new Error(`Unknown query: "${name}"`);
-    const args = registryQuery.argsSchema
-      ? registryQuery.argsSchema.parse(rawArgs)
-      : (rawArgs ?? {});
+    // Never pass raw client input through as `args` when no schema was ever seeded via
+    // `.args()` — a queryFn that reads `ctx.args` without declaring a schema would
+    // otherwise let attacker-controlled JSON reach buildColumnFilterPredicate as
+    // operator-shaped filters (CR-03). Queries that need args MUST chain `.args(schema)`.
+    const args = registryQuery.argsSchema ? registryQuery.argsSchema.parse(rawArgs) : {};
     const where =
       registryQuery.queryFn?.({
         query: (clause: WhereClause) => clause,

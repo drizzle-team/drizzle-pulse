@@ -91,6 +91,7 @@ The root entrypoint owns the collection: `pulse(table)` wraps a Drizzle table in
 Derive queries from collections outside the schema file, register them, and expose a WAL-fed runtime that serves subscribe/pull requests.
 
 - `PulseBuilder` — fluent builder returned by `.query()`: `.columns()`, `.args(zodSchema)`, `.query(ctx => WhereClause)`, `.order()`, `.limit()`, `.transform()`
+- Queries that read `ctx.args` in their `queryFn` MUST chain `.args(zodSchema)` first. Without a schema, `ctx.args` is always `{}` at runtime (the registry never forwards unvalidated client input as args) — reading `ctx.args` on a schemaless query silently sees no fields rather than attacker-controlled data.
 - `createPulseRegistry(queries)` — collects builders into a `PulseRegistry`; rejects a bare `PulseTable` (queries must be derived via `.query()` first)
 - `expose(registry, config)` — returns a `RealtimeRuntime`; call `.start()` to connect WAL, `runtime.handlers.{subscribe,pull,loadMore}` to serve requests
 - `RealtimeRuntime` — WAL listener + request handlers; `.start()` / `.stop()`
