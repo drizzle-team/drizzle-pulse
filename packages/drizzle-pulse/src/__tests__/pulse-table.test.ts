@@ -1,5 +1,13 @@
 import { describe, expect, test } from 'bun:test';
-import { boolean, integer, pgSchema, serial, text, varchar } from 'drizzle-orm/pg-core';
+import {
+  boolean,
+  integer,
+  pgSchema,
+  serial,
+  smallserial,
+  text,
+  varchar,
+} from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import { getPulseTableConfig, isPulseTable, PulseTable, pulse } from '../pulse-table.js';
 import { PulseBuilder } from '../server/pulse-builder.js';
@@ -28,6 +36,11 @@ const unsupportedPkTable = testSchema.table('unsupported_pk_items', {
 
 const varcharPkTable = testSchema.table('varchar_pk_items', {
   code: varchar('code', { length: 64 }).primaryKey(),
+  name: text('name').notNull(),
+});
+
+const smallSerialPkTable = testSchema.table('smallserial_pk_items', {
+  id: smallserial('id').primaryKey(),
   name: text('name').notNull(),
 });
 
@@ -83,6 +96,11 @@ describe('pulse() construct-unconditionally + lazy .query()-time PK validation',
 
   test('.query() on the varchar(64)-PK table succeeds (length-modifier stripping)', () => {
     const entity = pulse(varcharPkTable);
+    expect(() => entity.query()).not.toThrow();
+  });
+
+  test('.query() on the smallserial-PK table succeeds', () => {
+    const entity = pulse(smallSerialPkTable);
     expect(() => entity.query()).not.toThrow();
   });
 });

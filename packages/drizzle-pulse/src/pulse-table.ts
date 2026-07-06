@@ -19,6 +19,7 @@ const SUPPORTED_PK_SQL_TYPES = new Set([
   'smallint',
   'integer',
   'bigint',
+  'smallserial',
   'serial',
   'bigserial',
   'text',
