@@ -8,7 +8,16 @@ import type {
   WhereClause,
 } from '../types.js';
 import type { PulseBuilder } from './pulse-builder.js';
-import { applyColumnFilter, type PulseClientContract } from './pulse-types.js';
+import type { PulseClientContract } from './pulse-types.js';
+
+// Re-exported for handlers.ts (server-only) — the implementations live in
+// pulse-projection.ts, which the embedded client entrypoint value-imports directly, so
+// that module (unlike this one) must stay free of drizzle-orm/pg-core value imports.
+export {
+  addPrimaryKey,
+  applyProjectionPipeline,
+  applyResponsePipeline,
+} from './pulse-projection.js';
 
 export type AnyPulseBuilder = PulseBuilder<
   PgTable,
@@ -23,10 +32,6 @@ type BuiltQuery = {
   pulseQuery: PulseRegistryQuery;
   sourceTable: PgTable;
 };
-
-function getQualifiedTableName(table: PgTable) {
-  return getTableUniqueName(table);
-}
 
 // Defensive re-check (D-06): `PulseTable.query()` only sees inline `.primaryKey()` columns
 // (a pure module can't value-import `getTableConfig`). Registries can receive a hand-built
@@ -73,35 +78,6 @@ function buildPulseQuery(query: AnyPulseBuilder) {
     pulseQuery,
     sourceTable,
   };
-}
-
-export function addPrimaryKey(row: Record<string, unknown>, pulseQuery: ResolvedPulseQuery) {
-  const pkValue = row[pulseQuery.pkColumn.name];
-  if (pkValue === undefined) {
-    throw new Error(
-      `Primary key column "${pulseQuery.pkColumn.name}" on "${getQualifiedTableName(pulseQuery.table)}" is missing`,
-    );
-  }
-
-  return { ...row, $pk: pkValue };
-}
-
-export async function applyResponsePipeline(
-  rows: Record<string, unknown>[],
-  pulseQuery: ResolvedPulseQuery,
-) {
-  const transformedRows = await pulseQuery.transformRows(rows);
-  return applyProjectionPipeline(transformedRows, pulseQuery);
-}
-
-// Synchronous projection helper for the embedded path — skips async transformRows.
-export function applyProjectionPipeline(
-  rows: Record<string, unknown>[],
-  pulseQuery: Pick<ResolvedPulseQuery, 'pkColumn' | 'selectedColumns' | 'table'>,
-): Record<string, unknown>[] {
-  return rows
-    .map((row) => addPrimaryKey(row, pulseQuery as ResolvedPulseQuery))
-    .map((row) => applyColumnFilter(row, pulseQuery.selectedColumns));
 }
 
 export class PulseRegistry<TQueries extends AnyPulseBuilders> {

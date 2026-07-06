@@ -402,9 +402,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
 
     if (failures.length > 0) {
       throw new Error(
-        ['expose() startup guard failed:', ...failures.map((failure) => `- ${failure}`)].join(
-          '\n',
-        ),
+        ['expose() startup guard failed:', ...failures.map((failure) => `- ${failure}`)].join('\n'),
       );
     }
   }

@@ -2,19 +2,18 @@ import { expectTypeOf } from 'bun:test';
 import { createPulseClient } from '../src/client/index.js';
 import type { UsePulseQueryResult, usePulseQuery } from '../src/client/react/index.js';
 import type { usePulseQuery as usePulseQueryFromReact } from '../src/client/react/use-pulse-query.js';
-import type { QueryDescriptor } from '../src/index.js';
-import { createPulse } from '../src/server/pulse.js';
+import { pulse, type QueryDescriptor } from '../src/index.js';
 import { createPulseRegistry } from '../src/server/pulse-registry.js';
 import type { WithPk } from '../src/server/pulse-types.js';
 import { orders, statusSchema } from './fixtures.js';
 
-const pulse = createPulse();
 const registry = createPulseRegistry({
   ordersByStatus: pulse(orders)
+    .query()
     .columns({ id: true, status: true })
     .args(statusSchema)
     .query((ctx) => ctx.query({ status: ctx.args.status })),
-  allOrders: pulse(orders),
+  allOrders: pulse(orders).query(),
 });
 
 type Client = typeof registry.$client;
