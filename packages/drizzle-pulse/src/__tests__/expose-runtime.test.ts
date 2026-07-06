@@ -39,6 +39,48 @@ describe('connection-string handling (WR-03)', () => {
   });
 });
 
+describe('start() failure rolls back to a restartable state (WR-04)', () => {
+  test('a throw after the guard resets _isRunning and tears down the pool instead of leaving a zombie', async () => {
+    const runtime = makeRuntime('postgresql://user:pass@localhost/test') as any;
+
+    let poolEnded = 0;
+    runtime.initializeDatabaseServices();
+    const firstPool = runtime.pool;
+    firstPool.end = async () => {
+      poolEnded++;
+    };
+
+    runtime.runStartupGuard = async () => {};
+    runtime.ensureBaselines = async () => {
+      throw new Error('sourceDb briefly unavailable');
+    };
+
+    await expect(runtime.start()).rejects.toThrow('sourceDb briefly unavailable');
+
+    expect(runtime._isRunning).toBe(false);
+    expect(runtime.pool).toBeNull();
+    expect(runtime.realtimeService).toBeNull();
+    expect(poolEnded).toBe(1);
+
+    // A retry must not hit the "Already running" early return and silently no-op — it
+    // must re-attempt the guard and baseline steps.
+    let secondAttemptRan = false;
+    runtime.runStartupGuard = async () => {};
+    runtime.ensureBaselines = async () => {
+      secondAttemptRan = true;
+    };
+    runtime.getRealtimeService = () => ({
+      getLatestSnapshot: async () => 0,
+    });
+    runtime.connectReplication = async () => {};
+
+    await runtime.start();
+
+    expect(secondAttemptRan).toBe(true);
+    expect(runtime._isRunning).toBe(true);
+  });
+});
+
 describe('type-parser scoping (WR-05)', () => {
   test('pgConfig/pgPoolConfig scope raw-text OIDs to this runtime only, not the global pg registry', () => {
     const runtime = makeRuntime('postgresql://user:pass@localhost/test') as any;

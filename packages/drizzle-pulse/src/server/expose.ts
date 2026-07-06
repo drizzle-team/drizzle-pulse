@@ -276,18 +276,24 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       throw error;
     }
 
-    this._isRunning = true;
-    await this.ensureBaselines();
+    try {
+      this._isRunning = true;
+      await this.ensureBaselines();
 
-    let maxSnapshot = 0;
-    const service = this.getRealtimeService();
-    for (const meta of this.sourceTableMetadata.values()) {
-      const snap = await service.getLatestSnapshot(meta.eventsTable);
-      maxSnapshot = Math.max(maxSnapshot, snap);
+      let maxSnapshot = 0;
+      const service = this.getRealtimeService();
+      for (const meta of this.sourceTableMetadata.values()) {
+        const snap = await service.getLatestSnapshot(meta.eventsTable);
+        maxSnapshot = Math.max(maxSnapshot, snap);
+      }
+      this._lastPersistedSnapshot = maxSnapshot;
+
+      await this.connectReplication();
+    } catch (error) {
+      this._isRunning = false;
+      await this.teardownFailedStart();
+      throw error;
     }
-    this._lastPersistedSnapshot = maxSnapshot;
-
-    await this.connectReplication();
   }
 
   async stop(): Promise<void> {
