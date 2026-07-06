@@ -12,30 +12,17 @@ import { createWalRowNormalizer } from './wal-normalization.js';
 
 type RuntimeLifecycleListener = () => void;
 
-// OIDs forced to raw PG text so the WAL normalizer can feed Drizzle's from-text codecs:
+// OIDs forced to raw PG text so Drizzle's from-text codecs receive text everywhere:
 // date/timestamp/timestamptz/interval, plus point (600) — the one geometric type pg-types
-// parses into an object ({x,y}), which can't feed the point:tuple codec. Drizzle's own
-// SELECTs cast these to text regardless, so this only shapes the replication decode path.
+// parses into an object ({x,y}), which can't feed the point:tuple codec. This mutation
+// must stay process-global (not scoped per-pool via the `types` option): baseline reads
+// run on the app-supplied drizzle connection, whose pool this runtime does not own, and
+// without raw text there a point column decodes to {x,y} and round-trips into the events
+// table as "(undefined,undefined)". Scoping was tried and reverted for exactly that
+// failure; revisit only together with a runtime-owned baseline read path.
 const RAW_TEXT_PG_OIDS = [1082, 1114, 1184, 1186, 600] as const;
-const RAW_TEXT_PG_OID_SET = new Set<number>(RAW_TEXT_PG_OIDS);
 
-// Scoped to this runtime's own pg connections via the per-pool/per-client `types` option
-// (rather than `pg`'s shared global `types.setTypeParser` registry), so a host
-// application's own `pg` clients in the same process keep receiving parsed Date objects
-// for these OIDs instead of being silently switched to raw text.
-function createScopedTypeParser(): { getTypeParser: typeof types.getTypeParser } {
-  const getTypeParser = ((id: number, format?: 'text' | 'binary') => {
-    if (RAW_TEXT_PG_OID_SET.has(id)) {
-      return (value: string) => value;
-    }
-    return types.getTypeParser(
-      id as Parameters<typeof types.getTypeParser>[0],
-      format as Parameters<typeof types.getTypeParser>[1],
-    );
-  }) as typeof types.getTypeParser;
-
-  return { getTypeParser };
-}
+let rawTextParsersConfigured = false;
 
 export interface WalListenerConfig {
   pgConfig: ClientConfig & { replication: 'database' };
@@ -215,7 +202,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       });
     }
 
-    const pg = { connectionString: this.config.databaseUrl, types: createScopedTypeParser() };
+    const pg = { connectionString: this.config.databaseUrl };
 
     this.pgConfig = {
       ...withQuietPgOptions(pg),
@@ -282,6 +269,16 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
   }
 
   async start(): Promise<void> {
+    if (!rawTextParsersConfigured) {
+      for (const oid of RAW_TEXT_PG_OIDS) {
+        // @types/pg's TypeId union omits some builtin OIDs (e.g. point=600); the
+        // runtime accepts any numeric OID.
+        types.setTypeParser(oid as Parameters<typeof types.setTypeParser>[0], (value) => value);
+      }
+
+      rawTextParsersConfigured = true;
+    }
+
     if (this._isRunning) {
       this.log('[WAL Listener] Already running');
       return;
