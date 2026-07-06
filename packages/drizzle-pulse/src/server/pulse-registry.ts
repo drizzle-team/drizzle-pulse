@@ -1,5 +1,6 @@
-import { getColumns, getTableUniqueName } from 'drizzle-orm';
-import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
+import { getTableUniqueName } from 'drizzle-orm';
+import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
+import { getPulsePkColumn, isPulseTable } from '../pulse-table.js';
 import type {
   PulseAuthContext,
   PulseRegistryQuery,
@@ -21,76 +22,40 @@ export type AnyPulseBuilders = Record<string, AnyPulseBuilder>;
 type BuiltQuery = {
   pulseQuery: PulseRegistryQuery;
   sourceTable: PgTable;
-  eventsTable: PgTable;
 };
 
 function getQualifiedTableName(table: PgTable) {
   return getTableUniqueName(table);
 }
 
-const REQUIRED_EVENT_METADATA_COLUMNS = ['$snapshot', '$op', '$timestamp'] as const;
+// Defensive re-check (D-06): `PulseTable.query()` only sees inline `.primaryKey()` columns
+// (a pure module can't value-import `getTableConfig`). Registries can receive a hand-built
+// AnyPulseBuilder that bypassed that gate, so union inline + table-extras `primaryKey()`
+// entries by name here and reject anything resolving to more than one distinct column.
+function assertSinglePrimaryKeyName(table: PgTable): void {
+  const tableConfig = getTableConfig(table);
+  const inlinePrimaryKeyColumns = tableConfig.columns.filter((column) => column.primary);
+  const compositePrimaryKeyColumns = tableConfig.primaryKeys.flatMap(
+    (primaryKey) => primaryKey.columns,
+  );
+  const primaryKeyColumnNames = new Set(
+    [...inlinePrimaryKeyColumns, ...compositePrimaryKeyColumns].map((column) => column.name),
+  );
 
-function getColumnByName(columns: Record<string, PgColumn>, columnName: string) {
-  for (const column of Object.values(columns)) {
-    if (column.name === columnName) {
-      return column;
-    }
+  if (primaryKeyColumnNames.size > 1) {
+    throw new Error(`Table "${getTableUniqueName(table)}" has multiple primary keys`);
   }
-
-  return null;
-}
-
-function validateEventsTable(query: AnyPulseBuilder) {
-  const { config } = query;
-  const eventsTable = config.table.events;
-  if (!eventsTable) {
-    throw new Error(
-      `Query "${getQualifiedTableName(config.table.source)}" is missing .$eventsTable() linkage`,
-    );
-  }
-
-  const sourceColumns = config.columns;
-  const eventsColumns = getColumns(eventsTable);
-  const sourcePkColumn = config.pkColumn.name;
-
-  for (const requiredColumn of REQUIRED_EVENT_METADATA_COLUMNS) {
-    if (!getColumnByName(eventsColumns, requiredColumn)) {
-      throw new Error(
-        `Events table "${getQualifiedTableName(eventsTable)}" is missing required column "${requiredColumn}"`,
-      );
-    }
-  }
-
-  if (!getColumnByName(eventsColumns, sourcePkColumn)) {
-    throw new Error(
-      `Events table "${getQualifiedTableName(eventsTable)}" is missing primary key column "${sourcePkColumn}"`,
-    );
-  }
-
-  for (const sourceColumn of Object.values(sourceColumns)) {
-    if (!getColumnByName(eventsColumns, sourceColumn.name)) {
-      throw new Error(
-        `Events table "${getQualifiedTableName(eventsTable)}" is missing column "${sourceColumn.name}"`,
-      );
-    }
-
-    if (!getColumnByName(eventsColumns, `$old_${sourceColumn.name}`)) {
-      throw new Error(
-        `Events table "${getQualifiedTableName(eventsTable)}" is missing column "$old_${sourceColumn.name}"`,
-      );
-    }
-  }
-
-  return eventsTable;
 }
 
 function buildPulseQuery(query: AnyPulseBuilder) {
   const { config } = query;
-  const eventsTable = validateEventsTable(query);
+  const sourceTable = config.table.source;
+
+  assertSinglePrimaryKeyName(sourceTable);
+  getPulsePkColumn(sourceTable);
 
   const pulseQuery: PulseRegistryQuery = {
-    table: config.table.source,
-    eventsTable,
+    table: sourceTable,
     pkColumn: config.pkColumn,
     columns: config.columns,
     selectedColumns: config.selectedColumns,
@@ -106,8 +71,7 @@ function buildPulseQuery(query: AnyPulseBuilder) {
 
   return {
     pulseQuery,
-    sourceTable: config.table.source,
-    eventsTable,
+    sourceTable,
   };
 }
 
@@ -144,9 +108,16 @@ export class PulseRegistry<TQueries extends AnyPulseBuilders> {
   readonly $client!: PulseClientContract<TQueries>;
   private readonly pulseQueries: Record<string, PulseRegistryQuery>;
   private readonly sourceTables: Record<string, PgTable>;
-  private readonly eventsTables: Record<string, PgTable>;
 
   constructor(queries: TQueries) {
+    for (const [name, query] of Object.entries(queries)) {
+      if (isPulseTable(query)) {
+        throw new Error(
+          `Query "${name}" is a bare collection — call \`.query()\` on it first to derive a query (e.g. pulse(table).query())`,
+        );
+      }
+    }
+
     const builtEntries = Object.entries(queries).map<[string, BuiltQuery]>(([name, query]) => [
       name,
       buildPulseQuery(query),
@@ -158,9 +129,6 @@ export class PulseRegistry<TQueries extends AnyPulseBuilders> {
     this.sourceTables = Object.fromEntries(
       builtEntries.map(([name, built]) => [name, built.sourceTable]),
     );
-    this.eventsTables = Object.fromEntries(
-      builtEntries.map(([name, built]) => [name, built.eventsTable]),
-    );
   }
 
   getPulseQuery(name: string) {
@@ -169,10 +137,6 @@ export class PulseRegistry<TQueries extends AnyPulseBuilders> {
 
   getSourceTable(name: string) {
     return this.sourceTables[name] ?? null;
-  }
-
-  getEventsTable(name: string) {
-    return this.eventsTables[name] ?? null;
   }
 
   getQueryNames() {
@@ -193,7 +157,6 @@ export class PulseRegistry<TQueries extends AnyPulseBuilders> {
       }) ?? null;
     return {
       table: registryQuery.table,
-      eventsTable: registryQuery.eventsTable,
       pkColumn: registryQuery.pkColumn,
       columns: registryQuery.columns,
       selectedColumns: registryQuery.selectedColumns,

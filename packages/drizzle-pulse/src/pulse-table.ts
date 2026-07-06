@@ -104,7 +104,6 @@ export class PulseTable<TTable extends PgTable = PgTable> {
     > = {
       table: {
         source: this.table,
-        events: null,
       },
       pkColumn,
       columns,
