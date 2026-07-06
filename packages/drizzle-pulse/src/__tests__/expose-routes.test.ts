@@ -8,11 +8,13 @@ import { pulse } from '../pulse-table.js';
 import { resolveEventsTable } from '../server/events-table-resolver.js';
 import { RealtimeRequestHandler } from '../server/handlers.js';
 import type { PulseAuthContext } from '../server/index.js';
+import type { AnyPulseBuilders, PulseRegistry } from '../server/pulse-registry.js';
 import { createPulseRegistry } from '../server/pulse-registry.js';
 import type { RealtimeService } from '../server/realtime-store.js';
 import { SubscriptionManager } from '../server/realtime-store.js';
 import { serializeResponse } from '../server/superjson-utils.js';
 import type {
+  LoadMoreResponse,
   PullResponse,
   PullResponseErrorResult,
   SubscribeResponse,
@@ -22,6 +24,13 @@ const ordersTable = pgTable('orders', {
   id: serial('id').primaryKey(),
   status: text('status').notNull(),
   price: integer('price'),
+});
+
+// PK whose JS property key ("orderId") differs from its SQL column name ("order_id") —
+// idiomatic drizzle, and the exact shape CR-02 reproduced a 500 against.
+const mismatchedPkTable = pgTable('mismatched_pk_orders', {
+  orderId: serial('order_id').primaryKey(),
+  status: text('status').notNull(),
 });
 
 const QUERY_DATA = {
@@ -42,6 +51,7 @@ type MockDynamicQuery = Promise<Record<string, unknown>[]> & {
 };
 
 type SubscribeResponseBody = SubscribeResponse<Record<string, unknown>>;
+type LoadMoreResponseBody = LoadMoreResponse<Record<string, unknown>>;
 type PullResponseBody = {
   results?: Record<
     string,
@@ -73,6 +83,12 @@ function createRegistry() {
       .order('asc')
       .limit(2)
       .query((ctx) => ctx.query({ status: ctx.args.status })),
+  });
+}
+
+function createMismatchedPkRegistry() {
+  return createPulseRegistry({
+    mismatchedOrders: pulse(mismatchedPkTable).query().order('asc').limit(1),
   });
 }
 
@@ -168,8 +184,11 @@ function createRouterHarness(params?: {
   sourceRows?: Record<string, unknown>[][];
   latestSnapshot?: number;
   events?: Record<string, unknown>[];
+  registry?: PulseRegistry<AnyPulseBuilders>;
+  eventsTable?: Parameters<typeof resolveEventsTable>[0];
 }) {
-  const registry = createRegistry();
+  const registry = params?.registry ?? createRegistry();
+  const eventsSourceTable = params?.eventsTable ?? ordersTable;
   const subscriptionManager = new SubscriptionManager();
   const sourceDb = createMockSourceDb(params?.sourceRows ?? [[]]);
   const pulseSourceDb = createPulseSourceDbMock(() => sourceDb.takeRows());
@@ -182,7 +201,7 @@ function createRouterHarness(params?: {
     pulseSourceDb,
     subscriptionManager,
     () => realtimeService,
-    () => resolveEventsTable(ordersTable),
+    () => resolveEventsTable(eventsSourceTable),
   );
 
   const router = new Hono();
@@ -385,6 +404,67 @@ describe('expose routes request validation', () => {
 
     expect(response.status).toBe(400);
     expect(body.error).toBe('invalid_cursor');
+  });
+});
+
+// PK JS property key vs SQL column name (CR-02): baseline SELECT rows are keyed by JS
+// property name (drizzle's `db.select(...)` shape), but every one of these pipeline
+// sites used to index by the PK's SQL name instead, 500ing on any table where the two
+// diverge (e.g. `orderId: serial('order_id')`).
+describe('subscribe/loadMore with a PK whose JS key differs from its SQL name (CR-02)', () => {
+  test('subscribe resolves non-null ranges using the PK JS query key, not its SQL name', async () => {
+    const { router, clientId } = createRouterHarness({
+      registry: createMismatchedPkRegistry(),
+      eventsTable: mismatchedPkTable,
+      sourceRows: [[{ orderId: 101, status: 'requested' }]],
+      latestSnapshot: 2,
+    });
+
+    const response = await router.request('/subscribe', {
+      method: 'POST',
+      body: JSON.stringify({ clientId, queryName: 'mismatchedOrders' }),
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const body = await decodeBody<SubscribeResponseBody>(response);
+
+    expect(response.status).toBe(200);
+    expect(body.rangeStart).toBe(101);
+    expect(body.rangeEnd).toBe(101);
+    expect(body.rows[0]).toHaveProperty('$pk', 101);
+  });
+
+  test('load-more succeeds (not a 500) and advances the range using the PK JS query key', async () => {
+    const { router, clientId } = createRouterHarness({
+      registry: createMismatchedPkRegistry(),
+      eventsTable: mismatchedPkTable,
+      sourceRows: [
+        [{ orderId: 101, status: 'requested' }],
+        [{ orderId: 102, status: 'requested' }],
+      ],
+      latestSnapshot: 2,
+    });
+
+    const subscribe = await router.request('/subscribe', {
+      method: 'POST',
+      body: JSON.stringify({ clientId, queryName: 'mismatchedOrders' }),
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const subscribeBody = await decodeBody<SubscribeResponseBody>(subscribe);
+
+    const response = await router.request('/load-more', {
+      method: 'POST',
+      body: JSON.stringify({
+        clientId,
+        subscriptionId: subscribeBody.subscriptionId,
+        cursor: 101,
+      }),
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const body = await decodeBody<LoadMoreResponseBody>(response);
+
+    expect(response.status).toBe(200);
+    expect(body.rangeEnd).toBe(102);
+    expect(body.rows[0]).toHaveProperty('$pk', 102);
   });
 });
 

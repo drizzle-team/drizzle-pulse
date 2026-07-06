@@ -102,8 +102,11 @@ export class RealtimeRequestHandler {
       const rows =
         pageLimit !== undefined && hasMore ? fetchedRows.slice(0, pageLimit) : fetchedRows;
 
-      const rawRangeStart = rows[0]?.[resolvedQuery.pkColumn.name] ?? null;
-      const rawRangeEnd = rows[rows.length - 1]?.[resolvedQuery.pkColumn.name] ?? null;
+      // Rows here are SELECT-shaped (keyed by JS property name), not events/WAL-shaped
+      // (keyed by SQL name) — index by the PK's JS query key, not pkColumn.name (CR-02).
+      const pkQueryKey = this.getPkQueryKey(resolvedQuery);
+      const rawRangeStart = rows[0]?.[pkQueryKey] ?? null;
+      const rawRangeEnd = rows[rows.length - 1]?.[pkQueryKey] ?? null;
       let rangeStart = isPkComparable(rawRangeStart) ? rawRangeStart : null;
       let rangeEnd = isPkComparable(rawRangeEnd) ? rawRangeEnd : null;
       if (resolvedQuery.order === 'desc') {
@@ -176,8 +179,10 @@ export class RealtimeRequestHandler {
         return { status: 400, body: { error: 'invalid_cursor' } };
       }
 
+      // WhereClause keys are matched against query.columns (JS property names), not SQL
+      // names — use the PK's JS query key here, not pkColumn.name (CR-02).
       const cursorCondition: WhereClause = {
-        [subscription.query.pkColumn.name]:
+        [this.getPkQueryKey(subscription.query)]:
           subscription.query.order === 'asc' ? { gt: cursor } : { lt: cursor },
       };
       const cursorWhere: WhereClause = subscription.query.where
@@ -199,8 +204,11 @@ export class RealtimeRequestHandler {
       const hasMore = pageLimit !== undefined ? rows.length > pageLimit : false;
       const fetchedRows = pageLimit !== undefined && hasMore ? rows.slice(0, pageLimit) : rows;
 
+      // fetchedRows are SELECT-shaped (JS property keys) — index by the PK's JS query key,
+      // not pkColumn.name (CR-02).
+      const pkRowKey = this.getPkQueryKey(subscription.query);
       const ids = fetchedRows
-        .map((row) => row[subscription.query.pkColumn.name])
+        .map((row) => row[pkRowKey])
         .filter((pk) => pk !== undefined)
         .filter(isPkComparable);
       let newRangeStart: unknown | null = null;
@@ -334,6 +342,14 @@ export class RealtimeRequestHandler {
     return rawClientId && rawClientId.length > 0 ? rawClientId : crypto.randomUUID();
   }
 
+  // Rows/WhereClauses built against SELECT-shaped data (query.columns) are keyed by the
+  // PK's JS property name, not its SQL name — the two diverge whenever a table declares
+  // e.g. `orderId: serial('order_id')` (CR-02). Falls back to pkColumn.name only for the
+  // (unreachable in practice) case where the PK isn't present in query.columns at all.
+  private getPkQueryKey(query: ResolvedPulseQuery): string {
+    return getQueryColumnKey(query.columns, query.pkColumn) ?? query.pkColumn.name;
+  }
+
   private getInternalAllowedColumnNames(query: ResolvedPulseQuery): ReadonlySet<string> {
     const pkQueryKey = getQueryColumnKey(query.columns, query.pkColumn);
     return pkQueryKey
@@ -419,7 +435,9 @@ export class RealtimeRequestHandler {
   }
 
   private buildResetWhereClause(subscription: Subscription): WhereClause | null {
-    const pkColumnName = subscription.query.pkColumn.name;
+    // WhereClause keys are matched against query.columns (JS property names) — use the
+    // PK's JS query key here, not pkColumn.name (CR-02).
+    const pkColumnName = this.getPkQueryKey(subscription.query);
     if (subscription.query.order === 'desc') {
       if (!isPkComparable(subscription.rangeStart)) {
         return subscription.query.where;

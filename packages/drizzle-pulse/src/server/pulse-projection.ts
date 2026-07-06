@@ -1,7 +1,7 @@
 import { getTableUniqueName } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import type { ResolvedPulseQuery } from '../types.js';
-import { applyColumnFilter } from './pulse-types.js';
+import { applyColumnFilter, getQueryColumnKey } from './pulse-types.js';
 
 // Kept in its own module (bare `drizzle-orm` value imports only, `drizzle-orm/pg-core`
 // type-only) because the embedded client entrypoint value-imports applyProjectionPipeline
@@ -13,7 +13,12 @@ function getQualifiedTableName(table: PgTable) {
 }
 
 export function addPrimaryKey(row: Record<string, unknown>, pulseQuery: ResolvedPulseQuery) {
-  const pkValue = row[pulseQuery.pkColumn.name];
+  // `row` is SELECT-shaped (keyed by JS property name), which diverges from the PK
+  // column's own SQL name whenever a table declares e.g. `orderId: serial('order_id')`
+  // (CR-02) — resolve the JS query key once and index by that instead.
+  const pkQueryKey =
+    getQueryColumnKey(pulseQuery.columns, pulseQuery.pkColumn) ?? pulseQuery.pkColumn.name;
+  const pkValue = row[pkQueryKey];
   if (pkValue === undefined) {
     throw new Error(
       `Primary key column "${pulseQuery.pkColumn.name}" on "${getQualifiedTableName(pulseQuery.table)}" is missing`,
@@ -34,7 +39,7 @@ export async function applyResponsePipeline(
 // Synchronous projection helper for the embedded path — skips async transformRows.
 export function applyProjectionPipeline(
   rows: Record<string, unknown>[],
-  pulseQuery: Pick<ResolvedPulseQuery, 'pkColumn' | 'selectedColumns' | 'table'>,
+  pulseQuery: Pick<ResolvedPulseQuery, 'pkColumn' | 'selectedColumns' | 'table' | 'columns'>,
 ): Record<string, unknown>[] {
   return rows
     .map((row) => addPrimaryKey(row, pulseQuery as ResolvedPulseQuery))
