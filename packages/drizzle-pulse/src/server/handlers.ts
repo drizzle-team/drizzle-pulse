@@ -84,6 +84,14 @@ export class RealtimeRequestHandler {
         return { status: 400, body: { error: message } };
       }
 
+      // Read the snapshot cursor BEFORE the baseline SELECT (matches the embedded path's
+      // startHandshake ordering): a write whose event lands between these two reads must
+      // still be covered by the cursor returned here, or it would be lost until an
+      // unrelated reset (CR-04). Duplicate replays are already idempotent client-side.
+      const snapshot = await this.getRealtimeService().getLatestSnapshot(
+        this.getEventsTable(queryName),
+      );
+
       // Fetch limit+1 so hasMore is authoritative (mirrors loadMore): a full page of
       // exactly `limit` rows must not report hasMore unless a further row exists.
       const pageLimit = typeof resolvedQuery.limit === 'number' ? resolvedQuery.limit : undefined;
@@ -127,9 +135,6 @@ export class RealtimeRequestHandler {
         rangeEnd,
         hasMore,
       });
-      const snapshot = await this.getRealtimeService().getLatestSnapshot(
-        this.getEventsTable(queryName),
-      );
       const pipelinedRows = await applyResponsePipeline(rows, resolvedQuery);
 
       const response: SubscribeResponse<Record<string, unknown>> = {

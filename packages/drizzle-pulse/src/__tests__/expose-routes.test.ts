@@ -387,3 +387,65 @@ describe('expose routes request validation', () => {
     expect(body.error).toBe('invalid_cursor');
   });
 });
+
+// The HTTP subscribe path must read the snapshot cursor BEFORE the baseline SELECT, the
+// same ordering the embedded client's startHandshake uses (client/embedded/index.ts)
+// specifically to avoid a lost-event race (CR-04): a write committed between the two
+// reads must remain covered by the returned cursor.
+describe('subscribe reads the snapshot cursor before the baseline SELECT (CR-04)', () => {
+  test('calls getLatestSnapshot() before the baseline SELECT', async () => {
+    const registry = createRegistry();
+    const subscriptionManager = new SubscriptionManager();
+    const callOrder: string[] = [];
+
+    const pulseSourceDb = {
+      select() {
+        callOrder.push('select');
+        const rows = [{ id: 101, status: 'requested', price: 20 }];
+        return {
+          from() {
+            return {
+              where() {
+                const query = Promise.resolve(rows) as unknown as {
+                  $dynamic(): typeof query;
+                  orderBy(order: unknown): typeof query;
+                  limit(limit: number): Promise<Record<string, unknown>[]>;
+                } & Promise<Record<string, unknown>[]>;
+                query.$dynamic = () => query;
+                query.orderBy = () => query;
+                query.limit = () => Promise.resolve(rows);
+                return query;
+              },
+            };
+          },
+        };
+      },
+    } as unknown as MockPulseSourceDb;
+
+    const realtimeService: Pick<RealtimeService, 'getDb' | 'getLatestSnapshot'> = {
+      getDb() {
+        throw new Error('getDb should not be called from subscribe()');
+      },
+      async getLatestSnapshot() {
+        callOrder.push('snapshot');
+        return 5;
+      },
+    };
+
+    const requestHandler = new RealtimeRequestHandler(
+      registry,
+      pulseSourceDb,
+      subscriptionManager,
+      () => realtimeService,
+      () => resolveEventsTable(ordersTable),
+    );
+
+    const result = await requestHandler.subscribe(
+      { clientId: 'client-1', queryName: QUERY_DATA.queryName, args: QUERY_DATA.args },
+      { userId: null },
+    );
+
+    expect(result.status).toBe(200);
+    expect(callOrder).toEqual(['snapshot', 'select']);
+  });
+});
