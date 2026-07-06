@@ -117,6 +117,12 @@ Lifted directly from the `pg-data-types` integration fixture
 (`packages/integration-tests/src/fixtures/pg-data-types/schema.ts`), which is the
 byte-level acceptance spec for this section:
 
+Note: the snippet below shows the *source* table with its normal JS export keys (which
+may be camelCase), but the *events* table's JS object keys are always the source
+column's **SQL name** — `resolveEventsTable` builds its `columns` record keyed by
+`sourceColumn.name`, never by the source table's JS property name. This differs from a
+normal `pgTable()` call, where the JS key and SQL name commonly diverge.
+
 ```ts
 // Source table
 id: serial('id').primaryKey(),                                    // PK, serial
@@ -124,11 +130,11 @@ smallSerialCol: smallserial('small_serial_col'),                  // non-PK, sma
 bigSerialNumberCol: bigserial('big_serial_number_col', { mode: 'number' }),
 moodCol: moodEnum('mood_col'),
 
-// Events table (new-value columns)
+// Events table (new-value columns) — JS keys are SQL names, not the source's camelCase keys
 id: integer('id').notNull(),                                      // PK stays NOT NULL, serial -> integer
-smallSerialCol: integer('small_serial_col'),                      // nullable, smallserial -> integer
-bigSerialNumberCol: bigint('big_serial_number_col', { mode: 'number' }),
-moodCol: moodEnum('mood_col'),                                    // same enum instance
+small_serial_col: integer('small_serial_col'),                    // nullable, smallserial -> integer
+big_serial_number_col: bigint('big_serial_number_col', { mode: 'number' }),
+mood_col: moodEnum('mood_col'),                                   // same enum instance
 
 // Events table ($old_ twins)
 $old_id: integer('$old_id'),

@@ -66,7 +66,7 @@ expectTypeOf(withArgsPromise).toMatchTypeOf<
 
 // No-args query: (options?) → Promise<PulseCollection<FullRow>>
 // Asserted via list()'s row shape rather than the collection type itself: PulseCollection
-// carries an @internal `_core` field (stripped from the published .d.ts by stripInternal)
+// carries an @internal `core` field (stripped from the published .d.ts by stripInternal)
 // whose private innards make different PulseCollection<T> instantiations non-comparable at
 // the source level, so a partial-shape toMatchTypeOf on the collection itself no longer
 // typechecks against source. list()'s return type has no such entanglement.

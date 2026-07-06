@@ -616,8 +616,10 @@ export class RealtimeRequestHandler {
       .select({
         // Key the projection by SQL column name (not events-table JS property name)
         // so the raw record matches extractRow's contract: rawEvent[$old_ + sourceColumn.name].
-        // getColumns() keys new-value columns by their camelCase property (driverId) while
-        // $old_ columns key as "$old_driver_id"; extractRow indexes both by SQL name.
+        // resolveEventsTable() already keys both new-value and $old_ columns by SQL name
+        // (driver_id / $old_driver_id), so eventTableColumnsBySqlName is a defensive
+        // no-op re-keying today — but callers must not rely on that and should always
+        // re-key through it rather than assuming getColumns()'s own JS keys.
         ...eventTableColumnsBySqlName,
         $matches_new: currentPredicate ? sql<boolean>`(${currentPredicate})` : sql<boolean>`true`,
         $matches_old: oldPredicate ? sql<boolean>`(${oldPredicate})` : sql<boolean>`true`,
