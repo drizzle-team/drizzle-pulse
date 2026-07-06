@@ -1,3 +1,4 @@
+export { getPulseTableConfig, isPulseTable, PulseTable, pulse } from './pulse-table.js';
 export type {
   LoadMoreRequest,
   LoadMoreResponse,
