@@ -240,7 +240,7 @@ describe('emitEventsTableDdl', () => {
 
   test('renders an $old_ twin line as nullable (no NOT NULL suffix)', () => {
     const [, createTable] = emitEventsTableDdl(sourceTable);
-    const oldIdLine = createTable.split('\n').find((line) => line.includes('"$old_id"'));
+    const oldIdLine = createTable?.split('\n').find((line) => line.includes('"$old_id"'));
     expect(oldIdLine).toBeDefined();
     expect(oldIdLine).not.toMatch(/NOT NULL/);
   });

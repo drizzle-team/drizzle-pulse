@@ -49,7 +49,9 @@ describe('pulse() / PulseTable brand and guards', () => {
 
   test('no drizzle:entityKind marker is set on PulseTable instances', () => {
     const entity = pulse(serialPkTable);
-    expect((entity as Record<symbol, unknown>)[Symbol.for('drizzle:entityKind')]).toBeUndefined();
+    expect(
+      (entity as unknown as Record<symbol, unknown>)[Symbol.for('drizzle:entityKind')],
+    ).toBeUndefined();
   });
 
   test('getPulseTableConfig() returns an object whose table is reference-equal to the input', () => {
