@@ -17,6 +17,13 @@ export type {
   SubscribeResponse,
 } from '../shared/protocol-types.js';
 export type { PulseAuthContext } from '../types.js';
+// Events-table convention (D-08/D-09)
+export { emitEventsTableDdl } from './events-table-ddl.js';
+export {
+  DEFAULT_EVENTS_SCHEMA,
+  getEventsTableName,
+  resolveEventsTable,
+} from './events-table-resolver.js';
 export type { WalListenerConfig } from './expose.js';
 export {
   type ExposeConfig,
