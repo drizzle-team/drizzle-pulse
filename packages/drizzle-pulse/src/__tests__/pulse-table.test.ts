@@ -79,9 +79,9 @@ describe('pulse() construct-unconditionally + lazy .query()-time PK validation',
     expect(() => pulse(noPkTable)).not.toThrow();
   });
 
-  test('.query() on the no-PK table throws mentioning the table name and "no primary key"', () => {
+  test('.query() on the no-PK table throws mentioning the table name and the inline-PK requirement', () => {
     const entity = pulse(noPkTable);
-    expect(() => entity.query()).toThrowError(/test\.no_pk_items.*no primary key/);
+    expect(() => entity.query()).toThrowError(/test\.no_pk_items.*has no inline \.primaryKey\(\)/);
   });
 
   test('.query() on the two-inline-PK table throws mentioning "multiple primary keys"', () => {

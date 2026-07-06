@@ -49,6 +49,18 @@ const compositePkTable = testSchema.table(
   (table) => [primaryKey({ columns: [table.leftId, table.rightId] })],
 );
 
+// PK declared via table extras, but as a SINGLE column (IN-04): assertSinglePrimaryKeyName
+// sees exactly one distinct PK column name and passes, but getPulsePkColumn only ever sees
+// inline `.primaryKey()` columns, so this table has a real PK the registry still rejects —
+// the error message must say so instead of implying the table has no PK at all.
+const singleColumnExtrasPkTable = testSchema.table(
+  'single_column_extras_items',
+  {
+    id: integer('id').notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.id] })],
+);
+
 const unsupportedPkTable = testSchema.table('unsupported_items', {
   id: boolean('id').primaryKey(),
   name: text('name').notNull(),
@@ -203,7 +215,7 @@ describe('pulse(table) — collection-first construction', () => {
   });
 
   test('pulse(table).query() rejects a table with no inline primary key', () => {
-    expect(() => pulse(compositePkTable).query()).toThrowError('has no primary key');
+    expect(() => pulse(compositePkTable).query()).toThrowError('has no inline .primaryKey()');
   });
 
   test('pulse(table).query() rejects unsupported default PK SQL types', () => {
@@ -246,6 +258,33 @@ describe('createPulseRegistry — derived-queries-only contract (D-04, D-06)', (
 
     expect(() => createPulseRegistry({ compositeQuery: builder })).toThrowError(
       'has multiple primary keys',
+    );
+  });
+
+  test('rejects a table whose true PK is a single-column primaryKey() declared in table extras, with a message naming the inline requirement (IN-04)', () => {
+    const columns = getColumns(singleColumnExtrasPkTable);
+    const config: PulseQueryConfig<
+      typeof singleColumnExtrasPkTable,
+      Record<string, boolean>,
+      Record<never, never>
+    > = {
+      table: { source: singleColumnExtrasPkTable },
+      pkColumn: columns.id,
+      columns,
+      selectedColumns: columns,
+      argsSchema: null,
+      queryFn: null,
+      transformFn: null,
+      order: null,
+      limit: null,
+    };
+    const builder = new PulseBuilder(config);
+
+    // assertSinglePrimaryKeyName passes (exactly one distinct PK column name), so this
+    // must fail at getPulsePkColumn instead — with a message that doesn't send users
+    // hunting for a nonexistent missing PK.
+    expect(() => createPulseRegistry({ singleColumnExtrasQuery: builder })).toThrowError(
+      'has no inline .primaryKey()',
     );
   });
 

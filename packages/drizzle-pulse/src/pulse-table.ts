@@ -41,7 +41,14 @@ export function getPulsePkColumn(table: PgTable): PgColumn {
   const inlinePkColumns = columns.filter((column) => column.primary);
 
   if (inlinePkColumns.length === 0) {
-    throw new Error(`Table "${getTableUniqueName(table)}" has no primary key`);
+    // This function only ever sees inline `.primaryKey()` columns (see doc comment
+    // above), so it cannot tell "genuinely no PK" apart from "PK declared via table
+    // extras' `primaryKey({ columns: [...] })`" — the latter is a real PK, just not
+    // one this pure module can see. Name both possibilities so a single-column extras
+    // declaration doesn't send users hunting for a nonexistent missing PK (IN-04).
+    throw new Error(
+      `Table "${getTableUniqueName(table)}" has no inline .primaryKey() column (composite/extras primaryKey() declarations are not supported — declare the PK inline)`,
+    );
   }
 
   if (inlinePkColumns.length > 1) {
@@ -50,7 +57,9 @@ export function getPulsePkColumn(table: PgTable): PgColumn {
 
   const [pkColumn] = inlinePkColumns;
   if (!pkColumn) {
-    throw new Error(`Table "${getTableUniqueName(table)}" has no primary key`);
+    throw new Error(
+      `Table "${getTableUniqueName(table)}" has no inline .primaryKey() column (composite/extras primaryKey() declarations are not supported — declare the PK inline)`,
+    );
   }
 
   const pkSqlType = pkColumn.getSQLType().toLowerCase();
