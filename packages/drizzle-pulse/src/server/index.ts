@@ -19,7 +19,7 @@ export type {
   UnsubscribeResponse,
 } from '../shared/protocol-types.js';
 export type { PulseAuthContext } from '../types.js';
-// Events-table convention (D-08/D-09)
+// Events-table convention
 export { emitEventsTableDdl } from './events-table-ddl.js';
 export {
   DEFAULT_EVENTS_SCHEMA,

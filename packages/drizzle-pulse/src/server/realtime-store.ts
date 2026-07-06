@@ -15,7 +15,7 @@ export interface Subscription {
   rangeStart: unknown | null;
   rangeEnd: unknown | null;
   hasMore: boolean;
-  // Updated on every successful pull() for this subscription (WR-07); the sweep below
+  // Updated on every successful pull() for this subscription; the sweep below
   // uses it to evict subscriptions abandoned by clients that never call unsubscribe
   // (e.g. a tab closed without running its cleanup) instead of accumulating forever.
   lastSeenAt: number;
@@ -91,7 +91,7 @@ export class SubscriptionManager {
 
   // Marks a subscription as recently active — called from pull() on every request that
   // resolves to a real (owned) subscription, so the sweep below only evicts subscriptions
-  // whose client has genuinely stopped polling (WR-07).
+  // whose client has genuinely stopped polling.
   touch(clientId: string, id: string, now = Date.now()): void {
     const client = this.clients.get(clientId);
     const current = client?.subscriptions.get(id);
@@ -101,7 +101,7 @@ export class SubscriptionManager {
   }
 
   // Evicts every subscription whose lastSeenAt is older than maxIdleMs, freeing memory
-  // held by clients that disconnected without calling unsubscribe (WR-07). Returns the
+  // held by clients that disconnected without calling unsubscribe. Returns the
   // number of subscriptions removed.
   sweepIdle(maxIdleMs: number, now = Date.now()): number {
     let removed = 0;

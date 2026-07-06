@@ -9,8 +9,8 @@ import { applyColumnFilter, getQueryColumnKey } from './pulse-types.js';
 // logic in pulse-registry.ts, which needs getTableConfig, is not reachable from embedded).
 export function addPrimaryKey(row: Record<string, unknown>, pulseQuery: ResolvedPulseQuery) {
   // `row` is SELECT-shaped (keyed by JS property name), which diverges from the PK
-  // column's own SQL name whenever a table declares e.g. `orderId: serial('order_id')`
-  // (CR-02) — resolve the JS query key once and index by that instead.
+  // column's own SQL name whenever a table declares e.g. `orderId: serial('order_id')` —
+  // resolve the JS query key once and index by that instead.
   const pkQueryKey =
     getQueryColumnKey(pulseQuery.columns, pulseQuery.pkColumn) ?? pulseQuery.pkColumn.name;
   const pkValue = row[pkQueryKey];

@@ -27,9 +27,9 @@ function getEnumInstance(
   return candidate && typeof candidate.enumName === 'string' ? candidate : null;
 }
 
-// Renders the column's base SQL type, quoting/schema-qualifying enum type names (WR-01)
+// Renders the column's base SQL type, quoting/schema-qualifying enum type names
 // and appending one `[]` per array dimension (`column.dimensions`) so array-typed source
-// columns (CR-01) don't lose their dimensionality in the emitted DDL.
+// columns don't lose their dimensionality in the emitted DDL.
 function renderColumnSqlType(column: PgColumn): string {
   const enumInstance = getEnumInstance(column);
   const baseType = enumInstance

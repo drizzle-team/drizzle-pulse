@@ -12,7 +12,7 @@ import type { WhereClause } from './types.js';
 
 // Global symbol registry (not a module-local Symbol()) so the brand survives duplicated
 // package copies across node_modules trees — mirrors drizzle-orm's entity.ts mechanism,
-// but pulse-owned; this is the sole recognition marker (no drizzle entity-kind tag, D-14).
+// but pulse-owned; this is the sole recognition marker (no drizzle entity-kind tag).
 const PulseTableBrand = Symbol.for('drizzle-pulse:isPulseTable');
 
 const SUPPORTED_PK_SQL_TYPES = new Set([
@@ -31,10 +31,10 @@ const SUPPORTED_PK_SQL_TYPES = new Set([
 ]);
 
 /**
- * Pure lazy PK validation (D-06): only sees inline `.primaryKey()` columns via bare
+ * Pure lazy PK validation: only sees inline `.primaryKey()` columns via bare
  * `getColumns`. Composite PKs declared via `primaryKey()` in table extras require
  * `getTableConfig` (a pg-core value import banned from this platform-pure module) —
- * that defensive check is added server-side by the registry/expose cutover (RESEARCH A3).
+ * that defensive check is added server-side by the registry/expose cutover.
  */
 export function getPulsePkColumn(table: PgTable): PgColumn {
   const columns = Object.values(getColumns(table)) as PgColumn[];
@@ -45,7 +45,7 @@ export function getPulsePkColumn(table: PgTable): PgColumn {
     // above), so it cannot tell "genuinely no PK" apart from "PK declared via table
     // extras' `primaryKey({ columns: [...] })`" — the latter is a real PK, just not
     // one this pure module can see. Name both possibilities so a single-column extras
-    // declaration doesn't send users hunting for a nonexistent missing PK (IN-04).
+    // declaration doesn't send users hunting for a nonexistent missing PK.
     throw new Error(
       `Table "${getTableUniqueName(table)}" has no inline .primaryKey() column (composite/extras primaryKey() declarations are not supported — declare the PK inline)`,
     );

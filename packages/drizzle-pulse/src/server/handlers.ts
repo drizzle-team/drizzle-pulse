@@ -90,7 +90,7 @@ export class RealtimeRequestHandler {
       // Read the snapshot cursor BEFORE the baseline SELECT (matches the embedded path's
       // startHandshake ordering): a write whose event lands between these two reads must
       // still be covered by the cursor returned here, or it would be lost until an
-      // unrelated reset (CR-04). Duplicate replays are already idempotent client-side.
+      // unrelated reset. Duplicate replays are already idempotent client-side.
       const snapshot = await this.getRealtimeService().getLatestSnapshot(
         this.getEventsTable(queryName),
       );
@@ -106,7 +106,7 @@ export class RealtimeRequestHandler {
         pageLimit !== undefined && hasMore ? fetchedRows.slice(0, pageLimit) : fetchedRows;
 
       // Rows here are SELECT-shaped (keyed by JS property name), not events/WAL-shaped
-      // (keyed by SQL name) — index by the PK's JS query key, not pkColumn.name (CR-02).
+      // (keyed by SQL name) — index by the PK's JS query key, not pkColumn.name.
       const pkQueryKey = this.getPkQueryKey(resolvedQuery);
       const rawRangeStart = rows[0]?.[pkQueryKey] ?? null;
       const rawRangeEnd = rows[rows.length - 1]?.[pkQueryKey] ?? null;
@@ -123,7 +123,7 @@ export class RealtimeRequestHandler {
       // AND refuse to reuse the disputed subscriptionId for creation — reusing it would
       // still silently overwrite the victim's entry in the store under the same key
       // (SubscriptionManager.create() unconditionally .set()s), so this falls all the
-      // way through to the final branch, which mints a genuinely fresh random id (WR-06).
+      // way through to the final branch, which mints a genuinely fresh random id.
       const ownershipMismatch = subscription !== null && subscription.auth.userId !== auth.userId;
       if (ownershipMismatch) {
         subscription = null;
@@ -194,7 +194,7 @@ export class RealtimeRequestHandler {
       }
 
       // WhereClause keys are matched against query.columns (JS property names), not SQL
-      // names — use the PK's JS query key here, not pkColumn.name (CR-02).
+      // names — use the PK's JS query key here, not pkColumn.name.
       const cursorCondition: WhereClause = {
         [this.getPkQueryKey(subscription.query)]:
           subscription.query.order === 'asc' ? { gt: cursor } : { lt: cursor },
@@ -219,7 +219,7 @@ export class RealtimeRequestHandler {
       const fetchedRows = pageLimit !== undefined && hasMore ? rows.slice(0, pageLimit) : rows;
 
       // fetchedRows are SELECT-shaped (JS property keys) — index by the PK's JS query key,
-      // not pkColumn.name (CR-02).
+      // not pkColumn.name.
       const pkRowKey = this.getPkQueryKey(subscription.query);
       const ids = fetchedRows
         .map((row) => row[pkRowKey])
@@ -269,7 +269,7 @@ export class RealtimeRequestHandler {
     }
   }
 
-  // Explicit teardown counterpart to subscribe() (WR-07): without this, the only way a
+  // Explicit teardown counterpart to subscribe(): without this, the only way a
   // subscription is ever removed from the store is the idle sweep in pull(), so a client
   // that unmounts cleanly should proactively free its slot rather than waiting it out.
   async unsubscribe(
@@ -337,7 +337,7 @@ export class RealtimeRequestHandler {
 
         // A subscription only stays alive as long as its client keeps pulling — this is
         // the sole activity signal the idle sweep (SubscriptionManager.sweepIdle) uses
-        // to evict abandoned subscriptions (WR-07).
+        // to evict abandoned subscriptions.
         this.subscriptionManager.touch(clientId, subscriptionId);
 
         const sinceSnapshot =
@@ -390,7 +390,7 @@ export class RealtimeRequestHandler {
 
   // Rows/WhereClauses built against SELECT-shaped data (query.columns) are keyed by the
   // PK's JS property name, not its SQL name — the two diverge whenever a table declares
-  // e.g. `orderId: serial('order_id')` (CR-02). Falls back to pkColumn.name only for the
+  // e.g. `orderId: serial('order_id')`. Falls back to pkColumn.name only for the
   // (unreachable in practice) case where the PK isn't present in query.columns at all.
   private getPkQueryKey(query: ResolvedPulseQuery): string {
     return getQueryColumnKey(query.columns, query.pkColumn) ?? query.pkColumn.name;
@@ -482,7 +482,7 @@ export class RealtimeRequestHandler {
 
   private buildResetWhereClause(subscription: Subscription): WhereClause | null {
     // WhereClause keys are matched against query.columns (JS property names) — use the
-    // PK's JS query key here, not pkColumn.name (CR-02).
+    // PK's JS query key here, not pkColumn.name.
     const pkColumnName = this.getPkQueryKey(subscription.query);
     if (subscription.query.order === 'desc') {
       if (!isPkComparable(subscription.rangeStart)) {

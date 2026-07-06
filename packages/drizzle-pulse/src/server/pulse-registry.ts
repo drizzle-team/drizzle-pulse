@@ -29,7 +29,7 @@ type BuiltQuery = {
   sourceTable: PgTable;
 };
 
-// Defensive re-check (D-06): `PulseTable.query()` only sees inline `.primaryKey()` columns
+// Defensive re-check: `PulseTable.query()` only sees inline `.primaryKey()` columns
 // (a pure module can't value-import `getTableConfig`). Registries can receive a hand-built
 // AnyPulseBuilder that bypassed that gate, so union inline + table-extras `primaryKey()`
 // entries by name here and reject anything resolving to more than one distinct column.
@@ -121,7 +121,7 @@ export class PulseRegistry<TQueries extends AnyPulseBuilders> {
     // Never pass raw client input through as `args` when no schema was ever seeded via
     // `.args()` — a queryFn that reads `ctx.args` without declaring a schema would
     // otherwise let attacker-controlled JSON reach buildColumnFilterPredicate as
-    // operator-shaped filters (CR-03). Queries that need args MUST chain `.args(schema)`.
+    // operator-shaped filters. Queries that need args MUST chain `.args(schema)`.
     const args = registryQuery.argsSchema ? registryQuery.argsSchema.parse(rawArgs) : {};
     const where =
       registryQuery.queryFn?.({

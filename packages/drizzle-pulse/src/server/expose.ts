@@ -46,7 +46,7 @@ export type ExposeWalConfig = Partial<
 >;
 
 export type SubscriptionTtlConfig = {
-  // How long a subscription may go without a pull() before the sweep evicts it (WR-07):
+  // How long a subscription may go without a pull() before the sweep evicts it:
   // subscriptions otherwise live forever, since nothing else ever calls
   // SubscriptionManager.delete() for a client that disconnects without unsubscribing.
   idleMs?: number;
@@ -346,7 +346,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
   }
 
   // Mirrors stop()'s pool/service teardown so a failed guard doesn't leak connections —
-  // callers await start() rejections and then discard the runtime (D-12).
+  // callers await start() rejections and then discard the runtime.
   private async teardownFailedStart(): Promise<void> {
     this.stopSubscriptionSweep();
 
@@ -359,7 +359,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     }
   }
 
-  // Fail-closed startup guard (D-12/API-04): aggregates every unmet precondition into a
+  // Fail-closed startup guard: aggregates every unmet precondition into a
   // single thrown Error instead of silently starting a runtime that will emit zero events.
   private async runStartupGuard(): Promise<void> {
     const adminDb = this.getRealtimeService().getDb();
@@ -589,7 +589,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     this.reconnectTimer = null;
   }
 
-  // WR-07: without this sweep, SubscriptionManager.delete() is only ever reached via the
+  // Without this sweep, SubscriptionManager.delete() is only ever reached via the
   // explicit unsubscribe() handler — a client that disconnects without calling it (closed
   // tab, crashed process, ...) would otherwise leak its subscription forever.
   private startSubscriptionSweep(): void {

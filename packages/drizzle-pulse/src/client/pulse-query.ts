@@ -247,7 +247,7 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
     this.pullClient.unregister(this.queryKey);
   }
 
-  // Best-effort teardown call (WR-07): frees the subscription server-side immediately
+  // Best-effort teardown call: frees the subscription server-side immediately
   // instead of relying solely on the idle sweep. Fire-and-forget — destroy() is
   // synchronous, and a network failure here just means the sweep (or a later reused
   // subscriptionId) cleans it up instead.

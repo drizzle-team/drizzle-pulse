@@ -52,7 +52,7 @@ export class PulseBuilder<
     // previously-chained .transform() was typed against the OLD TResult, so silently
     // carrying it over here would either type-check against the wrong shape or (as the
     // prior implementation did) get silently dropped at runtime while callers still
-    // believe it's active (WR-08). Fail loudly instead: require .columns() before
+    // believe it's active. Fail loudly instead: require .columns() before
     // .transform() in the chain.
     if (this.config.transformFn !== null) {
       throw new Error(

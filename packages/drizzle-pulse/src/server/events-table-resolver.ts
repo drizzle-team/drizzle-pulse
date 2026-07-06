@@ -55,7 +55,7 @@ function assertNotReservedSourceColumnName(name: string): void {
 }
 
 // Serial-family columns must be relaxed to their plain int equivalent in the events
-// table (D-10/Pitfall 3): a naive class-preserving clone would carry over auto-increment
+// table: a naive class-preserving clone would carry over auto-increment
 // defaults/identity semantics that reject explicitly-supplied insert values.
 const SERIAL_SWAP: Record<
   string,
@@ -92,7 +92,7 @@ type ConcretePgColumnConstructor = new (
 // precision/scale, dimensions, srid, withTimezone, enum instance, ...) on a `protected
 // config` field with no public read API. Re-instantiating the same (or a relaxed)
 // column class against that config is the only way to reconstruct a column that reuses
-// the source's own `mapToDriverValue`/`mapFromDriverValue` codec (RESEARCH Pitfall 2) —
+// the source's own `mapToDriverValue`/`mapFromDriverValue` codec —
 // there is no public clone utility. This narrows through `unknown` rather than `any`.
 interface ColumnWithConfig {
   config: Record<string, unknown>;
@@ -180,7 +180,7 @@ function attachColumns(table: PgTable, columns: Record<string, PgColumn>): void 
 // `assertResolverDrizzleCompatibility` exercises those exact surfaces once per process against
 // small synthetic probe columns (independent of any user schema) and throws a clear diagnostic
 // if any of them stop behaving as expected, instead of letting an upgrade silently corrupt a
-// real user's events table (IN-08).
+// real user's events table.
 let drizzleCompatibilityChecked = false;
 
 function assertResolverDrizzleCompatibility(): void {
@@ -224,7 +224,7 @@ function assertResolverDrizzleCompatibility(): void {
     }
   }
 
-  // Array codec (CR-01 regression guard): postBuild() must wrap mapToDriverValue with
+  // Array codec (regression guard): postBuild() must wrap mapToDriverValue with
   // per-element (de)serialization for dimensions > 0, or an array insert throws instead
   // of round-tripping.
   const arraySourceColumn = buildColumn(text('probe_array_col').array(), probeTable);
