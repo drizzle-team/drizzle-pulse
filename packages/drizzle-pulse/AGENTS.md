@@ -33,7 +33,7 @@ Type-safe realtime SDK shared by server, client, React, and embedded layers.
 | `src/server/pulse-registry.ts` | registry finalization + `$client` phantom contract; rejects a bare `PulseTable`; defensive composite-PK re-check |
 | `src/server/pulse-projection.ts` | projection/response-shaping helpers split out of `pulse-registry.ts` to preserve platform purity for the embedded client entrypoint |
 | `src/server/events-table-resolver.ts` | convention resolver: synthesizes the events `PgTable` (`__events_<schema>_<table>`) from a source table by cloning each column's own class/config |
-| `src/server/events-table-ddl.ts` | DDL emitter: derives `CREATE SCHEMA`/`CREATE TABLE` SQL strictly from the resolver's output (D-09 — no hand-mirrored SQL) |
+| `src/server/events-table-ddl.ts` | DDL emitter: derives `CREATE SCHEMA`/`CREATE TABLE` SQL strictly from the resolver's output (no hand-mirrored SQL) |
 | `src/server/pulse-sql.ts` | query compilation / row predicate evaluation |
 | `src/server/expose.ts` | `RealtimeRuntime` assembly, `ExposeConfig` defaults (`drizzle_pulse` publication/slot, `drizzle` events schema, `subscriptionTtl` idle-sweep interval), the aggregating startup guard, WAL listener lifecycle |
 | `src/server/handlers.ts` | `RealtimeRequestHandler` — subscribe/pull/loadMore/unsubscribe request handling, consumes an injected `getEventsTable(queryName)` lookup |

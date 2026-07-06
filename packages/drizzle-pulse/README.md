@@ -117,7 +117,7 @@ await runtime.start();
 Every pulsed source table needs a matching **events table** — WAL changes are persisted there and replayed to clients. Events tables are generated infrastructure, resolved entirely by convention (no hand-declared Drizzle table, no `.$eventsTable()` linkage):
 
 - **Location:** `<eventsSchema>.__events_<sourceSchema>_<sourceTable>` — `eventsSchema` defaults to `'drizzle'` (override via `expose()`'s `eventsSchema` option, matching your drizzle.config `migrations.schema`)
-- **Creation:** as of this version, generate them from `emitEventsTableDdl(sourceTable)` (exported from `drizzle-pulse/server`) and run the returned `CREATE SCHEMA`/`CREATE TABLE` statements as a migration; Phase 14+ drizzle-kit codegen automates this from your `pulse()` schema exports
+- **Creation:** as of this version, generate them from `emitEventsTableDdl(sourceTable)` (exported from `drizzle-pulse/server`) and run the returned `CREATE SCHEMA`/`CREATE TABLE` statements as a migration; upcoming drizzle-kit codegen will automate this from your `pulse()` schema exports
 - **Startup guard:** `runtime.start()` asserts — in one aggregated, loudly-thrown error listing every unmet precondition — that the publication exists, every pulsed table is a member of it (or the publication is `FOR ALL TABLES`), every events table exists, every pulsed table has `REPLICA IDENTITY FULL`, and `wal_level = logical`
 
 See [`docs/events-table-convention.md`](../../docs/events-table-convention.md) for the full name-derivation and column-mapping contract.

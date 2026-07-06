@@ -65,7 +65,7 @@ const asBuilder: PulseBuilder<
 > = bareQuery;
 void asBuilder;
 
-// @ts-expect-error pulse(table) takes exactly one argument (D-05)
+// @ts-expect-error pulse(table) takes exactly one argument
 pulse(orders, {});
 
 // isPulseTable narrows: after `if (isPulseTable(x))`, `getPulseTableConfig(x).table` type-checks.

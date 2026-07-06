@@ -4,16 +4,16 @@ This document pins the naming and column-derivation contract for the events tabl
 `pulse()`-tracked source table gets, by convention, with no hand-declared mirror table.
 It is the interface contract two other consumers rely on byte-for-byte:
 
-- **drizzle-kit** (Phase 15, `~/dev/drizzle-orm/drizzle-kit`) generates the equivalent
+- **drizzle-kit** (`~/dev/drizzle-orm/drizzle-kit`) generates the equivalent
   `CREATE TABLE` migration from the same source table and must match this document
   exactly.
-- **The cross-repo conformance test** (INTG-01) diffs drizzle-kit's generated SQL
+- **The cross-repo conformance test** diffs drizzle-kit's generated SQL
   against `emitEventsTableDdl`'s output and fails on any drift.
 
 The normative implementation is
 [`packages/drizzle-pulse/src/server/events-table-resolver.ts`](../packages/drizzle-pulse/src/server/events-table-resolver.ts)
 (`resolveEventsTable`, `getEventsTableName`, `DEFAULT_EVENTS_SCHEMA`). The SQL rendering
-reference — the exact text Phase 15's generated migrations must byte-match — is
+reference — the exact text drizzle-kit's generated migrations must byte-match — is
 [`packages/drizzle-pulse/src/server/events-table-ddl.ts`](../packages/drizzle-pulse/src/server/events-table-ddl.ts)
 (`emitEventsTableDdl`). Both are pure functions: no database connection, no I/O.
 
@@ -35,7 +35,7 @@ table's own schema, and never in a dedicated `realtime` schema (the pre-restruct
 convention). The events schema defaults to **`drizzle`**, matching a project's
 `drizzle.config` `migrations.schema` by manual parity. It is configured at runtime via
 `ExposeConfig.eventsSchema` — the runtime never loads `drizzle.config` itself, so the
-value must be kept in sync by the project author (or by drizzle-kit's Phase 15
+value must be kept in sync by the project author (or by drizzle-kit's
 codegen, which reads `drizzle.config` directly).
 
 **Worked example:** a source table `orders` in the default `public` schema, with
@@ -52,7 +52,7 @@ split — e.g. schema `tenant_a` table `orders` and schema `tenant` table `a_ord
 derive `__events_tenant_a_orders`. This is a known, currently-unmitigated gap (no
 unambiguous separator exists that is itself legal inside a Postgres identifier); avoid
 schema/table name pairs that collide under this join until a disambiguating scheme ships
-(tracked as a contract change requiring coordination with Phase 15's codegen).
+(tracked as a contract change requiring coordination with drizzle-kit's codegen).
 
 ## 2. Column derivation
 
@@ -202,9 +202,9 @@ resolver actually *derives* (the table name and the `$old_` prefix) can newly ex
 the limit.
 
 **This is a hard failure, not a warning.** There is no deterministic truncation or
-shortening scheme in this phase — an events table (or column) whose derived name
-overflows 63 bytes cannot be created at all until a shortening scheme ships. Phase 15's
-kit implementation must mirror this exact loud-failure behavior (same error shape) until
+shortening scheme yet — an events table (or column) whose derived name
+overflows 63 bytes cannot be created at all until a shortening scheme ships. The drizzle-kit
+implementation must mirror this exact loud-failure behavior (same error shape) until
 a truncation scheme is designed; silently truncating on the kit side while the runtime
 rejects would reintroduce the exact drift this guard exists to prevent.
 
@@ -218,7 +218,7 @@ rejects would reintroduce the exact drift this guard exists to prevent.
   `mapFromDriverValue`) is part of this contract, not an implementation detail.
 - [`events-table-ddl.ts`](../packages/drizzle-pulse/src/server/events-table-ddl.ts)'s
   `emitEventsTableDdl(sourceTable, options?)` is the **byte-match reference** for
-  Phase 15 (GEN-01): it derives every column strictly from `resolveEventsTable`'s
+  drizzle-kit's generated migrations: it derives every column strictly from `resolveEventsTable`'s
   output — never re-deriving names or types from the source table independently — so
   the resolver and its DDL can never drift from each other. Its output is also what
   this repo's integration-test harness uses to create events tables in test databases
