@@ -13,11 +13,7 @@ import type { PulseClientContract } from './pulse-types.js';
 // Re-exported for handlers.ts (server-only) — the implementations live in
 // pulse-projection.ts, which the embedded client entrypoint value-imports directly, so
 // that module (unlike this one) must stay free of drizzle-orm/pg-core value imports.
-export {
-  addPrimaryKey,
-  applyProjectionPipeline,
-  applyResponsePipeline,
-} from './pulse-projection.js';
+export { applyResponsePipeline } from './pulse-projection.js';
 
 export type AnyPulseBuilder = PulseBuilder<
   PgTable,

@@ -1,17 +1,12 @@
 import { getTableUniqueName } from 'drizzle-orm';
-import type { PgTable } from 'drizzle-orm/pg-core';
 import type { ResolvedPulseQuery } from '../types.js';
 import { applyColumnFilter, getQueryColumnKey } from './pulse-types.js';
 
-// Kept in its own module (bare `drizzle-orm` value imports only, `drizzle-orm/pg-core`
-// type-only) because the embedded client entrypoint value-imports applyProjectionPipeline
+// Kept in its own module (bare `drizzle-orm` value imports only, no `drizzle-orm/pg-core`
+// value imports) because the embedded client entrypoint value-imports applyProjectionPipeline
 // directly — platform-imports.test.ts walks every value import reachable from there, so
 // this file must stay free of drizzle-orm/pg-core VALUE imports (the registry-construction
 // logic in pulse-registry.ts, which needs getTableConfig, is not reachable from embedded).
-function getQualifiedTableName(table: PgTable) {
-  return getTableUniqueName(table);
-}
-
 export function addPrimaryKey(row: Record<string, unknown>, pulseQuery: ResolvedPulseQuery) {
   // `row` is SELECT-shaped (keyed by JS property name), which diverges from the PK
   // column's own SQL name whenever a table declares e.g. `orderId: serial('order_id')`
@@ -21,7 +16,7 @@ export function addPrimaryKey(row: Record<string, unknown>, pulseQuery: Resolved
   const pkValue = row[pkQueryKey];
   if (pkValue === undefined) {
     throw new Error(
-      `Primary key column "${pulseQuery.pkColumn.name}" on "${getQualifiedTableName(pulseQuery.table)}" is missing`,
+      `Primary key column "${pulseQuery.pkColumn.name}" on "${getTableUniqueName(pulseQuery.table)}" is missing`,
     );
   }
 

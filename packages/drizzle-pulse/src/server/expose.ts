@@ -288,12 +288,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
 
     try {
       await this.runStartupGuard();
-    } catch (error) {
-      await this.teardownFailedStart();
-      throw error;
-    }
 
-    try {
       this._isRunning = true;
       await this.ensureBaselines();
 
