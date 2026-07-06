@@ -166,7 +166,8 @@ export class RealtimeRequestHandler {
       };
 
       return { status: 200, body: response };
-    } catch {
+    } catch (error) {
+      console.error('Error handling subscribe request:', error);
       return { status: 500, body: { error: 'server_error' } };
     }
   }
@@ -262,7 +263,8 @@ export class RealtimeRequestHandler {
         hasMore,
       };
       return { status: 200, body: response };
-    } catch {
+    } catch (error) {
+      console.error('Error handling loadMore request:', error);
       return { status: 500, body: { error: 'server_error' } };
     }
   }
