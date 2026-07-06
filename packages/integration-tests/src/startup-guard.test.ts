@@ -273,4 +273,40 @@ describe('Startup Guard', () => {
       await teardownGuardScenario(ctx);
     }
   });
+
+  test('(f) events table existence check rejects a same-named view (relkind restriction)', async () => {
+    const ctx = await setupGuardScenario('f');
+    const publicationName = `guard_pub_f_${randomSuffix()}`;
+    const slotName = `guard_slot_f_${randomSuffix()}`;
+    const sourceSql = postgres(withQuietPostgresUrl(ctx.databaseUrl));
+
+    try {
+      await createOrdersSourceTable(ctx.pool);
+      await setReplicaIdentityFull(ctx.pool);
+      await ctx.pool.query(`CREATE PUBLICATION ${publicationName} FOR ALL TABLES`);
+      // Deliberately a VIEW, not a TABLE, at the exact events-table name/schema: before the
+      // relkind restriction, this false-passed the existence check (any pg_class relkind
+      // matched), deferring the failure to a confusing insert-time error instead.
+      await ctx.pool.query('CREATE SCHEMA IF NOT EXISTS "drizzle"');
+      await ctx.pool.query(
+        'CREATE VIEW "drizzle"."__events_public_orders" AS SELECT 1 AS placeholder',
+      );
+
+      const registry = createPulseRegistry({ orders: pulse(orders).query() });
+      const runtime = expose(registry, {
+        databaseUrl: ctx.databaseUrl,
+        sourceDb: drizzle({ client: sourceSql }),
+        wal: { publicationName, slotName },
+      });
+
+      const error = await captureStartRejection(runtime);
+
+      expect(error.message).toContain('__events_public_orders');
+      expect(error.message).toContain('does not exist');
+    } finally {
+      await sourceSql.end();
+      await ctx.pool.query(`DROP PUBLICATION IF EXISTS ${publicationName}`).catch(() => {});
+      await teardownGuardScenario(ctx);
+    }
+  });
 });

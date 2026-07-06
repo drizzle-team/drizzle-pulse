@@ -402,7 +402,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       const eventsConfig = getTableConfig(meta.eventsTable);
       const eventsSchemaName = eventsConfig.schema ?? this.eventsSchema;
       const existsResult = await adminDb.execute<{ relname: string }>(
-        sql`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ${eventsSchemaName} AND c.relname = ${eventsConfig.name}`,
+        sql`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ${eventsSchemaName} AND c.relname = ${eventsConfig.name} AND c.relkind IN ('r', 'p')`,
       );
       if (existsResult.rows.length === 0) {
         failures.push(
