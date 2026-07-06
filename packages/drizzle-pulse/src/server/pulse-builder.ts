@@ -82,7 +82,10 @@ export class PulseBuilder<
       columns: this.config.columns,
       selectedColumns: this.config.selectedColumns,
       argsSchema: schema,
-      queryFn: this.config.queryFn as QueryFn<TNewArgs, TSelection> | null,
+      // The second QueryFn type param is the full source row type (PulseQueryConfig's
+      // `queryFn: QueryFn<TArgs, InferSelectModel<TTable>>`), not the column-selection
+      // map TSelection — the row shape doesn't change across .args(), only TArgs does.
+      queryFn: this.config.queryFn as QueryFn<TNewArgs, InferSelectModel<TTable>> | null,
       transformFn: this.config.transformFn,
       order: this.config.order,
       limit: this.config.limit,

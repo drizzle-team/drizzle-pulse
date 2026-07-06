@@ -1,12 +1,15 @@
 import { getColumns } from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 import {
+  bigserial,
   getTableConfig,
   integer,
   PgBigInt53,
   PgBigInt64,
   PgInteger,
   PgTable as PgTableClass,
+  serial,
+  smallserial,
   text,
   timestamp,
 } from 'drizzle-orm/pg-core';
@@ -170,10 +173,102 @@ function attachColumns(table: PgTable, columns: Record<string, PgColumn>): void 
   (table as unknown as Record<symbol, unknown>)[TABLE_COLUMNS_SYMBOL] = columns;
 }
 
+// This resolver leans on several `@internal`, un-typed drizzle-orm surfaces (`Column.config`,
+// `ColumnBuilder.build()`, `PgColumn.postBuild()`, the `Symbol.for('drizzle:Columns')` global
+// registry key) that were hand-verified against the installed drizzle-orm@1.0.0-rc.4 but carry
+// no compile-time contract, so a future drizzle-orm release could silently change any of them.
+// `assertResolverDrizzleCompatibility` exercises those exact surfaces once per process against
+// small synthetic probe columns (independent of any user schema) and throws a clear diagnostic
+// if any of them stop behaving as expected, instead of letting an upgrade silently corrupt a
+// real user's events table (IN-08).
+let drizzleCompatibilityChecked = false;
+
+function assertResolverDrizzleCompatibility(): void {
+  if (drizzleCompatibilityChecked) return;
+  drizzleCompatibilityChecked = true;
+
+  const probeTableName = '__pulse_internal_compat_probe';
+  const probeTable = new PgTableClass(probeTableName, undefined, probeTableName);
+
+  function fail(detail: string): never {
+    throw new Error(
+      `drizzle-pulse's internal drizzle-orm compatibility check failed: ${detail}. This ` +
+        'usually means the installed drizzle-orm version changed an internal API this ' +
+        'resolver depends on; pin drizzle-orm to a known-compatible version or report this ' +
+        'to drizzle-pulse.',
+    );
+  }
+
+  // Serial-family relaxation (one probe per SERIAL_SWAP entry): a cloned column must
+  // report the relaxed columnType/dataType, not the original serial one.
+  const serialProbeBuilders: Record<string, unknown> = {
+    PgSerial: serial('probe_col'),
+    PgSmallSerial: smallserial('probe_col'),
+    PgBigSerial53: bigserial('probe_col', { mode: 'number' }),
+    PgBigSerial64: bigserial('probe_col', { mode: 'bigint' }),
+  };
+  for (const [columnType, swap] of Object.entries(SERIAL_SWAP)) {
+    const builder = serialProbeBuilders[columnType];
+    if (!builder) fail(`no probe builder registered for serial family "${columnType}"`);
+    const sourceColumn = buildColumn(builder, probeTable);
+    if (sourceColumn.columnType !== columnType) {
+      fail(
+        `expected probe builder for "${columnType}" to build a column of that type, got "${sourceColumn.columnType}"`,
+      );
+    }
+    const cloned = cloneColumn(probeTable, sourceColumn, 'probe_col_clone', false);
+    if (cloned.columnType !== swap.columnType) {
+      fail(
+        `expected cloning a "${columnType}" column to relax it to "${swap.columnType}", got "${cloned.columnType}"`,
+      );
+    }
+  }
+
+  // Array codec (CR-01 regression guard): postBuild() must wrap mapToDriverValue with
+  // per-element (de)serialization for dimensions > 0, or an array insert throws instead
+  // of round-tripping.
+  const arraySourceColumn = buildColumn(text('probe_array_col').array(), probeTable);
+  const clonedArrayColumn = cloneColumn(
+    probeTable,
+    arraySourceColumn,
+    'probe_array_col_clone',
+    false,
+  );
+  let mappedArray: unknown;
+  try {
+    mappedArray = clonedArrayColumn.mapToDriverValue(['a', 'b']);
+  } catch (err) {
+    fail(
+      `cloned array column's mapToDriverValue threw on an array value, which means postBuild() ` +
+        `may no longer wrap array codecs: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (!Array.isArray(mappedArray) || mappedArray.length !== 2) {
+    fail(
+      "cloned array column's mapToDriverValue did not return a 2-element array for a 2-element input",
+    );
+  }
+
+  // getColumns()/getTableConfig() round-trip: attachColumns()'s TABLE_COLUMNS_SYMBOL write
+  // must be exactly what drizzle-orm's own public getColumns()/getTableConfig() read back.
+  const roundTripColumn = buildColumn(integer('probe'), probeTable);
+  attachColumns(probeTable, { probe: roundTripColumn });
+  const readBackColumns = getColumns(probeTable);
+  if (readBackColumns['probe'] !== roundTripColumn) {
+    fail("attachColumns()-written columns are not visible through drizzle-orm's getColumns()");
+  }
+  const tableConfig = getTableConfig(probeTable);
+  if (tableConfig.name !== probeTableName) {
+    fail(`getTableConfig().name mismatch: expected "${probeTableName}", got "${tableConfig.name}"`);
+  }
+}
+
 export function resolveEventsTable(
   sourceTable: PgTable,
   options?: { eventsSchema?: string },
 ): PgTable {
+  assertResolverDrizzleCompatibility();
+
   const eventsSchema = options?.eventsSchema ?? DEFAULT_EVENTS_SCHEMA;
   const tableName = getEventsTableName(sourceTable);
 
