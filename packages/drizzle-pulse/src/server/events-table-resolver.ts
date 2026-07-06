@@ -84,6 +84,20 @@ function getConcreteColumnConstructor(column: PgColumn): ConcretePgColumnConstru
   return Object.getPrototypeOf(column).constructor as unknown as ConcretePgColumnConstructor;
 }
 
+// `PgColumn.postBuild()` is `/** @internal */` and absent from the public `.d.ts`, but it
+// is the exact step `pgTable()`/`pgSchema().table()` run after constructing a column
+// (`colBuilder.build(rawTable).postBuild()`, pg-core/table.js) to wrap
+// `mapToDriverValue`/`mapFromDriverValue` with per-element array (de)serialization when
+// `dimensions > 0`. It is a no-op (and idempotent) for `dimensions === 0`, so calling it
+// unconditionally here is safe for every column, array or not.
+interface PostBuildable {
+  postBuild(): PgColumn;
+}
+
+function postBuild(column: PgColumn): PgColumn {
+  return (column as unknown as PostBuildable).postBuild();
+}
+
 function cloneColumn(
   eventsTable: PgTable,
   sourceColumn: PgColumn,
@@ -111,7 +125,7 @@ function cloneColumn(
     ...(swap ? { dataType: swap.dataType, columnType: swap.columnType } : {}),
   };
 
-  return new Cls(eventsTable, config);
+  return postBuild(new Cls(eventsTable, config));
 }
 
 // `Table.Symbol.Columns` is marked `/** @internal */` in drizzle-orm and stripped from
@@ -129,7 +143,7 @@ interface ColumnBuilderLike {
 // internally to turn a builder into a column. Metadata columns are built with plain
 // builders (not config-clones), so we go through the same internal method.
 function buildColumn(builder: unknown, table: PgTable): PgColumn {
-  return (builder as unknown as ColumnBuilderLike).build(table);
+  return postBuild((builder as unknown as ColumnBuilderLike).build(table));
 }
 
 function attachColumns(table: PgTable, columns: Record<string, PgColumn>): void {

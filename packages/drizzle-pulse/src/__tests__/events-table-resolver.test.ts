@@ -14,6 +14,7 @@ import {
   numeric,
   PgTable,
   pgEnum,
+  pgSchema,
   pgTable,
   point,
   serial,
@@ -59,6 +60,18 @@ const sourceTable = pgTable('resolver_fixture', {
   notNullCol: text('not_null_col').notNull(),
   defaultedCol: text('defaulted_col').default('hello'),
   identityCol: integer('identity_col').generatedAlwaysAsIdentity(),
+  tagsCol: text('tags_col').array(),
+  timesCol: timestamp('times_col', { withTimezone: true }).array(),
+});
+
+const schemaEnum = pgSchema('resolver_test_schema').enum('resolver_test_status', [
+  'open',
+  'closed',
+]);
+
+const enumInSchemaTable = pgTable('resolver_enum_schema_fixture', {
+  id: serial('id').primaryKey(),
+  statusCol: schemaEnum('status_col'),
 });
 
 function getColumnByName(table: PgTableType, name: string): PgColumn {
@@ -204,6 +217,36 @@ describe('resolveEventsTable', () => {
     const eventsTable = resolveEventsTable(sourceTable);
     expect(is(eventsTable, PgTable)).toBe(true);
   });
+
+  test('array columns preserve dimensions and getSQLType on both new-value and $old_ clones (CR-01)', () => {
+    const eventsTable = resolveEventsTable(sourceTable);
+    const sourceTags = getColumnByName(sourceTable, 'tags_col');
+    const sourceTimes = getColumnByName(sourceTable, 'times_col');
+
+    const tagsClone = getColumnByName(eventsTable, 'tags_col');
+    const oldTagsClone = getColumnByName(eventsTable, '$old_tags_col');
+    expect(tagsClone.dimensions).toBe(sourceTags.dimensions);
+    expect(tagsClone.dimensions).toBe(1);
+    expect(tagsClone.getSQLType()).toBe(sourceTags.getSQLType());
+    expect(oldTagsClone.dimensions).toBe(sourceTags.dimensions);
+
+    const timesClone = getColumnByName(eventsTable, 'times_col');
+    expect(timesClone.dimensions).toBe(sourceTimes.dimensions);
+    expect(timesClone.getSQLType()).toBe(sourceTimes.getSQLType());
+  });
+
+  test('cloned array columns keep the source column array (de)serialization codec (CR-01)', () => {
+    const eventsTable = resolveEventsTable(sourceTable);
+    const timesClone = getColumnByName(eventsTable, 'times_col');
+    const now = new Date('2024-01-01T00:00:00.000Z');
+
+    // Without postBuild(), mapToDriverValue receives the raw array and calls
+    // value.toISOString() on it directly (reproduced in review CR-01: throws
+    // "value.toISOString is not a function"). postBuild() wraps the codec to map
+    // each array element instead.
+    expect(() => timesClone.mapToDriverValue([now])).not.toThrow();
+    expect(timesClone.mapToDriverValue([now])).toEqual([now.toISOString()]);
+  });
 });
 
 describe('emitEventsTableDdl', () => {
@@ -249,5 +292,25 @@ describe('emitEventsTableDdl', () => {
     const statements = emitEventsTableDdl(sourceTable, { eventsSchema: 'custom_schema' });
     expect(statements[0]).toBe('CREATE SCHEMA IF NOT EXISTS "custom_schema"');
     expect(statements[1]).toStartWith('CREATE TABLE "custom_schema".');
+  });
+
+  test('renders array source columns with a [] suffix, not a bare scalar type (CR-01)', () => {
+    const [, createTable] = emitEventsTableDdl(sourceTable);
+    expect(createTable).toContain('"tags_col" text[]');
+    expect(createTable).toContain('"times_col" timestamp with time zone[]');
+    expect(createTable).not.toMatch(/"tags_col"\s+text\s*(,|$)/m);
+  });
+
+  test('renders enum type identifiers quoted and schema-qualified (WR-01)', () => {
+    const [, createTable] = emitEventsTableDdl(enumInSchemaTable);
+    expect(createTable).toContain('"status_col" "resolver_test_schema"."resolver_test_status"');
+    expect(createTable).not.toContain('resolver_test_schema.resolver_test_status"');
+  });
+
+  test('renders a schema-less enum quoted but unqualified (WR-01)', () => {
+    const [, createTable] = emitEventsTableDdl(sourceTable);
+    const moodLine = createTable?.split('\n').find((line) => line.includes('"mood_col"'));
+    expect(moodLine).toBeDefined();
+    expect(moodLine).toContain('"mood_col" "resolver_test_mood"');
   });
 });

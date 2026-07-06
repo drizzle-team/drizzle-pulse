@@ -84,6 +84,11 @@ timezone, `point`/`line`/`geometry` in either mode, `vector`/`halfvec`/`sparseve
 their dimensions, and `bit` with its dimensions) is preserved exactly — same
 `getSQLType()`, same driver-value codec as the source column.
 
+A `.array()` source column (any dimension) is likewise preserved exactly: the cloned
+column keeps the source's element type, dimension count, and array (de)serialization
+codec, and the emitted DDL renders the element type followed by one `[]` per dimension
+(e.g. a 1-dimensional `text('tags').array()` renders as `"tags" text[]`).
+
 ### 2.3 `$old_<sqlColumnName>` twins
 
 Each source column also produces an `$old_`-prefixed twin, keyed off the source
@@ -122,6 +127,16 @@ $old_small_serial_col: integer('$old_small_serial_col'),
 $old_big_serial_number_col: bigint('$old_big_serial_number_col', { mode: 'number' }),
 $old_mood_col: moodEnum('$old_mood_col'),                         // same enum instance again
 ```
+
+### 2.6 Enum type identifiers in emitted DDL
+
+An enum column's SQL type is a developer-controlled identifier, not a fixed type
+keyword, so `emitEventsTableDdl` renders it like any other identifier: quoted, and
+schema-qualified when the enum was declared in a non-default schema (e.g.
+`"app"."order_status"` for `pgSchema('app').enum('order_status', ...)`, or
+`"order_status"` for an enum with no schema). Every other column type keyword
+(`integer`, `timestamp with time zone`, ...) is rendered unquoted, as returned by
+`getSQLType()`.
 
 ## 3. Metadata columns
 
