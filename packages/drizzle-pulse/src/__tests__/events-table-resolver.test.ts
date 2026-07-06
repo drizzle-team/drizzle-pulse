@@ -24,6 +24,7 @@ import {
   varchar,
   vector,
 } from 'drizzle-orm/pg-core';
+import { emitEventsTableDdl } from '../server/events-table-ddl.js';
 import {
   DEFAULT_EVENTS_SCHEMA,
   getEventsTableName,
@@ -202,5 +203,51 @@ describe('resolveEventsTable', () => {
   test("the synthesized table passes drizzle's is(result, PgTable) check", () => {
     const eventsTable = resolveEventsTable(sourceTable);
     expect(is(eventsTable, PgTable)).toBe(true);
+  });
+});
+
+describe('emitEventsTableDdl', () => {
+  test('returns CREATE SCHEMA followed by a CREATE TABLE targeting the synthesized table', () => {
+    const statements = emitEventsTableDdl(sourceTable);
+    expect(statements).toHaveLength(2);
+    expect(statements[0]).toBe('CREATE SCHEMA IF NOT EXISTS "drizzle"');
+    expect(statements[1]).toStartWith(
+      'CREATE TABLE "drizzle"."__events_public_resolver_fixture" (',
+    );
+  });
+
+  test('renders the PK line NOT NULL and the serial source column as plain integer', () => {
+    const [, createTable] = emitEventsTableDdl(sourceTable);
+    expect(createTable).toContain('"id" integer NOT NULL');
+    expect(createTable).not.toMatch(/"id"\s+serial/);
+  });
+
+  test('renders $snapshot as an identity column with no trailing NOT NULL', () => {
+    const [, createTable] = emitEventsTableDdl(sourceTable);
+    expect(createTable).toContain('"$snapshot" integer GENERATED ALWAYS AS IDENTITY');
+    expect(createTable).not.toMatch(/"\$snapshot"[^,]*NOT NULL/);
+  });
+
+  test('renders $op as text NOT NULL', () => {
+    const [, createTable] = emitEventsTableDdl(sourceTable);
+    expect(createTable).toContain('"$op" text NOT NULL');
+  });
+
+  test('renders $timestamp with both DEFAULT now() and NOT NULL', () => {
+    const [, createTable] = emitEventsTableDdl(sourceTable);
+    expect(createTable).toContain('"$timestamp" timestamp with time zone DEFAULT now() NOT NULL');
+  });
+
+  test('renders an $old_ twin line as nullable (no NOT NULL suffix)', () => {
+    const [, createTable] = emitEventsTableDdl(sourceTable);
+    const oldIdLine = createTable.split('\n').find((line) => line.includes('"$old_id"'));
+    expect(oldIdLine).toBeDefined();
+    expect(oldIdLine).not.toMatch(/NOT NULL/);
+  });
+
+  test('honors an explicit eventsSchema override', () => {
+    const statements = emitEventsTableDdl(sourceTable, { eventsSchema: 'custom_schema' });
+    expect(statements[0]).toBe('CREATE SCHEMA IF NOT EXISTS "custom_schema"');
+    expect(statements[1]).toStartWith('CREATE TABLE "custom_schema".');
   });
 });
