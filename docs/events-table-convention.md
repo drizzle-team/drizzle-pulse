@@ -45,6 +45,15 @@ codegen, which reads `drizzle.config` directly).
 "drizzle"."__events_public_orders"
 ```
 
+**Known ambiguity (accepted):** because the derivation joins `sourceSchema` and
+`sourceTable` with a plain underscore, two distinct source tables can derive the same
+events table name when one name's underscore boundary reads as the other's schema/table
+split — e.g. schema `tenant_a` table `orders` and schema `tenant` table `a_orders` both
+derive `__events_tenant_a_orders`. This is a known, currently-unmitigated gap (no
+unambiguous separator exists that is itself legal inside a Postgres identifier); avoid
+schema/table name pairs that collide under this join until a disambiguating scheme ships
+(tracked as a contract change requiring coordination with Phase 15's codegen).
+
 ## 2. Column derivation
 
 Every source column produces **two** columns in the events table: a new-value column
@@ -137,6 +146,20 @@ schema-qualified when the enum was declared in a non-default schema (e.g.
 `"order_status"` for an enum with no schema). Every other column type keyword
 (`integer`, `timestamp with time zone`, ...) is rendered unquoted, as returned by
 `getSQLType()`.
+
+### 2.7 Reserved source column names
+
+A source column name that would collide with a synthesized events-table column name is
+rejected outright rather than silently overwritten by object-spread ordering:
+
+- The three metadata names (`$snapshot`, `$op`, `$timestamp`, section 3) are reserved —
+  a source column literally named `$snapshot`, `$op`, or `$timestamp` throws at
+  `resolveEventsTable()` time.
+- Any source column name starting with the `$old_` prefix is reserved (it is the
+  derivation scheme's own prefix for old-value twins, section 2.3) and likewise throws.
+
+Both are hard failures, matching this document's philosophy for other derivation hazards
+(section 4's 63-byte guard) — there is no silent-collision fallback.
 
 ## 3. Metadata columns
 

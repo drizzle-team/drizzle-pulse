@@ -32,6 +32,25 @@ export function getEventsTableName(sourceTable: PgTable): string {
   return name;
 }
 
+const RESERVED_EVENTS_COLUMN_NAMES = new Set(['$snapshot', '$op', '$timestamp']);
+
+// Source columns named after a metadata column, or prefixed `$old_` (the derived
+// old-value twin's own naming scheme), would silently overwrite or be overwritten by a
+// synthesized column when the columns record is assembled. Fail loudly instead, matching
+// the doc's hard-failure philosophy for other derivation hazards (63-byte guard).
+function assertNotReservedSourceColumnName(name: string): void {
+  if (RESERVED_EVENTS_COLUMN_NAMES.has(name)) {
+    throw new Error(
+      `Source column "${name}" collides with a reserved events-table metadata column name (${[...RESERVED_EVENTS_COLUMN_NAMES].join(', ')}); rename the source column`,
+    );
+  }
+  if (name.startsWith('$old_')) {
+    throw new Error(
+      `Source column "${name}" starts with the reserved "$old_" prefix used for derived old-value columns; rename the source column`,
+    );
+  }
+}
+
 // Serial-family columns must be relaxed to their plain int equivalent in the events
 // table (D-10/Pitfall 3): a naive class-preserving clone would carry over auto-increment
 // defaults/identity semantics that reject explicitly-supplied insert values.
@@ -161,32 +180,45 @@ export function resolveEventsTable(
   const eventsTable = new PgTableClass(tableName, eventsSchema, tableName);
   const sourceColumns = getColumns(sourceTable);
 
-  const newValueColumns: Record<string, PgColumn> = {};
-  const oldValueColumns: Record<string, PgColumn> = {};
+  const columns: Record<string, PgColumn> = {};
+
+  // Defense in depth: `assertNotReservedSourceColumnName` should already rule out every
+  // collision reachable from a source column name, but this catches any other duplicate
+  // derived name outright rather than silently overwriting via object-spread.
+  function addColumn(name: string, column: PgColumn): void {
+    if (Object.hasOwn(columns, name)) {
+      throw new Error(
+        `Derived events-table column name "${name}" collides with another derived column; rename the conflicting source column`,
+      );
+    }
+    columns[name] = column;
+  }
 
   for (const sourceColumn of Object.values(sourceColumns)) {
-    newValueColumns[sourceColumn.name] = cloneColumn(
-      eventsTable,
-      sourceColumn,
+    assertNotReservedSourceColumnName(sourceColumn.name);
+
+    addColumn(
       sourceColumn.name,
-      sourceColumn.primary,
+      cloneColumn(eventsTable, sourceColumn, sourceColumn.name, sourceColumn.primary),
     );
 
     const oldName = `$old_${sourceColumn.name}`;
     assertIdentifierLength(oldName);
-    oldValueColumns[oldName] = cloneColumn(eventsTable, sourceColumn, oldName, false);
+    addColumn(oldName, cloneColumn(eventsTable, sourceColumn, oldName, false));
   }
 
-  const columns: Record<string, PgColumn> = {
-    ...newValueColumns,
-    ...oldValueColumns,
-    $snapshot: buildColumn(integer('$snapshot').generatedAlwaysAsIdentity(), eventsTable),
-    $op: buildColumn(text('$op').notNull(), eventsTable),
-    $timestamp: buildColumn(
+  addColumn(
+    '$snapshot',
+    buildColumn(integer('$snapshot').generatedAlwaysAsIdentity(), eventsTable),
+  );
+  addColumn('$op', buildColumn(text('$op').notNull(), eventsTable));
+  addColumn(
+    '$timestamp',
+    buildColumn(
       timestamp('$timestamp', { withTimezone: true }).notNull().defaultNow(),
       eventsTable,
     ),
-  };
+  );
 
   attachColumns(eventsTable, columns);
 

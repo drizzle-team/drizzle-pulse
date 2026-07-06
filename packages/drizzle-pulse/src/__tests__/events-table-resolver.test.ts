@@ -218,6 +218,26 @@ describe('resolveEventsTable', () => {
     expect(is(eventsTable, PgTable)).toBe(true);
   });
 
+  test('throws loudly when a source column name collides with a reserved metadata column name (WR-02)', () => {
+    for (const reservedName of ['$snapshot', '$op', '$timestamp']) {
+      const collidingTable = pgTable('resolver_reserved_name_fixture', {
+        id: serial('id').primaryKey(),
+        collided: text(reservedName),
+      });
+      expect(() => resolveEventsTable(collidingTable)).toThrow(
+        /collides with a reserved events-table metadata column name/,
+      );
+    }
+  });
+
+  test('throws loudly when a source column name starts with the reserved $old_ prefix (WR-02)', () => {
+    const collidingTable = pgTable('resolver_old_prefix_fixture', {
+      id: serial('id').primaryKey(),
+      collided: text('$old_id'),
+    });
+    expect(() => resolveEventsTable(collidingTable)).toThrow(/reserved "\$old_" prefix/);
+  });
+
   test('array columns preserve dimensions and getSQLType on both new-value and $old_ clones (CR-01)', () => {
     const eventsTable = resolveEventsTable(sourceTable);
     const sourceTags = getColumnByName(sourceTable, 'tags_col');
