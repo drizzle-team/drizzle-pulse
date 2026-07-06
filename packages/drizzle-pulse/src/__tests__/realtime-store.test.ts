@@ -26,7 +26,7 @@ function makeQuery(): ResolvedPulseQuery {
   };
 }
 
-describe('SubscriptionManager idle tracking (WR-07)', () => {
+describe('SubscriptionManager idle tracking', () => {
   test('create() stamps lastSeenAt; touch() bumps it forward', () => {
     const manager = new SubscriptionManager();
     const query = makeQuery();

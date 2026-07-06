@@ -27,7 +27,7 @@ const ordersTable = pgTable('orders', {
 });
 
 // PK whose JS property key ("orderId") differs from its SQL column name ("order_id") —
-// idiomatic drizzle, and the exact shape CR-02 reproduced a 500 against.
+// idiomatic drizzle, and the exact shape that reproduced a 500 against.
 const mismatchedPkTable = pgTable('mismatched_pk_orders', {
   orderId: serial('order_id').primaryKey(),
   status: text('status').notNull(),
@@ -407,11 +407,11 @@ describe('expose routes request validation', () => {
   });
 });
 
-// PK JS property key vs SQL column name (CR-02): baseline SELECT rows are keyed by JS
+// PK JS property key vs SQL column name: baseline SELECT rows are keyed by JS
 // property name (drizzle's `db.select(...)` shape), but every one of these pipeline
 // sites used to index by the PK's SQL name instead, 500ing on any table where the two
 // diverge (e.g. `orderId: serial('order_id')`).
-describe('subscribe/loadMore with a PK whose JS key differs from its SQL name (CR-02)', () => {
+describe('subscribe/loadMore with a PK whose JS key differs from its SQL name', () => {
   test('subscribe resolves non-null ranges using the PK JS query key, not its SQL name', async () => {
     const { router, clientId } = createRouterHarness({
       registry: createMismatchedPkRegistry(),
@@ -470,9 +470,9 @@ describe('subscribe/loadMore with a PK whose JS key differs from its SQL name (C
 
 // The HTTP subscribe path must read the snapshot cursor BEFORE the baseline SELECT, the
 // same ordering the embedded client's startHandshake uses (client/embedded/index.ts)
-// specifically to avoid a lost-event race (CR-04): a write committed between the two
+// specifically to avoid a lost-event race: a write committed between the two
 // reads must remain covered by the returned cursor.
-describe('subscribe reads the snapshot cursor before the baseline SELECT (CR-04)', () => {
+describe('subscribe reads the snapshot cursor before the baseline SELECT', () => {
   test('calls getLatestSnapshot() before the baseline SELECT', async () => {
     const registry = createRegistry();
     const subscriptionManager = new SubscriptionManager();
@@ -532,8 +532,8 @@ describe('subscribe reads the snapshot cursor before the baseline SELECT (CR-04)
 
 // subscribe() must not let a caller who guesses/reuses another user's clientId +
 // subscriptionId overwrite that user's live subscription — matches the ownership check
-// pull()/loadMore() already enforce (WR-06).
-describe('subscribe rejects cross-user subscriptionId reuse (WR-06)', () => {
+// pull()/loadMore() already enforce.
+describe('subscribe rejects cross-user subscriptionId reuse', () => {
   test('a mismatched-auth re-subscribe gets a fresh subscriptionId and leaves the original subscription untouched', async () => {
     const registry = createRegistry();
     const subscriptionManager = new SubscriptionManager();
@@ -589,8 +589,8 @@ describe('subscribe rejects cross-user subscriptionId reuse (WR-06)', () => {
 
 // Subscriptions must not accumulate forever: an explicit unsubscribe() frees a
 // subscription immediately, and pull() marks a subscription as active so the idle sweep
-// (realtime-store.test.ts) can tell abandoned subscriptions apart from live ones (WR-07).
-describe('unsubscribe() and pull() activity tracking (WR-07)', () => {
+// (realtime-store.test.ts) can tell abandoned subscriptions apart from live ones.
+describe('unsubscribe() and pull() activity tracking', () => {
   function setUpHandler(sourceRows: Record<string, unknown>[][] = [[]]) {
     const registry = createRegistry();
     const subscriptionManager = new SubscriptionManager();

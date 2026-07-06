@@ -392,7 +392,7 @@ describe('PulseQuery runtime characterization', () => {
     });
   });
 
-  test('destroy() notifies the server to release the subscription (WR-07)', async () => {
+  test('destroy() notifies the server to release the subscription', async () => {
     const subscribeResponse = new Response(
       serialize({
         subscriptionId: 'sub-destroy-notify',

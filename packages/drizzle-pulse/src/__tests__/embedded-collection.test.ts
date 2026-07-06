@@ -249,7 +249,7 @@ describe('embedded client — user-facing error paths', () => {
     await expect(pending).rejects.toThrow(/disposed before the initial sync completed/);
   });
 
-  test('the client proxy is not accidentally thenable — awaiting it settles instead of hanging (IN-07)', async () => {
+  test('the client proxy is not accidentally thenable — awaiting it settles instead of hanging', async () => {
     const runtime = makeMockRuntime();
     const client = createPulseClient(runtime as any);
 

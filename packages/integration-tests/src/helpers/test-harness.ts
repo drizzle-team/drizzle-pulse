@@ -169,7 +169,7 @@ const suiteContexts = new Map<string, TestSuiteContext<IntegrationTestFixture>>(
 
 // Two registries with identical query names (but different definitions — order/limit/
 // where) must never share a cached runtime, even if their query-name lists happen to
-// sort-and-join to the same string (WR-09). Each distinct registry OBJECT gets its own
+// sort-and-join to the same string. Each distinct registry OBJECT gets its own
 // identity token here — assigned once, on first use — so the context key below can never
 // collide across registries, regardless of what their queries happen to look like.
 const registryIdentities = new WeakMap<PulseRegistry<any>, string>();
@@ -264,7 +264,7 @@ async function applyFixtureMigrations(databaseUrl: string, migrationsPath: strin
 }
 
 /**
- * D-09: the harness never hand-mirrors events-table SQL — every fixture's events tables
+ * The harness never hand-mirrors events-table SQL — every fixture's events tables
  * are created by executing the DDL emitter's output against the pulsed source tables.
  */
 async function createFixtureEventsTables(
@@ -523,7 +523,7 @@ export async function teardownTestSuiteForFixture<
   TFixture extends IntegrationTestFixture,
   TQueries extends AnyQueries,
 >(fixture: TFixture, registry: PulseRegistry<TQueries>): Promise<void> {
-  // Scoped to the exact context key setupTestSuiteForFixture() used (WR-09): the prior
+  // Scoped to the exact context key setupTestSuiteForFixture() used: the prior
   // implementation matched every context whose key started with `${variantName}::`,
   // decrementing OTHER registries' same-variant contexts too whenever more than one
   // registry shares a variantName in the same process.

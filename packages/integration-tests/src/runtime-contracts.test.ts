@@ -424,7 +424,7 @@ describe('Runtime Contracts', () => {
     // Reuse the suite's existing runtime (from beforeAll) instead of calling
     // setupTestSuiteForFixture() again — an extra call here acquired a second reference
     // that this test never released, leaving activeSuiteUsers stuck above 0 after
-    // afterAll's single teardown call (WR-09).
+    // afterAll's single teardown call.
     const driverOne = await insertTestUser(db, `auth_driver_${randomUUID().slice(0, 8)}`);
     const driverTwo = await insertTestUser(db, `auth_driver_${randomUUID().slice(0, 8)}`);
 

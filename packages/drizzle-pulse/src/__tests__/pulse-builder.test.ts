@@ -38,7 +38,7 @@ function makeEmptyConfig(): PulseQueryConfig<
 }
 
 // PK declared only via table extras (no inline `.primaryKey()`) — the case
-// PulseTable.query()'s pure gate can't see (D-06), so the registry's defensive
+// PulseTable.query()'s pure gate can't see, so the registry's defensive
 // re-check is exercised via a hand-built config/builder, bypassing pulse-table.ts.
 const compositePkTable = testSchema.table(
   'composite_items',
@@ -49,7 +49,7 @@ const compositePkTable = testSchema.table(
   (table) => [primaryKey({ columns: [table.leftId, table.rightId] })],
 );
 
-// PK declared via table extras, but as a SINGLE column (IN-04): assertSinglePrimaryKeyName
+// PK declared via table extras, but as a SINGLE column: assertSinglePrimaryKeyName
 // sees exactly one distinct PK column name and passes, but getPulsePkColumn only ever sees
 // inline `.primaryKey()` columns, so this table has a real PK the registry still rejects —
 // the error message must say so instead of implying the table has no PK at all.
@@ -92,7 +92,7 @@ describe('PulseBuilder', () => {
     expect(builder.config.transformFn).toBe(transformFn);
   });
 
-  test('.columns() after .transform() throws loudly instead of silently dropping the transform (WR-08)', () => {
+  test('.columns() after .transform() throws loudly instead of silently dropping the transform', () => {
     const transformFn = (rows: Record<string, unknown>[]) => rows;
     const builder = new PulseBuilder(makeEmptyConfig()).transform(transformFn);
 
@@ -227,11 +227,11 @@ describe('pulse(table) — collection-first construction', () => {
   });
 });
 
-describe('createPulseRegistry — derived-queries-only contract (D-04, D-06)', () => {
+describe('createPulseRegistry — derived-queries-only contract', () => {
   test('rejects a bare collection, instructing to call .query() first', () => {
     expect(() =>
       createPulseRegistry({
-        // @ts-expect-error intentionally passing a bare collection to prove the registry's runtime guard (D-04)
+        // @ts-expect-error intentionally passing a bare collection to prove the registry's runtime guard
         allOrders: pulse(testTable),
       }),
     ).toThrowError(/\.query\(\)/);
@@ -261,7 +261,7 @@ describe('createPulseRegistry — derived-queries-only contract (D-04, D-06)', (
     );
   });
 
-  test('rejects a table whose true PK is a single-column primaryKey() declared in table extras, with a message naming the inline requirement (IN-04)', () => {
+  test('rejects a table whose true PK is a single-column primaryKey() declared in table extras, with a message naming the inline requirement', () => {
     const columns = getColumns(singleColumnExtrasPkTable);
     const config: PulseQueryConfig<
       typeof singleColumnExtrasPkTable,
@@ -302,9 +302,9 @@ describe('createPulseRegistry — derived-queries-only contract (D-04, D-06)', (
     expect(query.order).toBe('asc');
   });
 
-  test('resolve() substitutes an empty object for args on a schemaless query — client-supplied operator payloads never reach queryFn (CR-03)', () => {
+  test('resolve() substitutes an empty object for args on a schemaless query — client-supplied operator payloads never reach queryFn', () => {
     // Collection-level spelling: no `.args()` is ever chained, matching the pattern
-    // pulse-table.ts's doc-comment describes and the one CR-03 flagged as unsafe.
+    // pulse-table.ts's doc-comment describes and the one flagged as unsafe.
     const registry = createPulseRegistry({
       ordersByTenant: pulse(testTable).query((ctx) => ctx.query({ status: ctx.args.status })),
     });

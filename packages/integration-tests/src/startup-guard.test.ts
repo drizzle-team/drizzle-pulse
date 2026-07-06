@@ -1,5 +1,5 @@
 /**
- * API-04 integration proof: expose()'s aggregating startup guard against real Postgres.
+ * Integration proof: expose()'s aggregating startup guard against real Postgres.
  *
  * Unlike the other suites, these scenarios build fresh, deliberately-misconfigured
  * standalone databases (never `setupTestSuiteForFixture`, which now guarantees a healthy
@@ -101,7 +101,7 @@ async function createOrdersSourceTable(pool: Pool): Promise<void> {
 }
 
 async function createEventsTable(pool: Pool): Promise<void> {
-  // D-09: the events table is created from the emitter's own output, never hand-written SQL.
+  // The events table is created from the emitter's own output, never hand-written SQL.
   for (const statement of emitEventsTableDdl(orders)) {
     await pool.query(statement);
   }
@@ -164,7 +164,7 @@ describe('Startup Guard', () => {
       await createOrdersSourceTable(ctx.pool);
       await setReplicaIdentityFull(ctx.pool);
       await createEventsTable(ctx.pool);
-      // Deliberately absent: a "drizzle_pulse" publication — proves the D-11 default
+      // Deliberately absent: a "drizzle_pulse" publication — proves the default
       // flows all the way into the guard's failure message with no wal config supplied.
 
       const registry = createPulseRegistry({ orders: pulse(orders).query() });

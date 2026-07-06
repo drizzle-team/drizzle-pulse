@@ -220,7 +220,7 @@ describe('Embedded Collection lifecycle', () => {
 
   afterAll(async () => {
     // Decrements activeSuiteUsers for the lifecycle context only (scoped to this exact
-    // fixture+registry context key, WR-09); stop() is idempotent so calling it again
+    // fixture+registry context key); stop() is idempotent so calling it again
     // after the test's runtime.stop() is safe.
     await teardownTestSuiteForFixture(lifecycleFixture, lcRegistry);
   });

@@ -14,7 +14,7 @@ function makeRuntime(databaseUrl: string): RealtimeRuntime<any> {
   });
 }
 
-describe('connection-string handling (WR-03)', () => {
+describe('connection-string handling', () => {
   test('pgConfig/pgPoolConfig pass the raw connectionString through instead of re-parsing it', () => {
     const databaseUrl = 'postgresql://user:p%40ss@localhost:5433/my_db?sslmode=require';
     const runtime = makeRuntime(databaseUrl) as any;
@@ -38,7 +38,7 @@ describe('connection-string handling (WR-03)', () => {
   });
 });
 
-describe('start() failure rolls back to a restartable state (WR-04)', () => {
+describe('start() failure rolls back to a restartable state', () => {
   test('a throw after the guard resets _isRunning and tears down the pool instead of leaving a zombie', async () => {
     const runtime = makeRuntime('postgresql://user:pass@localhost/test') as any;
 
@@ -80,7 +80,7 @@ describe('start() failure rolls back to a restartable state (WR-04)', () => {
   });
 });
 
-describe('subscription idle sweep lifecycle (WR-07)', () => {
+describe('subscription idle sweep lifecycle', () => {
   test('subscriptionTtl config falls back to defaults and honors overrides', () => {
     const defaultRuntime = makeRuntime('postgresql://user:pass@localhost/test') as any;
     expect(defaultRuntime.subscriptionTtlConfig).toEqual({

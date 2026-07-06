@@ -218,7 +218,7 @@ describe('resolveEventsTable', () => {
     expect(is(eventsTable, PgTable)).toBe(true);
   });
 
-  test('throws loudly when a source column name collides with a reserved metadata column name (WR-02)', () => {
+  test('throws loudly when a source column name collides with a reserved metadata column name', () => {
     for (const reservedName of ['$snapshot', '$op', '$timestamp']) {
       const collidingTable = pgTable('resolver_reserved_name_fixture', {
         id: serial('id').primaryKey(),
@@ -230,7 +230,7 @@ describe('resolveEventsTable', () => {
     }
   });
 
-  test('throws loudly when a source column name starts with the reserved $old_ prefix (WR-02)', () => {
+  test('throws loudly when a source column name starts with the reserved $old_ prefix', () => {
     const collidingTable = pgTable('resolver_old_prefix_fixture', {
       id: serial('id').primaryKey(),
       collided: text('$old_id'),
@@ -238,7 +238,7 @@ describe('resolveEventsTable', () => {
     expect(() => resolveEventsTable(collidingTable)).toThrow(/reserved "\$old_" prefix/);
   });
 
-  test('array columns preserve dimensions and getSQLType on both new-value and $old_ clones (CR-01)', () => {
+  test('array columns preserve dimensions and getSQLType on both new-value and $old_ clones', () => {
     const eventsTable = resolveEventsTable(sourceTable);
     const sourceTags = getColumnByName(sourceTable, 'tags_col');
     const sourceTimes = getColumnByName(sourceTable, 'times_col');
@@ -255,13 +255,13 @@ describe('resolveEventsTable', () => {
     expect(timesClone.getSQLType()).toBe(sourceTimes.getSQLType());
   });
 
-  test('cloned array columns keep the source column array (de)serialization codec (CR-01)', () => {
+  test('cloned array columns keep the source column array (de)serialization codec', () => {
     const eventsTable = resolveEventsTable(sourceTable);
     const timesClone = getColumnByName(eventsTable, 'times_col');
     const now = new Date('2024-01-01T00:00:00.000Z');
 
     // Without postBuild(), mapToDriverValue receives the raw array and calls
-    // value.toISOString() on it directly (reproduced in review CR-01: throws
+    // value.toISOString() on it directly (reproduced in review: throws
     // "value.toISOString is not a function"). postBuild() wraps the codec to map
     // each array element instead.
     expect(() => timesClone.mapToDriverValue([now])).not.toThrow();
@@ -314,20 +314,20 @@ describe('emitEventsTableDdl', () => {
     expect(statements[1]).toStartWith('CREATE TABLE "custom_schema".');
   });
 
-  test('renders array source columns with a [] suffix, not a bare scalar type (CR-01)', () => {
+  test('renders array source columns with a [] suffix, not a bare scalar type', () => {
     const [, createTable] = emitEventsTableDdl(sourceTable);
     expect(createTable).toContain('"tags_col" text[]');
     expect(createTable).toContain('"times_col" timestamp with time zone[]');
     expect(createTable).not.toMatch(/"tags_col"\s+text\s*(,|$)/m);
   });
 
-  test('renders enum type identifiers quoted and schema-qualified (WR-01)', () => {
+  test('renders enum type identifiers quoted and schema-qualified', () => {
     const [, createTable] = emitEventsTableDdl(enumInSchemaTable);
     expect(createTable).toContain('"status_col" "resolver_test_schema"."resolver_test_status"');
     expect(createTable).not.toContain('resolver_test_schema.resolver_test_status"');
   });
 
-  test('renders a schema-less enum quoted but unqualified (WR-01)', () => {
+  test('renders a schema-less enum quoted but unqualified', () => {
     const [, createTable] = emitEventsTableDdl(sourceTable);
     const moodLine = createTable?.split('\n').find((line) => line.includes('"mood_col"'));
     expect(moodLine).toBeDefined();
