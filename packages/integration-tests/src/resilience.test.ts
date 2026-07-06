@@ -62,7 +62,7 @@ describe('Resilience', () => {
   });
 
   afterAll(async () => {
-    await teardownTestSuiteForFixture(fixture);
+    await teardownTestSuiteForFixture(fixture, registry);
   });
 
   beforeEach(async () => {

@@ -8,7 +8,7 @@ import type { Hono } from 'hono';
 import type { Pool } from 'pg';
 import SuperJSON from 'superjson';
 import { fullOrdersFixture } from './fixtures/full-orders/index.js';
-import type { HarnessProcessDbOperations } from './helpers/test-harness.js';
+import type { HarnessProcessDbOperations, RuntimeOf } from './helpers/test-harness.js';
 import {
   cleanupBetweenTestsForFixture,
   createRealtimeRouterWithAuth,
@@ -25,6 +25,7 @@ describe('Runtime Contracts', () => {
   let pool: Pool;
   let db: PostgresJsDatabase;
   let processDbOperations: HarnessProcessDbOperations;
+  let runtime!: RuntimeOf<typeof registry>;
 
   const fixture = fullOrdersFixture;
   const { orders } = fixture.tables;
@@ -55,10 +56,11 @@ describe('Runtime Contracts', () => {
     pool = setup.pool;
     db = setup.db;
     processDbOperations = setup.processDbOperations;
+    runtime = setup.runtime;
   });
 
   afterAll(async () => {
-    await teardownTestSuiteForFixture(fixture);
+    await teardownTestSuiteForFixture(fixture, registry);
   });
 
   beforeEach(async () => {
@@ -217,12 +219,13 @@ describe('Runtime Contracts', () => {
     const staleSnapshot = subscription.snapshot;
     const staleSubscriptionId = subscription.subscriptionId;
 
-    await teardownTestSuiteForFixture(fixture);
+    await teardownTestSuiteForFixture(fixture, registry);
     const restarted = await setupTestSuiteForFixture(fixture, registry);
     router = restarted.router;
     pool = restarted.pool;
     db = restarted.db;
     processDbOperations = restarted.processDbOperations;
+    runtime = restarted.runtime;
     await insertTestUser(db, `driver_${randomUUID().slice(0, 8)}`);
 
     await router.request('/subscribe', {
@@ -418,7 +421,10 @@ describe('Runtime Contracts', () => {
   });
 
   test('auth-scoped subscriptions keep subscribe, pull, and load-more tied to the same user', async () => {
-    const runtime = (await setupTestSuiteForFixture(fixture, registry)).runtime;
+    // Reuse the suite's existing runtime (from beforeAll) instead of calling
+    // setupTestSuiteForFixture() again — an extra call here acquired a second reference
+    // that this test never released, leaving activeSuiteUsers stuck above 0 after
+    // afterAll's single teardown call (WR-09).
     const driverOne = await insertTestUser(db, `auth_driver_${randomUUID().slice(0, 8)}`);
     const driverTwo = await insertTestUser(db, `auth_driver_${randomUUID().slice(0, 8)}`);
 

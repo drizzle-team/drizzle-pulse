@@ -347,7 +347,7 @@ describe('Property Invariants', () => {
   });
 
   afterAll(async () => {
-    await teardownTestSuiteForFixture(fullOrdersFixture);
+    await teardownTestSuiteForFixture(fullOrdersFixture, registry);
   });
 
   test(

@@ -236,7 +236,7 @@ describe('Consistency Oracle', () => {
   });
 
   afterAll(async () => {
-    await teardownTestSuiteForFixture(oracleFixture);
+    await teardownTestSuiteForFixture(oracleFixture, registry);
   });
 
   beforeEach(async () => {

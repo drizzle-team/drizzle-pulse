@@ -167,9 +167,28 @@ const pullResponseSchema = z.object({
 
 const suiteContexts = new Map<string, TestSuiteContext<IntegrationTestFixture>>();
 
+// Two registries with identical query names (but different definitions — order/limit/
+// where) must never share a cached runtime, even if their query-name lists happen to
+// sort-and-join to the same string (WR-09). Each distinct registry OBJECT gets its own
+// identity token here — assigned once, on first use — so the context key below can never
+// collide across registries, regardless of what their queries happen to look like.
+const registryIdentities = new WeakMap<PulseRegistry<any>, string>();
+let nextRegistryIdentity = 0;
+
+function getRegistryIdentity(registry: PulseRegistry<any>): string {
+  const existing = registryIdentities.get(registry);
+  if (existing !== undefined) {
+    return existing;
+  }
+
+  const identity = `r${nextRegistryIdentity++}`;
+  registryIdentities.set(registry, identity);
+  return identity;
+}
+
 function getSuiteContextKey(fixture: IntegrationTestFixture, registry: PulseRegistry<any>): string {
   const queryNames = registry.getQueryNames().slice().sort().join(',');
-  return `${fixture.variantName}::${queryNames}`;
+  return `${fixture.variantName}::${queryNames}::${getRegistryIdentity(registry)}`;
 }
 
 function buildDatabaseUrl(baseDatabaseUrl: string, databaseName: string): string {
@@ -500,44 +519,49 @@ export async function setupTestSuiteForFixture<
   return toTestSuiteResult(ctx);
 }
 
-export async function teardownTestSuiteForFixture<TFixture extends IntegrationTestFixture>(
-  fixture: TFixture,
-): Promise<void> {
-  const matchingEntries = Array.from(suiteContexts.entries()).filter(([key]) =>
-    key.startsWith(`${fixture.variantName}::`),
+export async function teardownTestSuiteForFixture<
+  TFixture extends IntegrationTestFixture,
+  TQueries extends AnyQueries,
+>(fixture: TFixture, registry: PulseRegistry<TQueries>): Promise<void> {
+  // Scoped to the exact context key setupTestSuiteForFixture() used (WR-09): the prior
+  // implementation matched every context whose key started with `${variantName}::`,
+  // decrementing OTHER registries' same-variant contexts too whenever more than one
+  // registry shares a variantName in the same process.
+  const contextKey = getSuiteContextKey(fixture, registry);
+  const ctx = suiteContexts.get(contextKey);
+  if (!ctx) {
+    return;
+  }
+
+  ctx.activeSuiteUsers = Math.max(ctx.activeSuiteUsers - 1, 0);
+  if (ctx.activeSuiteUsers > 0) {
+    return;
+  }
+
+  await ctx.runtime.stop();
+  await ctx.testPool.query(`DROP PUBLICATION IF EXISTS ${ctx.publicationName}`);
+  await ctx.adminPool.query(
+    'SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1',
+    [ctx.slotName],
   );
 
-  for (const [contextKey, ctx] of matchingEntries) {
-    ctx.activeSuiteUsers = Math.max(ctx.activeSuiteUsers - 1, 0);
-    if (ctx.activeSuiteUsers > 0) {
-      continue;
-    }
+  await ctx.testPool.end();
+  await ctx.runtime.sourceSql.end();
+  await ctx.dbSql.end();
 
-    await ctx.runtime.stop();
-    await ctx.testPool.query(`DROP PUBLICATION IF EXISTS ${ctx.publicationName}`);
-    await ctx.adminPool.query(
-      'SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1',
-      [ctx.slotName],
-    );
-
-    await ctx.testPool.end();
-    await ctx.runtime.sourceSql.end();
-    await ctx.dbSql.end();
-
-    await ctx.adminPool.query(
-      `
+  await ctx.adminPool.query(
+    `
       SELECT pg_terminate_backend(pid)
       FROM pg_stat_activity
       WHERE datname = $1
         AND pid <> pg_backend_pid()
     `,
-      [ctx.databaseName],
-    );
-    await ctx.adminPool.query(`DROP DATABASE IF EXISTS "${ctx.databaseName}"`);
-    await ctx.adminPool.end();
+    [ctx.databaseName],
+  );
+  await ctx.adminPool.query(`DROP DATABASE IF EXISTS "${ctx.databaseName}"`);
+  await ctx.adminPool.end();
 
-    suiteContexts.delete(contextKey);
-  }
+  suiteContexts.delete(contextKey);
 }
 
 export async function cleanupBetweenTestsForFixture(

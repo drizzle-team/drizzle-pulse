@@ -55,7 +55,7 @@ describe('Router Fetch Adapter', () => {
   });
 
   afterAll(async () => {
-    await teardownTestSuiteForFixture(fullOrdersFixture);
+    await teardownTestSuiteForFixture(fullOrdersFixture, registry);
   });
 
   beforeEach(async () => {

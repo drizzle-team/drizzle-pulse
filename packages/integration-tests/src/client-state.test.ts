@@ -50,7 +50,7 @@ describe('Client State', () => {
     });
 
     afterAll(async () => {
-      await teardownTestSuiteForFixture(fixture);
+      await teardownTestSuiteForFixture(fixture, registry);
     });
 
     beforeEach(async () => {
@@ -502,7 +502,7 @@ describe('Client State', () => {
     });
 
     afterAll(async () => {
-      await teardownTestSuiteForFixture(fixture);
+      await teardownTestSuiteForFixture(fixture, registry);
     });
 
     beforeEach(async () => {
@@ -609,7 +609,7 @@ describe('Client State', () => {
     });
 
     afterAll(async () => {
-      await teardownTestSuiteForFixture(fixture);
+      await teardownTestSuiteForFixture(fixture, registry);
     });
 
     beforeEach(async () => {

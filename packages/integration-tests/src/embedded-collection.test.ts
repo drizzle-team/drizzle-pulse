@@ -46,7 +46,7 @@ describe('Embedded Collection', () => {
   });
 
   afterAll(async () => {
-    await teardownTestSuiteForFixture(fixture);
+    await teardownTestSuiteForFixture(fixture, registry);
   });
 
   beforeEach(async () => {
@@ -219,10 +219,10 @@ describe('Embedded Collection lifecycle', () => {
   });
 
   afterAll(async () => {
-    // Decrements activeSuiteUsers for the lifecycle context only (key:
-    // 'embedded-lifecycle::ordersByStatusLC'); stop() is idempotent so
-    // calling it again after the test's runtime.stop() is safe.
-    await teardownTestSuiteForFixture(lifecycleFixture);
+    // Decrements activeSuiteUsers for the lifecycle context only (scoped to this exact
+    // fixture+registry context key, WR-09); stop() is idempotent so calling it again
+    // after the test's runtime.stop() is safe.
+    await teardownTestSuiteForFixture(lifecycleFixture, lcRegistry);
   });
 
   beforeEach(async () => {
@@ -281,7 +281,7 @@ describe('Embedded Collection — PG Data Types (WAL tap normalization)', () => 
   });
 
   afterAll(async () => {
-    await teardownTestSuiteForFixture(fixture);
+    await teardownTestSuiteForFixture(fixture, registry);
   });
 
   beforeEach(async () => {
