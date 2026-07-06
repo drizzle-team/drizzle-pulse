@@ -6,6 +6,7 @@ import type { QueryDescriptor } from 'drizzle-pulse';
 import { createPulseClient, PulseQuery } from 'drizzle-pulse/client';
 import {
   type AnyQueries,
+  emitEventsTableDdl,
   expose,
   type LoadMoreRequest,
   type PullRequest,
@@ -47,6 +48,7 @@ export type IntegrationTestFixture = {
   migrationsPath: string;
   sourceTable: string;
   eventsTable: PgTable;
+  pulsedTables: PgTable[];
   cleanupTables: readonly string[];
   publicationName: string;
   tables: FixtureTableMap;
@@ -239,6 +241,19 @@ async function applyFixtureMigrations(databaseUrl: string, migrationsPath: strin
     await migrate(migrationDb, { migrationsFolder: migrationsPath });
   } finally {
     await migrationClient.end();
+  }
+}
+
+/**
+ * D-09: the harness never hand-mirrors events-table SQL — every fixture's events tables
+ * are created by executing the DDL emitter's output against the pulsed source tables.
+ */
+async function createFixtureEventsTables(pool: Pool, fixture: IntegrationTestFixture): Promise<void> {
+  for (const pulsedTable of fixture.pulsedTables) {
+    const statements = emitEventsTableDdl(pulsedTable);
+    for (const statement of statements) {
+      await pool.query(statement);
+    }
   }
 }
 
@@ -444,6 +459,7 @@ export async function setupTestSuiteForFixture<
   const testPool = createQuietPool(databaseUrl);
 
   await applyFixtureMigrations(databaseUrl, fixture.migrationsPath);
+  await createFixtureEventsTables(testPool, fixture);
 
   const runtime = createTestRuntime(databaseUrl, fixture, registry);
 
