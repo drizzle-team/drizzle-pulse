@@ -2,8 +2,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:tes
 import { randomUUID } from 'node:crypto';
 import { eq, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import { pulse } from 'drizzle-pulse';
 import { createPulseClient } from 'drizzle-pulse/client';
-import { createPulse, createPulseRegistry } from 'drizzle-pulse/server';
+import { createPulseRegistry } from 'drizzle-pulse/server';
 import type { Pool } from 'pg';
 import { fullOrdersFixture } from './fixtures/full-orders/index.js';
 import { minimalOrdersFixture } from './fixtures/minimal-orders/index.js';
@@ -17,8 +18,6 @@ import {
   teardownTestSuiteForFixture,
 } from './helpers/test-harness.js';
 
-const pulse = createPulse();
-
 describe('Client State', () => {
   describe('Full-Orders Fixture', () => {
     let pool: Pool;
@@ -29,13 +28,13 @@ describe('Client State', () => {
     const fixture = fullOrdersFixture;
     const { orders } = fixture.tables;
     const ordersByStatus = pulse(orders)
-      .$eventsTable(fixture.tables.eventsPublicOrders)
+      .query()
       .args(fixture.schemas.ordersByStatusArgs)
       .order('desc')
       .limit(5)
       .query((ctx) => ctx.query({ status: ctx.args.status }));
     const unlimitedOrdersByStatus = pulse(orders)
-      .$eventsTable(fixture.tables.eventsPublicOrders)
+      .query()
       .args(fixture.schemas.ordersByStatusArgs)
       .order('desc')
       .query((ctx) => ctx.query({ status: ctx.args.status }));
@@ -369,10 +368,10 @@ describe('Client State', () => {
       ]);
 
       await db.execute(
-        sql`INSERT INTO realtime.events_public_orders (id, "$op") OVERRIDING SYSTEM VALUE VALUES (2, 'snapshot')`,
+        sql`INSERT INTO drizzle.__events_public_orders (id, "$op") OVERRIDING SYSTEM VALUE VALUES (2, 'snapshot')`,
       );
       await db.execute(
-        sql`SELECT setval(pg_get_serial_sequence('realtime.events_public_orders', '$snapshot'), 999, true)`,
+        sql`SELECT setval(pg_get_serial_sequence('drizzle.__events_public_orders', '$snapshot'), 999, true)`,
       );
 
       await query.poll();
@@ -409,10 +408,10 @@ describe('Client State', () => {
       ]);
 
       await db.execute(
-        sql`INSERT INTO realtime.events_public_orders (id, "$op") OVERRIDING SYSTEM VALUE VALUES (9, 'snapshot')`,
+        sql`INSERT INTO drizzle.__events_public_orders (id, "$op") OVERRIDING SYSTEM VALUE VALUES (9, 'snapshot')`,
       );
       await db.execute(
-        sql`SELECT setval(pg_get_serial_sequence('realtime.events_public_orders', '$snapshot'), 999, true)`,
+        sql`SELECT setval(pg_get_serial_sequence('drizzle.__events_public_orders', '$snapshot'), 999, true)`,
       );
 
       await query.poll();
@@ -486,7 +485,7 @@ describe('Client State', () => {
     const fixture = minimalOrdersFixture;
     const { orders } = fixture.tables;
     const ordersByStatus = pulse(orders)
-      .$eventsTable(fixture.tables.eventsPublicOrders)
+      .query()
       .args(fixture.schemas.ordersByStatusArgs)
       .order('desc')
       .limit(5)
@@ -598,9 +597,7 @@ describe('Client State', () => {
 
     const fixture = pgDataTypesFixture;
     const { pgDataTypes } = fixture.tables;
-    const allPgDataTypesWithEvents = pulse(pgDataTypes)
-      .$eventsTable(fixture.tables.eventsPublicPgDataTypes)
-      .query(() => null);
+    const allPgDataTypesWithEvents = pulse(pgDataTypes).query(() => null);
     const registry = createPulseRegistry({ allPgDataTypes: allPgDataTypesWithEvents });
 
     beforeAll(async () => {

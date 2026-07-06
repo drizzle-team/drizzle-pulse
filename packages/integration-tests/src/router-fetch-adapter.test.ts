@@ -7,8 +7,9 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import { pulse } from 'drizzle-pulse';
 import { createPulseClient, PulseQuery } from 'drizzle-pulse/client';
-import { createPulse, createPulseRegistry } from 'drizzle-pulse/server';
+import { createPulseRegistry } from 'drizzle-pulse/server';
 import type { Hono } from 'hono';
 import type { Pool } from 'pg';
 import SuperJSON from 'superjson';
@@ -33,9 +34,8 @@ type SuiteContext = {
 };
 
 let ctx: SuiteContext;
-const pulse = createPulse();
 const ordersByStatus = pulse(fullOrdersFixture.tables.orders)
-  .$eventsTable(fullOrdersFixture.tables.eventsPublicOrders)
+  .query()
   .args(fullOrdersFixture.schemas.ordersByStatusArgs)
   .order('desc')
   .limit(5)

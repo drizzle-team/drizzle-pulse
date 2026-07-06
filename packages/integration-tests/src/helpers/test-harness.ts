@@ -248,7 +248,10 @@ async function applyFixtureMigrations(databaseUrl: string, migrationsPath: strin
  * D-09: the harness never hand-mirrors events-table SQL — every fixture's events tables
  * are created by executing the DDL emitter's output against the pulsed source tables.
  */
-async function createFixtureEventsTables(pool: Pool, fixture: IntegrationTestFixture): Promise<void> {
+async function createFixtureEventsTables(
+  pool: Pool,
+  fixture: IntegrationTestFixture,
+): Promise<void> {
   for (const pulsedTable of fixture.pulsedTables) {
     const statements = emitEventsTableDdl(pulsedTable);
     for (const statement of statements) {

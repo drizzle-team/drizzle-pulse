@@ -2,8 +2,9 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import { pulse } from 'drizzle-pulse';
 import { createPulseClient, PulseQuery } from 'drizzle-pulse/client';
-import { createPulse, createPulseRegistry } from 'drizzle-pulse/server';
+import { createPulseRegistry } from 'drizzle-pulse/server';
 import fc from 'fast-check';
 import type { Hono } from 'hono';
 import type { Pool } from 'pg';
@@ -25,9 +26,8 @@ let runDbOperations: HarnessProcessDbOperations;
 
 const { orders } = fullOrdersFixture.tables;
 const PROPERTY_TEST_TIMEOUT_MS = 300_000;
-const pulse = createPulse();
 const ordersByStatus = pulse(orders)
-  .$eventsTable(fullOrdersFixture.tables.eventsPublicOrders)
+  .query()
   .args(fullOrdersFixture.schemas.ordersByStatusArgs)
   .order('desc')
   .limit(5)
