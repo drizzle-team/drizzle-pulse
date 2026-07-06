@@ -586,3 +586,94 @@ describe('subscribe rejects cross-user subscriptionId reuse (WR-06)', () => {
     expect(victimSubscription?.auth.userId).toBe(1);
   });
 });
+
+// Subscriptions must not accumulate forever: an explicit unsubscribe() frees a
+// subscription immediately, and pull() marks a subscription as active so the idle sweep
+// (realtime-store.test.ts) can tell abandoned subscriptions apart from live ones (WR-07).
+describe('unsubscribe() and pull() activity tracking (WR-07)', () => {
+  function setUpHandler(sourceRows: Record<string, unknown>[][] = [[]]) {
+    const registry = createRegistry();
+    const subscriptionManager = new SubscriptionManager();
+    const sourceDb = createMockSourceDb(sourceRows);
+    const pulseSourceDb = createPulseSourceDbMock(() => sourceDb.takeRows());
+    const realtimeService = createRealtimeServiceMock({ latestSnapshot: 1 });
+
+    const requestHandler = new RealtimeRequestHandler(
+      registry,
+      pulseSourceDb,
+      subscriptionManager,
+      () => realtimeService,
+      () => resolveEventsTable(ordersTable),
+    );
+
+    return { requestHandler, subscriptionManager };
+  }
+
+  test('unsubscribe() removes the caller-owned subscription and returns ok', async () => {
+    const { requestHandler, subscriptionManager } = setUpHandler([
+      [{ id: 101, status: 'requested', price: 20 }],
+    ]);
+    const clientId = 'client-1';
+    const auth: PulseAuthContext = { userId: 1 };
+
+    const subscribeResult = await requestHandler.subscribe(
+      { clientId, queryName: QUERY_DATA.queryName, args: QUERY_DATA.args },
+      auth,
+    );
+    const subscriptionId = (subscribeResult.body as SubscribeResponseBody).subscriptionId;
+    expect(subscriptionManager.get(clientId, subscriptionId)).not.toBeNull();
+
+    const unsubscribeResult = await requestHandler.unsubscribe({ clientId, subscriptionId }, auth);
+
+    expect(unsubscribeResult.status).toBe(200);
+    expect(unsubscribeResult.body).toEqual({ ok: true });
+    expect(subscriptionManager.get(clientId, subscriptionId)).toBeNull();
+  });
+
+  test('unsubscribe() 404s instead of deleting a subscription owned by a different user', async () => {
+    const { requestHandler, subscriptionManager } = setUpHandler([
+      [{ id: 101, status: 'requested', price: 20 }],
+    ]);
+    const clientId = 'client-1';
+    const victimAuth: PulseAuthContext = { userId: 1 };
+    const attackerAuth: PulseAuthContext = { userId: 2 };
+
+    const subscribeResult = await requestHandler.subscribe(
+      { clientId, queryName: QUERY_DATA.queryName, args: QUERY_DATA.args },
+      victimAuth,
+    );
+    const subscriptionId = (subscribeResult.body as SubscribeResponseBody).subscriptionId;
+
+    const unsubscribeResult = await requestHandler.unsubscribe(
+      { clientId, subscriptionId },
+      attackerAuth,
+    );
+
+    expect(unsubscribeResult.status).toBe(404);
+    expect(subscriptionManager.get(clientId, subscriptionId)).not.toBeNull();
+  });
+
+  test('pull() touches lastSeenAt for an owned subscription it successfully resolves', async () => {
+    const { requestHandler, subscriptionManager } = setUpHandler([
+      [{ id: 101, status: 'requested', price: 20 }],
+    ]);
+    const clientId = 'client-1';
+    const auth: PulseAuthContext = { userId: 1 };
+
+    const subscribeResult = await requestHandler.subscribe(
+      { clientId, queryName: QUERY_DATA.queryName, args: QUERY_DATA.args },
+      auth,
+    );
+    const subscriptionId = (subscribeResult.body as SubscribeResponseBody).subscriptionId;
+
+    const beforePull = subscriptionManager.get(clientId, subscriptionId);
+    subscriptionManager.touch(clientId, subscriptionId, 1_000);
+    expect(subscriptionManager.get(clientId, subscriptionId)?.lastSeenAt).toBe(1_000);
+
+    await requestHandler.pull({ clientId, subscriptions: [{ subscriptionId, snapshot: 0 }] }, auth);
+
+    const afterPull = subscriptionManager.get(clientId, subscriptionId);
+    expect(afterPull?.lastSeenAt).toBeGreaterThan(1_000);
+    expect(afterPull?.lastSeenAt).toBeGreaterThanOrEqual(beforePull?.lastSeenAt ?? 0);
+  });
+});

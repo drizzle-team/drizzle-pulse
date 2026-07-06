@@ -59,7 +59,7 @@ const runtime = expose(registry, {
 await runtime.start(); // rejects loudly if the publication, events tables, or
 // REPLICA IDENTITY FULL aren't in place — see "Events tables" below
 
-// wire runtime.handlers.subscribe / .pull / .loadMore into your HTTP router
+// wire runtime.handlers.subscribe / .pull / .loadMore / .unsubscribe into your HTTP router
 ```
 
 **Client** — poll the server over HTTP with `createPulseClient`:
@@ -93,8 +93,8 @@ Derive queries from collections outside the schema file, register them, and expo
 - `PulseBuilder` — fluent builder returned by `.query()`: `.columns()`, `.args(zodSchema)`, `.query(ctx => WhereClause)`, `.order()`, `.limit()`, `.transform()`
 - Queries that read `ctx.args` in their `queryFn` MUST chain `.args(zodSchema)` first. Without a schema, `ctx.args` is always `{}` at runtime (the registry never forwards unvalidated client input as args) — reading `ctx.args` on a schemaless query silently sees no fields rather than attacker-controlled data.
 - `createPulseRegistry(queries)` — collects builders into a `PulseRegistry`; rejects a bare `PulseTable` (queries must be derived via `.query()` first)
-- `expose(registry, config)` — returns a `RealtimeRuntime`; call `.start()` to connect WAL, `runtime.handlers.{subscribe,pull,loadMore}` to serve requests
-- `RealtimeRuntime` — WAL listener + request handlers; `.start()` / `.stop()`
+- `expose(registry, config)` — returns a `RealtimeRuntime`; call `.start()` to connect WAL, `runtime.handlers.{subscribe,pull,loadMore,unsubscribe}` to serve requests
+- `RealtimeRuntime` — WAL listener + request handlers; `.start()` / `.stop()`. Subscriptions not explicitly released via `unsubscribe` are evicted by an idle sweep after `subscriptionTtl.idleMs` (default 24h, checked every `subscriptionTtl.sweepIntervalMs`, default 5m) of no `pull()` activity — both configurable via `expose(registry, { subscriptionTtl: { idleMs, sweepIntervalMs } })`.
 
 ```ts
 import { pulse } from 'drizzle-pulse';

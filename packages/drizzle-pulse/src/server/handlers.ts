@@ -13,6 +13,8 @@ import type {
   PullResponseErrorResult,
   SubscribeRequest,
   SubscribeResponse,
+  UnsubscribeRequest,
+  UnsubscribeResponse,
 } from '../shared/protocol-types.js';
 
 import type { PulseAuthContext, RealtimeEvent, ResolvedPulseQuery, WhereClause } from '../types.js';
@@ -30,6 +32,7 @@ export type SubscribeHandlerResponseBody =
 export type LoadMoreHandlerResponseBody =
   | LoadMoreResponse<Record<string, unknown>>
   | { error: string };
+export type UnsubscribeHandlerResponseBody = UnsubscribeResponse | { error: string };
 export type PullHandlerResponseBody =
   | {
       results: Record<
@@ -264,6 +267,32 @@ export class RealtimeRequestHandler {
     }
   }
 
+  // Explicit teardown counterpart to subscribe() (WR-07): without this, the only way a
+  // subscription is ever removed from the store is the idle sweep in pull(), so a client
+  // that unmounts cleanly should proactively free its slot rather than waiting it out.
+  async unsubscribe(
+    request: UnsubscribeRequest,
+    auth: PulseAuthContext,
+  ): Promise<RealtimeHandlerResult<UnsubscribeHandlerResponseBody>> {
+    try {
+      const { clientId, subscriptionId } = request;
+      if (!clientId) return { status: 400, body: { error: 'missing_client_id' } };
+      if (!subscriptionId) return { status: 400, body: { error: 'missing_subscription_id' } };
+
+      const subscription = this.subscriptionManager.get(clientId, subscriptionId);
+      if (!subscription || subscription.auth.userId !== auth.userId) {
+        // Same trust boundary as loadMore/pull: don't reveal whether a subscription
+        // exists under a different owner, and don't let a caller delete it either.
+        return { status: 404, body: { error: 'subscription_not_found' } };
+      }
+
+      this.subscriptionManager.delete(clientId, subscriptionId);
+      return { status: 200, body: { ok: true } };
+    } catch {
+      return { status: 500, body: { error: 'server_error' } };
+    }
+  }
+
   async pull(
     request: PullRequest,
     auth: PulseAuthContext,
@@ -303,6 +332,11 @@ export class RealtimeRequestHandler {
           };
           continue;
         }
+
+        // A subscription only stays alive as long as its client keeps pulling — this is
+        // the sole activity signal the idle sweep (SubscriptionManager.sweepIdle) uses
+        // to evict abandoned subscriptions (WR-07).
+        this.subscriptionManager.touch(clientId, subscriptionId);
 
         const sinceSnapshot =
           typeof subscriptionRequest.snapshot === 'number' ? subscriptionRequest.snapshot : 0;

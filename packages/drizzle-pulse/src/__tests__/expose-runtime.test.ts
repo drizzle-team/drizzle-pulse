@@ -105,3 +105,49 @@ describe('type-parser scoping (WR-05)', () => {
     expect(globalTimestampTzParser('2024-01-01 00:00:00+00')).toBeInstanceOf(Date);
   });
 });
+
+describe('subscription idle sweep lifecycle (WR-07)', () => {
+  test('subscriptionTtl config falls back to defaults and honors overrides', () => {
+    const defaultRuntime = makeRuntime('postgresql://user:pass@localhost/test') as any;
+    expect(defaultRuntime.subscriptionTtlConfig).toEqual({
+      idleMs: 24 * 60 * 60 * 1000,
+      sweepIntervalMs: 5 * 60 * 1000,
+    });
+
+    const emptyRegistry = createPulseRegistry({});
+    const overridden = new RealtimeRuntime(emptyRegistry as any, {
+      databaseUrl: 'postgresql://user:pass@localhost/test',
+      sourceDb: {} as PulseSourceDb,
+      subscriptionTtl: { idleMs: 1_000, sweepIntervalMs: 500 },
+    }) as any;
+    expect(overridden.subscriptionTtlConfig).toEqual({ idleMs: 1_000, sweepIntervalMs: 500 });
+  });
+
+  test('start() begins the sweep timer and stop() clears it', async () => {
+    const runtime = makeRuntime('postgresql://user:pass@localhost/test') as any;
+
+    runtime.runStartupGuard = async () => {};
+    runtime.ensureBaselines = async () => {};
+    runtime.getRealtimeService = () => ({ getLatestSnapshot: async () => 0 });
+    runtime.connectReplication = async () => {};
+
+    expect(runtime.subscriptionSweepTimer).toBeNull();
+    await runtime.start();
+    expect(runtime.subscriptionSweepTimer).not.toBeNull();
+
+    await runtime.stop();
+    expect(runtime.subscriptionSweepTimer).toBeNull();
+  });
+
+  test('a failed start() never leaves a dangling sweep timer', async () => {
+    const runtime = makeRuntime('postgresql://user:pass@localhost/test') as any;
+
+    runtime.runStartupGuard = async () => {};
+    runtime.ensureBaselines = async () => {
+      throw new Error('boom');
+    };
+
+    await expect(runtime.start()).rejects.toThrow('boom');
+    expect(runtime.subscriptionSweepTimer).toBeNull();
+  });
+});

@@ -15,6 +15,8 @@ export type {
   PullRequest,
   SubscribeRequest,
   SubscribeResponse,
+  UnsubscribeRequest,
+  UnsubscribeResponse,
 } from '../shared/protocol-types.js';
 export type { PulseAuthContext } from '../types.js';
 // Events-table convention (D-08/D-09)

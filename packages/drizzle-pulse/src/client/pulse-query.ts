@@ -205,6 +205,7 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
 
   destroy() {
     this.unregisterFromPullClient();
+    this.notifyUnsubscribe();
     this.destroyed = true;
   }
 
@@ -244,6 +245,28 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
 
   private unregisterFromPullClient() {
     this.pullClient.unregister(this.queryKey);
+  }
+
+  // Best-effort teardown call (WR-07): frees the subscription server-side immediately
+  // instead of relying solely on the idle sweep. Fire-and-forget — destroy() is
+  // synchronous, and a network failure here just means the sweep (or a later reused
+  // subscriptionId) cleans it up instead.
+  private notifyUnsubscribe() {
+    if (!this.subscriptionId) {
+      return;
+    }
+
+    void this.pullClient
+      .fetch(`${this.descriptor.url}/unsubscribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clientId: this.pullClient.clientId,
+          subscriptionId: this.subscriptionId,
+        }),
+        credentials: 'include',
+      })
+      .catch(() => {});
   }
 
   private registerWithPullClient() {

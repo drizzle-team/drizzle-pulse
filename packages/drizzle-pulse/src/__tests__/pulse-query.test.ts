@@ -391,4 +391,36 @@ describe('PulseQuery runtime characterization', () => {
       error: null,
     });
   });
+
+  test('destroy() notifies the server to release the subscription (WR-07)', async () => {
+    const subscribeResponse = new Response(
+      serialize({
+        subscriptionId: 'sub-destroy-notify',
+        rows: [{ $pk: 1, label: 'a' }],
+        rangeStart: 1,
+        rangeEnd: 1,
+        snapshot: 1,
+        order: 'asc',
+        limit: null,
+      }),
+      { status: 200 },
+    );
+    const unsubscribeResponse = new Response(serialize({ ok: true }), { status: 200 });
+
+    const { fetchImpl, calls } = createQueuedFetch([subscribeResponse, unsubscribeResponse]);
+    const core = new PulseQuery(createTestClient(fetchImpl).ordersByStatus({}));
+
+    await core.subscribe();
+    core.destroy();
+
+    // notifyUnsubscribe() is fire-and-forget; flush the microtask queue.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(calls[1]?.url).toBe('/api/realtime/unsubscribe');
+    expect(calls[1]?.body).toEqual({
+      clientId: expect.any(String),
+      subscriptionId: 'sub-destroy-notify',
+    });
+  });
 });

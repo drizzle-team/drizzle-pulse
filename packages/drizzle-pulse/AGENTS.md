@@ -26,7 +26,7 @@ Type-safe realtime SDK shared by server, client, React, and embedded layers.
 | `src/pulse-table.ts` | root-barrel collection entity: `pulse(table)` → `PulseTable`, `isPulseTable()`, `getPulseTableConfig()`; lazy PK validation at `.query()` time; platform-pure (bare `drizzle-orm` value imports only, no `pg-core`) |
 | `src/shared/` | protocol request/response types, filter AST helpers, PK utilities, `pulse-merge-core.ts` (merge state machine reused by HTTP `PulseQuery` and embedded `PulseCollection`) |
 | `src/client/create-client.ts` | proxy-based typed client |
-| `src/client/pulse-query.ts` | framework-agnostic subscribe/poll/load-more state machine (`PulseQuery` class) |
+| `src/client/pulse-query.ts` | framework-agnostic subscribe/poll/load-more state machine (`PulseQuery` class); `destroy()` best-effort notifies the server via `unsubscribe` |
 | `src/client/superjson.ts` | response deserialization helper |
 | `src/client/react/use-pulse-query.ts` | `usePulseQuery` wrapper around `PulseQuery` |
 | `src/server/pulse-builder.ts` | immutable query builder (`.columns/.args/.order/.limit/.transform/.query`), seeded by `PulseTable.query(fn?)` |
@@ -35,9 +35,9 @@ Type-safe realtime SDK shared by server, client, React, and embedded layers.
 | `src/server/events-table-resolver.ts` | convention resolver: synthesizes the events `PgTable` (`__events_<schema>_<table>`) from a source table by cloning each column's own class/config |
 | `src/server/events-table-ddl.ts` | DDL emitter: derives `CREATE SCHEMA`/`CREATE TABLE` SQL strictly from the resolver's output (D-09 — no hand-mirrored SQL) |
 | `src/server/pulse-sql.ts` | query compilation / row predicate evaluation |
-| `src/server/expose.ts` | `RealtimeRuntime` assembly, `ExposeConfig` defaults (`drizzle_pulse` publication/slot, `drizzle` events schema), the aggregating startup guard, WAL listener lifecycle |
-| `src/server/handlers.ts` | `RealtimeRequestHandler` — subscribe/pull/loadMore request handling, consumes an injected `getEventsTable(queryName)` lookup |
-| `src/server/realtime-store.ts` | `RealtimeService` and `SubscriptionManager` |
+| `src/server/expose.ts` | `RealtimeRuntime` assembly, `ExposeConfig` defaults (`drizzle_pulse` publication/slot, `drizzle` events schema, `subscriptionTtl` idle-sweep interval), the aggregating startup guard, WAL listener lifecycle |
+| `src/server/handlers.ts` | `RealtimeRequestHandler` — subscribe/pull/loadMore/unsubscribe request handling, consumes an injected `getEventsTable(queryName)` lookup |
+| `src/server/realtime-store.ts` | `RealtimeService` and `SubscriptionManager` (tracks `lastSeenAt` per subscription; `sweepIdle()` evicts subscriptions abandoned without an explicit `unsubscribe`) |
 | `src/client/embedded/index.ts` | in-process embedded client: `createPulseClient(runtime)` → `PulseCollection` live collections fed directly by the WAL tap (no HTTP) |
 | `src/__tests__/` | runtime/unit tests for SDK internals |
 

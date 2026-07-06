@@ -39,6 +39,15 @@ export type LoadMoreResponse<T> = {
   hasMore: boolean;
 };
 
+export type UnsubscribeRequest = {
+  clientId?: string;
+  subscriptionId?: string;
+};
+
+export type UnsubscribeResponse = {
+  ok: true;
+};
+
 export type PullIncrementalResponse<TEvent> = {
   reset?: false;
   events: TEvent[];

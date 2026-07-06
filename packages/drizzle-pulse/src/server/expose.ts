@@ -58,11 +58,20 @@ export type ExposeWalConfig = Partial<
   Pick<WalListenerConfig, 'publicationName' | 'slotName' | 'reconnect' | 'logging'>
 >;
 
+export type SubscriptionTtlConfig = {
+  // How long a subscription may go without a pull() before the sweep evicts it (WR-07):
+  // subscriptions otherwise live forever, since nothing else ever calls
+  // SubscriptionManager.delete() for a client that disconnects without unsubscribing.
+  idleMs?: number;
+  sweepIntervalMs?: number;
+};
+
 export type ExposeConfig = {
   databaseUrl: string;
   sourceDb: PulseSourceDb;
   eventsSchema?: string;
   wal?: ExposeWalConfig;
+  subscriptionTtl?: SubscriptionTtlConfig;
 };
 
 type SourceTableMetadata = {
@@ -92,6 +101,11 @@ const DEFAULT_LOGGING: Required<WalLoggingConfig> = {
 
 const DEFAULT_WAL_NAME = 'drizzle_pulse';
 
+const DEFAULT_SUBSCRIPTION_TTL: Required<SubscriptionTtlConfig> = {
+  idleMs: 24 * 60 * 60 * 1000, // 24h — comfortably longer than any realistic client-side pull cadence
+  sweepIntervalMs: 5 * 60 * 1000, // 5m
+};
+
 // `pg` parses `connectionString` itself (via its own `parse` dependency), which correctly
 // percent-decodes user/password/database and honors query params (`sslmode`, `ssl`,
 // `application_name`, ...). Re-parsing the URL by hand here (previous implementation)
@@ -113,6 +127,8 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
   private readonly pgPoolConfig: PoolConfig;
   private readonly reconnectConfig: Required<NonNullable<ExposeWalConfig['reconnect']>>;
   private readonly loggingConfig: Required<WalLoggingConfig>;
+  private readonly subscriptionTtlConfig: Required<SubscriptionTtlConfig>;
+  private subscriptionSweepTimer: ReturnType<typeof setInterval> | null = null;
   // Public (not private): the integration-test harness augments a RealtimeRuntime
   // instance with its own `{ publicationName, slotName }` via Object.assign for test
   // introspection (see packages/integration-tests/src/helpers/test-harness.ts). A
@@ -208,6 +224,10 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     this.pgPoolConfig = withQuietPgOptions(pg);
     this.reconnectConfig = { ...DEFAULT_RECONNECT, ...wal.reconnect };
     this.loggingConfig = { ...DEFAULT_LOGGING, ...wal.logging };
+    this.subscriptionTtlConfig = {
+      ...DEFAULT_SUBSCRIPTION_TTL,
+      ...this.config.subscriptionTtl,
+    };
 
     this.requestHandler = new RealtimeRequestHandler(
       this._registry,
@@ -289,6 +309,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       this._lastPersistedSnapshot = maxSnapshot;
 
       await this.connectReplication();
+      this.startSubscriptionSweep();
     } catch (error) {
       this._isRunning = false;
       await this.teardownFailedStart();
@@ -303,6 +324,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
 
     this._isRunning = false;
     this.clearReconnectTimer();
+    this.stopSubscriptionSweep();
 
     const replicationService = this.replicationService;
     this.replicationService = null;
@@ -334,6 +356,8 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
   // Mirrors stop()'s pool/service teardown so a failed guard doesn't leak connections —
   // callers await start() rejections and then discard the runtime (D-12).
   private async teardownFailedStart(): Promise<void> {
+    this.stopSubscriptionSweep();
+
     const pool = this.pool;
     this.pool = null;
     this.realtimeService = null;
@@ -571,6 +595,29 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
 
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
+  }
+
+  // WR-07: without this sweep, SubscriptionManager.delete() is only ever reached via the
+  // explicit unsubscribe() handler — a client that disconnects without calling it (closed
+  // tab, crashed process, ...) would otherwise leak its subscription forever.
+  private startSubscriptionSweep(): void {
+    if (this.subscriptionSweepTimer) {
+      return;
+    }
+
+    this.subscriptionSweepTimer = setInterval(() => {
+      this.subscriptionManager.sweepIdle(this.subscriptionTtlConfig.idleMs);
+    }, this.subscriptionTtlConfig.sweepIntervalMs);
+    this.subscriptionSweepTimer.unref?.();
+  }
+
+  private stopSubscriptionSweep(): void {
+    if (!this.subscriptionSweepTimer) {
+      return;
+    }
+
+    clearInterval(this.subscriptionSweepTimer);
+    this.subscriptionSweepTimer = null;
   }
 
   private async handleMessage(lsn: string, log: Pgoutput.Message): Promise<void> {
