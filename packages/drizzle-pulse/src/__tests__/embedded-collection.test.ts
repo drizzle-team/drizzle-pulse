@@ -248,4 +248,19 @@ describe('embedded client — user-facing error paths', () => {
 
     await expect(pending).rejects.toThrow(/disposed before the initial sync completed/);
   });
+
+  test('the client proxy is not accidentally thenable — awaiting it settles instead of hanging (IN-07)', async () => {
+    const runtime = makeMockRuntime();
+    const client = createPulseClient(runtime as any);
+
+    expect((client as any).then).toBeUndefined();
+    // Race against a short timeout: pre-fix, `await client` never settles because the
+    // proxy's `then` triggers a rejected-but-ignored promise instead of resolving/rejecting
+    // the awaiting one. `Promise.race` proves the await itself resolves promptly.
+    const resolvedInTime = await Promise.race([
+      Promise.resolve(client).then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 200)),
+    ]);
+    expect(resolvedInTime).toBe(true);
+  });
 });

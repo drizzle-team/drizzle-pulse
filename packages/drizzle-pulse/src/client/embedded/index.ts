@@ -425,6 +425,11 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
   return new Proxy({} as EmbeddedPulseClient<TQueries>, {
     get(_target, prop: string | symbol) {
       if (typeof prop !== 'string') return undefined;
+      // Returning a function for `then` makes the proxy an accidental thenable:
+      // `await client` / `Promise.resolve(client)` would invoke `then(resolve, reject)`,
+      // which resolves to the "Unknown query" rejection of an ignored promise instead of
+      // settling the awaiting promise — a silent hang rather than a throw (IN-07).
+      if (prop === 'then') return undefined;
       // async so every failure — unknown query, stopped runtime, args validation inside
       // resolve() — surfaces as a rejection of the returned promise, never a sync throw.
       // The body still runs synchronously up to create()'s baseline SELECT, preserving the
