@@ -6,8 +6,8 @@ import {
   type PulseCollectionOptions,
   type PulseRow,
 } from '../src/client/embedded/index.js';
+import { pulse } from '../src/index.js';
 import type { RealtimeRuntime } from '../src/server/expose.js';
-import { createPulse } from '../src/server/pulse.js';
 import { createPulseRegistry } from '../src/server/pulse-registry.js';
 import { driverSchema, orders, statusSchema } from './fixtures.js';
 
@@ -15,12 +15,11 @@ import { driverSchema, orders, statusSchema } from './fixtures.js';
 // Build registry (mirrors registry-client.type-test.ts)
 // ---------------------------------------------------------------------------
 
-const pulse = createPulse();
-
 const withArgs = pulse(orders)
+  .query()
   .args(statusSchema)
   .query((ctx) => ctx.query({ status: ctx.args.status }));
-const noArgs = pulse(orders);
+const noArgs = pulse(orders).query();
 
 // Compile check only: the builders must satisfy createPulseRegistry's constraints.
 createPulseRegistry({ withArgs, noArgs });
@@ -127,10 +126,12 @@ client.noArgs({ driverId: 42 });
 // Verify that a selected-columns registry also infers correctly.
 const selectedQueries = {
   byStatus: pulse(orders)
+    .query()
     .columns({ id: true, status: true })
     .args(statusSchema)
     .query((ctx) => ctx.query({ status: ctx.args.status })),
   byDriver: pulse(orders)
+    .query()
     .columns({ id: true, driverId: true })
     .args(driverSchema)
     .query((ctx) => ctx.query({ driverId: ctx.args.driverId })),

@@ -4,9 +4,10 @@ import { integer, pgTable, serial, text } from 'drizzle-orm/pg-core';
 import { Hono } from 'hono';
 import SuperJSON from 'superjson';
 import { z } from 'zod';
+import { pulse } from '../pulse-table.js';
+import { resolveEventsTable } from '../server/events-table-resolver.js';
 import { RealtimeRequestHandler } from '../server/handlers.js';
 import type { PulseAuthContext } from '../server/index.js';
-import { createPulse } from '../server/pulse.js';
 import { createPulseRegistry } from '../server/pulse-registry.js';
 import type { RealtimeService } from '../server/realtime-store.js';
 import { SubscriptionManager } from '../server/realtime-store.js';
@@ -21,18 +22,6 @@ const ordersTable = pgTable('orders', {
   id: serial('id').primaryKey(),
   status: text('status').notNull(),
   price: integer('price'),
-});
-
-const eventsOrdersTable = pgTable('events_orders', {
-  id: integer('id').notNull(),
-  status: text('status'),
-  price: integer('price'),
-  oldId: integer('$old_id'),
-  oldStatus: text('$old_status'),
-  oldPrice: integer('$old_price'),
-  $snapshot: integer('$snapshot').generatedAlwaysAsIdentity(),
-  $op: text('$op').notNull(),
-  $timestamp: text('$timestamp').notNull(),
 });
 
 const QUERY_DATA = {
@@ -77,10 +66,9 @@ function getPullResult(
 }
 
 function createRegistry() {
-  const pulse = createPulse();
   return createPulseRegistry({
     testQuery: pulse(ordersTable)
-      .$eventsTable(eventsOrdersTable)
+      .query()
       .args(z.object({ status: z.string() }))
       .order('asc')
       .limit(2)
@@ -194,6 +182,7 @@ function createRouterHarness(params?: {
     pulseSourceDb,
     subscriptionManager,
     () => realtimeService,
+    () => resolveEventsTable(ordersTable),
   );
 
   const router = new Hono();

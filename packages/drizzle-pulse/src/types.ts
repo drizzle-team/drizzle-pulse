@@ -81,7 +81,6 @@ export interface PulseAuthContext {
 
 export interface PulseRegistryQuery {
   readonly table: PgTable;
-  readonly eventsTable: PgTable;
   readonly pkColumn: PgColumn;
   readonly columns: Record<string, PgColumn>;
   readonly selectedColumns: Record<string, PgColumn>;

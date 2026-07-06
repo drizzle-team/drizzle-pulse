@@ -1,5 +1,5 @@
 import { expectTypeOf } from 'bun:test';
-import { createPulse } from '../src/server/pulse.js';
+import { pulse } from '../src/index.js';
 import type { PulseBuilder } from '../src/server/pulse-builder.js';
 import { driverSchema, statusSchema, orders as typeTestOrders } from './fixtures.js';
 
@@ -17,8 +17,8 @@ type TypeTestOrderRow = {
 
 type TypeTestOrderStatus = TypeTestOrderRow['status'];
 
-const pulse = createPulse();
 const filteredQuery = pulse(typeTestOrders)
+  .query()
   .args(statusSchema)
   .query((ctx) => ctx.query({ status: ctx.args.status }));
 const operatorFilterQuery = pulse(typeTestOrders).query((ctx) =>
@@ -73,6 +73,7 @@ const notFilterQuery = pulse(typeTestOrders).query((ctx) =>
   }),
 );
 const argsDrivenFilterQuery = pulse(typeTestOrders)
+  .query()
   .args(driverSchema)
   .query((ctx) =>
     ctx.query({
@@ -195,10 +196,12 @@ pulse(typeTestOrders).query((ctx) => ctx.query({ driverId: null }));
 // @ts-expect-error nullable columns must use isNull instead of raw null
 pulse(typeTestOrders).query((ctx) => ctx.query({ acceptedAt: null }));
 void pulse(typeTestOrders)
+  .query()
   .args(driverSchema)
   // @ts-expect-error args property does not exist on driver args
   .query((ctx) => ctx.query({ driverId: ctx.args.status }));
 void pulse(typeTestOrders)
+  .query()
   .args(driverSchema)
   // @ts-expect-error args type is wrong for driverId
   .query((ctx) => ctx.query({ driverId: { eq: `${ctx.args.driverId}` } }));

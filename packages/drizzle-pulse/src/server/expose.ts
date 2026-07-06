@@ -1,7 +1,8 @@
 import { desc, getTableUniqueName, sql } from 'drizzle-orm';
-import type { PgTable } from 'drizzle-orm/pg-core';
+import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
 import { type ClientConfig, Pool, type PoolConfig, types } from 'pg';
 import { LogicalReplicationService, type Pgoutput, PgoutputPlugin } from 'pg-logical-replication';
+import { DEFAULT_EVENTS_SCHEMA, resolveEventsTable } from './events-table-resolver.js';
 import { RealtimeRequestHandler } from './handlers.js';
 import type { AnyPulseBuilders, PulseRegistry } from './pulse-registry.js';
 import type { PulseSourceDb } from './pulse-sql.js';
@@ -36,10 +37,15 @@ export interface WalLoggingConfig {
   events?: boolean;
 }
 
+export type ExposeWalConfig = Partial<
+  Pick<WalListenerConfig, 'publicationName' | 'slotName' | 'reconnect' | 'logging'>
+>;
+
 export type ExposeConfig = {
   databaseUrl: string;
   sourceDb: PulseSourceDb;
-  wal: Pick<WalListenerConfig, 'publicationName' | 'slotName' | 'reconnect' | 'logging'>;
+  eventsSchema?: string;
+  wal?: ExposeWalConfig;
 };
 
 type SourceTableMetadata = {
@@ -67,6 +73,8 @@ const DEFAULT_LOGGING: Required<WalLoggingConfig> = {
   events: true,
 };
 
+const DEFAULT_WAL_NAME = 'drizzle_pulse';
+
 function parseDatabaseUrl(databaseUrl: string) {
   const url = new URL(databaseUrl);
 
@@ -92,8 +100,11 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
   private readonly requestHandler: RealtimeRequestHandler;
   private readonly pgConfig: ClientConfig & { replication: 'database' };
   private readonly pgPoolConfig: PoolConfig;
-  private readonly reconnectConfig: Required<NonNullable<ExposeConfig['wal']['reconnect']>>;
+  private readonly reconnectConfig: Required<NonNullable<ExposeWalConfig['reconnect']>>;
   private readonly loggingConfig: Required<WalLoggingConfig>;
+  private readonly publicationName: string;
+  private readonly slotName: string;
+  private readonly eventsSchema: string;
 
   private pool: Pool | null = null;
   private realtimeService: RealtimeService | null = null;
@@ -145,6 +156,11 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     private readonly _registry: PulseRegistry<TQueries>,
     private readonly config: ExposeConfig,
   ) {
+    const wal = this.config.wal ?? {};
+    this.publicationName = wal.publicationName ?? DEFAULT_WAL_NAME;
+    this.slotName = wal.slotName ?? DEFAULT_WAL_NAME;
+    this.eventsSchema = this.config.eventsSchema ?? DEFAULT_EVENTS_SCHEMA;
+
     this.sourceTableMetadata = new Map();
     for (const queryName of this._registry.getQueryNames()) {
       const pulseQuery = this._registry.getPulseQuery(queryName);
@@ -157,10 +173,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
         continue;
       }
 
-      const eventsTable = this._registry.getEventsTable(queryName);
-      if (!eventsTable) {
-        continue;
-      }
+      const eventsTable = resolveEventsTable(sourceTable, { eventsSchema: this.eventsSchema });
 
       this.sourceTableMetadata.set(getTableUniqueName(pulseQuery.table), {
         sourceTable,
@@ -177,19 +190,36 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       replication: 'database',
     };
     this.pgPoolConfig = withQuietPgOptions(pg);
-    this.reconnectConfig = { ...DEFAULT_RECONNECT, ...this.config.wal.reconnect };
-    this.loggingConfig = { ...DEFAULT_LOGGING, ...this.config.wal.logging };
+    this.reconnectConfig = { ...DEFAULT_RECONNECT, ...wal.reconnect };
+    this.loggingConfig = { ...DEFAULT_LOGGING, ...wal.logging };
 
     this.requestHandler = new RealtimeRequestHandler(
       this._registry,
       this.getSourceDb(),
       this.subscriptionManager,
       () => this.getRealtimeService(),
+      (queryName: string) => this.getEventsTableForQuery(queryName),
     );
   }
 
   get handlers() {
     return this.requestHandler;
+  }
+
+  // Total for registered queries — every source table gets an events table resolved
+  // at construction, so an unknown queryName is the only throwing case.
+  private getEventsTableForQuery(queryName: string): PgTable {
+    const sourceTable = this._registry.getSourceTable(queryName);
+    if (!sourceTable) {
+      throw new Error(`Unknown query: "${queryName}"`);
+    }
+
+    const metadata = this.sourceTableMetadata.get(getTableUniqueName(sourceTable));
+    if (!metadata) {
+      throw new Error(`No events table resolved for query "${queryName}"`);
+    }
+
+    return metadata.eventsTable;
   }
 
   async ensureBaselines(): Promise<void> {
@@ -208,7 +238,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
         .limit(1);
 
       await currentRealtimeService.createBaselineSnapshot(
-        pulseQuery.eventsTable,
+        this.getEventsTableForQuery(queryName),
         pulseQuery.pkColumn.name,
         baselineRow ?? null,
       );
@@ -232,6 +262,14 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     }
 
     this.initializeDatabaseServices();
+
+    try {
+      await this.runStartupGuard();
+    } catch (error) {
+      await this.teardownFailedStart();
+      throw error;
+    }
+
     this._isRunning = true;
     await this.ensureBaselines();
 
@@ -281,6 +319,94 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     this.realtimeService = new RealtimeService(pool);
   }
 
+  // Mirrors stop()'s pool/service teardown so a failed guard doesn't leak connections —
+  // callers await start() rejections and then discard the runtime (D-12).
+  private async teardownFailedStart(): Promise<void> {
+    const pool = this.pool;
+    this.pool = null;
+    this.realtimeService = null;
+
+    if (pool) {
+      await pool.end();
+    }
+  }
+
+  // Fail-closed startup guard (D-12/API-04): aggregates every unmet precondition into a
+  // single thrown Error instead of silently starting a runtime that will emit zero events.
+  private async runStartupGuard(): Promise<void> {
+    const adminDb = this.getRealtimeService().getDb();
+    const failures: string[] = [];
+
+    const publicationResult = await adminDb.execute<{ puballtables: boolean }>(
+      sql`SELECT puballtables FROM pg_publication WHERE pubname = ${this.publicationName}`,
+    );
+    const publicationRow = publicationResult.rows[0];
+
+    if (!publicationRow) {
+      failures.push(
+        `publication "${this.publicationName}" does not exist — create it (e.g. CREATE PUBLICATION ${this.publicationName} FOR ALL TABLES) before starting`,
+      );
+    } else if (!publicationRow.puballtables) {
+      const membershipResult = await adminDb.execute<{ schemaname: string; tablename: string }>(
+        sql`SELECT schemaname, tablename FROM pg_publication_tables WHERE pubname = ${this.publicationName}`,
+      );
+      const members = new Set(
+        membershipResult.rows.map((row) => `${row.schemaname}.${row.tablename}`),
+      );
+
+      for (const meta of this.sourceTableMetadata.values()) {
+        const sourceConfig = getTableConfig(meta.sourceTable);
+        const qualifiedName = `${sourceConfig.schema ?? 'public'}.${sourceConfig.name}`;
+        if (!members.has(qualifiedName)) {
+          failures.push(
+            `table "${qualifiedName}" is not a member of publication "${this.publicationName}"`,
+          );
+        }
+      }
+    }
+
+    for (const meta of this.sourceTableMetadata.values()) {
+      const eventsConfig = getTableConfig(meta.eventsTable);
+      const eventsSchemaName = eventsConfig.schema ?? this.eventsSchema;
+      const existsResult = await adminDb.execute<{ relname: string }>(
+        sql`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ${eventsSchemaName} AND c.relname = ${eventsConfig.name}`,
+      );
+      if (existsResult.rows.length === 0) {
+        failures.push(
+          `events table "${eventsSchemaName}.${eventsConfig.name}" does not exist — run migrations/codegen to create it`,
+        );
+      }
+    }
+
+    for (const meta of this.sourceTableMetadata.values()) {
+      const sourceConfig = getTableConfig(meta.sourceTable);
+      const sourceSchemaName = sourceConfig.schema ?? 'public';
+      const replicaIdentityResult = await adminDb.execute<{ relreplident: string }>(
+        sql`SELECT c.relreplident FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ${sourceSchemaName} AND c.relname = ${sourceConfig.name}`,
+      );
+      const replicaIdentityRow = replicaIdentityResult.rows[0];
+      if (!replicaIdentityRow || replicaIdentityRow.relreplident !== 'f') {
+        failures.push(
+          `table "${sourceSchemaName}.${sourceConfig.name}" does not have REPLICA IDENTITY FULL — run ALTER TABLE ${sourceSchemaName}.${sourceConfig.name} REPLICA IDENTITY FULL`,
+        );
+      }
+    }
+
+    const walLevelResult = await adminDb.execute<{ wal_level: string }>(
+      sql`SELECT current_setting('wal_level') AS wal_level`,
+    );
+    const walLevel = walLevelResult.rows[0]?.wal_level;
+    if (walLevel !== 'logical') {
+      failures.push(`wal_level is "${walLevel ?? 'unknown'}", but must be "logical"`);
+    }
+
+    if (failures.length > 0) {
+      throw new Error(
+        ['expose() startup guard failed:', ...failures.map((failure) => `- ${failure}`)].join('\n'),
+      );
+    }
+  }
+
   private onReplicationStart(): void {
     if (!this._isRunning) return;
     this.log('[WAL Listener] Replication started');
@@ -305,7 +431,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
 
       const plugin = new PgoutputPlugin({
         protoVersion: 1,
-        publicationNames: [this.config.wal.publicationName],
+        publicationNames: [this.publicationName],
       });
 
       replicationService.on('data', async (lsn: string, log: Pgoutput.Message) => {
@@ -345,7 +471,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
         },
       );
 
-      const slotName = this.config.wal.slotName;
+      const slotName = this.slotName;
       const result = await adminDb.execute<{
         slot_name: string;
         active: boolean;
@@ -372,8 +498,8 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
         this.log(`[WAL Listener] Replication slot '${slotName}' ready`);
       }
 
-      this.log(`[WAL Listener] Subscribing to slot '${this.config.wal.slotName}'`);
-      const streaming = replicationService.subscribe(plugin, this.config.wal.slotName);
+      this.log(`[WAL Listener] Subscribing to slot '${this.slotName}'`);
+      const streaming = replicationService.subscribe(plugin, this.slotName);
       await Promise.race([
         new Promise((resolve) => replicationService.once('start', resolve)),
         streaming, // settles first only on immediate failure → propagates the error

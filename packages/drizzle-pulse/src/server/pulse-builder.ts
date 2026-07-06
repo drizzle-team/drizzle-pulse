@@ -45,25 +45,6 @@ export class PulseBuilder<
     this.config = config;
   }
 
-  $eventsTable<TEventsTable extends PgTable>(
-    table: TEventsTable,
-  ): PulseBuilder<TTable, TSelection, TArgs, TResult> {
-    return new PulseBuilder<TTable, TSelection, TArgs, TResult>({
-      table: {
-        ...this.config.table,
-        events: table,
-      },
-      pkColumn: this.config.pkColumn,
-      columns: this.config.columns,
-      selectedColumns: this.config.selectedColumns,
-      argsSchema: this.config.argsSchema,
-      queryFn: this.config.queryFn,
-      transformFn: this.config.transformFn,
-      order: this.config.order,
-      limit: this.config.limit,
-    });
-  }
-
   columns<TNewSelection extends Record<string, boolean>>(
     selection: TNewSelection,
   ): PulseBuilder<TTable, TNewSelection, TArgs, ColumnsSelection<TTable, TNewSelection>> {

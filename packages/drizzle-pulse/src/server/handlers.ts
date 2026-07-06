@@ -60,6 +60,7 @@ export class RealtimeRequestHandler {
     private readonly sourceDb: PulseSourceDb,
     private readonly subscriptionManager: SubscriptionManager,
     private readonly getRealtimeService: () => Pick<RealtimeService, 'getDb' | 'getLatestSnapshot'>,
+    private readonly getEventsTable: (queryName: string) => PgTable,
   ) {}
 
   async subscribe(
@@ -126,7 +127,9 @@ export class RealtimeRequestHandler {
         rangeEnd,
         hasMore,
       });
-      const snapshot = await this.getRealtimeService().getLatestSnapshot(resolvedQuery.eventsTable);
+      const snapshot = await this.getRealtimeService().getLatestSnapshot(
+        this.getEventsTable(queryName),
+      );
       const pipelinedRows = await applyResponsePipeline(rows, resolvedQuery);
 
       const response: SubscribeResponse<Record<string, unknown>> = {
@@ -291,7 +294,7 @@ export class RealtimeRequestHandler {
         }
         if ('reset' in incremental && incremental.reset === true) {
           const latestSnapshot = await realtimeService.getLatestSnapshot(
-            subscription.query.eventsTable,
+            this.getEventsTable(subscription.queryName),
           );
           const rerun = await this.buildResetResponse(subscription, latestSnapshot);
           if ('error' in rerun) {
@@ -478,7 +481,9 @@ export class RealtimeRequestHandler {
     | { reset: true; reason: string }
     | PullResponseError
   > {
-    const latestSnapshot = await realtimeService.getLatestSnapshot(subscription.query.eventsTable);
+    const latestSnapshot = await realtimeService.getLatestSnapshot(
+      this.getEventsTable(subscription.queryName),
+    );
     if (sinceSnapshot >= latestSnapshot) {
       return {
         events: [],
@@ -489,10 +494,10 @@ export class RealtimeRequestHandler {
     }
 
     const eventsDb = realtimeService.getDb();
-    const eventsTable = this.registry.getEventsTable(subscription.queryName);
-    if (!eventsTable) {
-      return { error: 'events_table_not_found' };
-    }
+    // Total for registered queries — the runtime resolves an events table for every
+    // source table at construction, so this throws rather than returning null for a
+    // genuinely unknown query (subscription lookup upstream already guards that case).
+    const eventsTable = this.getEventsTable(subscription.queryName);
     const eventTableColumns = getColumns(eventsTable);
     const eventTableColumnsBySqlName = Object.fromEntries(
       Object.values(eventTableColumns).map((column) => [column.name, column]),

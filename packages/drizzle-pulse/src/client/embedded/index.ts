@@ -1,6 +1,7 @@
 import { getTableUniqueName } from 'drizzle-orm';
 import type { RealtimeRuntime } from '../../server/expose.js';
-import { type AnyPulseBuilders, applyProjectionPipeline } from '../../server/pulse-registry.js';
+import { applyProjectionPipeline } from '../../server/pulse-projection.js';
+import type { AnyPulseBuilders } from '../../server/pulse-registry.js';
 import { buildSelectQuery } from '../../server/pulse-sql.js';
 import type { PulseClientContract } from '../../server/pulse-types.js';
 import type { WalTapPayload } from '../../server/wal-event-emitter.js';

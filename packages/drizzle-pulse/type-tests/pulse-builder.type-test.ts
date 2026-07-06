@@ -1,5 +1,5 @@
 import { expectTypeOf } from 'bun:test';
-import { createPulse } from '../src/server/pulse.js';
+import { pulse } from '../src/index.js';
 import type { PulseBuilder } from '../src/server/pulse-builder.js';
 import { createPulseRegistry } from '../src/server/pulse-registry.js';
 import type { QueryDescriptor } from '../src/types.js';
@@ -17,21 +17,23 @@ type OrderRow = {
   updatedAt: Date;
 };
 
-const pulse = createPulse();
-const defaultQuery = pulse(orders);
-const includeColumnsQuery = pulse(orders).columns({ id: true, pickup: true });
-const excludeColumnsQuery = pulse(orders).columns({ price: false, acceptedAt: false });
-const statusArgsQuery = pulse(orders).args(statusSchema);
-const replacedArgsQuery = pulse(orders).args(statusSchema).args(driverSchema);
-const transformedQuery = pulse(orders).transform((rows) => {
-  const rowsCheck: OrderRow[] = rows;
-  return rowsCheck;
-});
-void pulse(orders).order('asc');
-void pulse(orders).order('desc');
-void pulse(orders).limit(10);
+const defaultQuery = pulse(orders).query();
+const includeColumnsQuery = pulse(orders).query().columns({ id: true, pickup: true });
+const excludeColumnsQuery = pulse(orders).query().columns({ price: false, acceptedAt: false });
+const statusArgsQuery = pulse(orders).query().args(statusSchema);
+const replacedArgsQuery = pulse(orders).query().args(statusSchema).args(driverSchema);
+const transformedQuery = pulse(orders)
+  .query()
+  .transform((rows) => {
+    const rowsCheck: OrderRow[] = rows;
+    return rowsCheck;
+  });
+void pulse(orders).query().order('asc');
+void pulse(orders).query().order('desc');
+void pulse(orders).query().limit(10);
 const noArgsQuery = pulse(orders).query((_ctx) => null);
 const fullChainQuery = pulse(orders)
+  .query()
   .columns({ id: true, status: true, price: true })
   .args(statusSchema)
   .order('desc')
@@ -88,9 +90,9 @@ expectTypeOf(transformedQuery).toEqualTypeOf<
   PulseBuilder<typeof orders, Record<never, boolean>, Record<never, never>, OrderRow>
 >();
 
-const transformedShapeQuery = pulse(orders).transform((rows) =>
-  rows.map((row) => ({ id: row.id, statusLabel: row.status.toUpperCase() })),
-);
+const transformedShapeQuery = pulse(orders)
+  .query()
+  .transform((rows) => rows.map((row) => ({ id: row.id, statusLabel: row.status.toUpperCase() })));
 expectTypeOf(transformedShapeQuery._.result).toEqualTypeOf<{
   id: number;
   statusLabel: string;
@@ -106,9 +108,9 @@ expectTypeOf<ReturnType<typeof transformedRegistry.$client.transformedShapeQuery
 >();
 
 // @ts-expect-error invalid order direction
-pulse(orders).order('sideways');
+pulse(orders).query().order('sideways');
 // @ts-expect-error limit expects number
-pulse(orders).limit('10');
+pulse(orders).query().limit('10');
 
 type FullChainResult = typeof fullChainQuery._.result;
 expectTypeOf<FullChainResult['id']>().toEqualTypeOf<number>();

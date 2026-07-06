@@ -19,18 +19,6 @@ const ordersTable = pgTable('orders', {
   price: integer('price'),
 });
 
-const eventsOrdersTable = pgTable('events_orders', {
-  id: integer('id').notNull(),
-  status: text('status'),
-  price: integer('price'),
-  oldId: integer('$old_id').notNull(),
-  oldStatus: text('$old_status'),
-  oldPrice: integer('$old_price'),
-  snapshot: integer('$snapshot').generatedAlwaysAsIdentity(),
-  op: text('$op').notNull(),
-  timestamp: text('$timestamp').notNull(),
-});
-
 const ordersColumns = getColumns(ordersTable);
 
 // ---------------------------------------------------------------------------
@@ -124,7 +112,6 @@ function makeBlockingDb(rows: Record<string, unknown>[]): {
 function makeResolvedQuery(overrides: Partial<ResolvedPulseQuery> = {}): ResolvedPulseQuery {
   return {
     table: ordersTable,
-    eventsTable: eventsOrdersTable,
     pkColumn: ordersColumns.id,
     columns: ordersColumns,
     selectedColumns: ordersColumns,
@@ -142,7 +129,6 @@ function makeResolvedQuery(overrides: Partial<ResolvedPulseQuery> = {}): Resolve
 function makeRegistryStub(overrides: Partial<PulseRegistryQuery> = {}): PulseRegistryQuery {
   return {
     table: ordersTable,
-    eventsTable: eventsOrdersTable,
     pkColumn: ordersColumns.id,
     columns: ordersColumns,
     selectedColumns: ordersColumns,

@@ -1,19 +1,18 @@
 import { expectTypeOf } from 'bun:test';
 import { createPulseClient } from '../src/client/index.js';
-import { createPulse } from '../src/server/pulse.js';
+import { pulse } from '../src/index.js';
 import { createPulseRegistry } from '../src/server/pulse-registry.js';
 import type { QueryDescriptor } from '../src/types.js';
 import { driverSchema, orders, statusSchema } from './fixtures.js';
-
-const pulse = createPulse();
 
 // @ts-expect-error legacy client API was removed
 import('../src/client/index.js').then(({ createRealtimeClient }) => createRealtimeClient);
 
 const withArgs = pulse(orders)
+  .query()
   .args(statusSchema)
   .query((ctx) => ctx.query({ status: ctx.args.status }));
-const noArgs = pulse(orders);
+const noArgs = pulse(orders).query();
 const registry = createPulseRegistry({ withArgs, noArgs });
 type Client = typeof registry.$client;
 
@@ -48,6 +47,7 @@ expectTypeOf<Client['noArgs']>().toEqualTypeOf<
 
 const selectedRegistry = createPulseRegistry({
   withArgs: pulse(orders)
+    .query()
     .columns({ id: true, status: true })
     .args(statusSchema)
     .query((ctx) => ctx.query({ status: ctx.args.status })),
@@ -74,6 +74,7 @@ type _DescriptorNoPickup = DescriptorResult['pickup'];
 
 const driverRegistry = createPulseRegistry({
   byDriver: pulse(orders)
+    .query()
     .args(driverSchema)
     .query((ctx) => ctx.query({ driverId: ctx.args.driverId })),
 });
@@ -101,14 +102,16 @@ type _RowNoDropoff = Row['dropoff'];
 
 const multiRegistry = createPulseRegistry({
   byStatus: pulse(orders)
+    .query()
     .columns({ id: true, status: true })
     .args(statusSchema)
     .query((ctx) => ctx.query({ status: ctx.args.status })),
   byDriver: pulse(orders)
+    .query()
     .columns({ id: true, driverId: true })
     .args(driverSchema)
     .query((ctx) => ctx.query({ driverId: ctx.args.driverId })),
-  all: pulse(orders),
+  all: pulse(orders).query(),
 });
 type MultiClient = typeof multiRegistry.$client;
 expectTypeOf<keyof MultiClient>().toEqualTypeOf<'byStatus' | 'byDriver' | 'all'>();

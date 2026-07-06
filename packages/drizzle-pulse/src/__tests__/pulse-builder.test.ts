@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { getColumns, getTableUniqueName } from 'drizzle-orm';
 import { boolean, integer, pgSchema, primaryKey, serial, text, varchar } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
-import { createPulse } from '../server/pulse.js';
+import { pulse } from '../pulse-table.js';
 import { PulseBuilder } from '../server/pulse-builder.js';
 import { createPulseRegistry } from '../server/pulse-registry.js';
 import type { PulseQueryConfig, PulseQueryContext } from '../server/pulse-types.js';
@@ -16,21 +16,6 @@ const testTable = testSchema.table('test_items', {
   score: integer('score'),
 });
 
-const realtimeSchema = pgSchema('realtime');
-const eventsTestTable = realtimeSchema.table('events_test_test_items', {
-  id: integer('id').notNull(),
-  name: text('name'),
-  status: text('status'),
-  score: integer('score'),
-  oldId: integer('$old_id'),
-  oldName: text('$old_name'),
-  oldStatus: text('$old_status'),
-  oldScore: integer('$old_score'),
-  $snapshot: integer('$snapshot').generatedAlwaysAsIdentity(),
-  $op: text('$op').notNull(),
-  $timestamp: text('$timestamp').notNull(),
-});
-
 function makeEmptyConfig(): PulseQueryConfig<
   typeof testTable,
   Record<string, boolean>,
@@ -40,7 +25,6 @@ function makeEmptyConfig(): PulseQueryConfig<
   return {
     table: {
       source: testTable,
-      events: null,
     },
     pkColumn: columns.id,
     columns,
@@ -53,6 +37,9 @@ function makeEmptyConfig(): PulseQueryConfig<
   };
 }
 
+// PK declared only via table extras (no inline `.primaryKey()`) — the case
+// PulseTable.query()'s pure gate can't see (D-06), so the registry's defensive
+// re-check is exercised via a hand-built config/builder, bypassing pulse-table.ts.
 const compositePkTable = testSchema.table(
   'composite_items',
   {
@@ -162,22 +149,15 @@ describe('PulseBuilder', () => {
   });
 });
 
-describe('createPulse', () => {
-  test('returns callable factory', () => {
-    const pulse = createPulse();
-    expect(typeof pulse).toBe('function');
-  });
-
-  test('pulse(table) returns PulseBuilder', () => {
-    const pulse = createPulse();
-    const builder = pulse(testTable);
+describe('pulse(table) — collection-first construction', () => {
+  test('pulse(table).query() returns PulseBuilder', () => {
+    const builder = pulse(testTable).query();
     expect(builder).toBeInstanceOf(PulseBuilder);
     expect(getTableUniqueName(builder.config.table.source)).toBe('test.test_items');
   });
 
-  test('pulse(table) creates builder with full selected columns and null optional fields', () => {
-    const pulse = createPulse();
-    const builder = pulse(testTable);
+  test('pulse(table).query() creates builder with full selected columns and null optional fields', () => {
+    const builder = pulse(testTable).query();
     const config = builder.config;
     expect(Object.keys(config.selectedColumns)).toEqual(['id', 'name', 'status', 'score']);
     expect(config.argsSchema).toBeNull();
@@ -187,9 +167,9 @@ describe('createPulse', () => {
     expect(config.limit).toBeNull();
   });
 
-  test('builder chain from createPulse produces valid query', () => {
-    const pulse = createPulse();
+  test('builder chain from pulse(table).query() produces valid query', () => {
     const query = pulse(testTable)
+      .query()
       .columns({ name: true, status: true })
       .args(z.object({ status: z.string() }))
       .query((ctx) => ctx.query({ status: ctx.args.status }));
@@ -197,37 +177,70 @@ describe('createPulse', () => {
     expect(query.config.queryFn).toBeDefined();
   });
 
-  test('pulse(table) is a valid default query when added to registry', () => {
-    const pulse = createPulse();
-    const registry = createPulseRegistry({
-      allOrders: pulse(testTable).$eventsTable(eventsTestTable),
-    });
+  test('pulse(table).query(fn) seeds queryFn directly (collection-level spelling)', () => {
+    const query = pulse(testTable).query((ctx) => ctx.query({ status: ctx.args.status }));
+    expect(query).toBeInstanceOf(PulseBuilder);
+    expect(query.config.queryFn).toBeDefined();
+  });
+
+  test('pulse(table).query() rejects a table with no inline primary key', () => {
+    expect(() => pulse(compositePkTable).query()).toThrowError('has no primary key');
+  });
+
+  test('pulse(table).query() rejects unsupported default PK SQL types', () => {
+    expect(() => pulse(unsupportedPkTable).query()).toThrowError('unsupported SQL type');
+  });
+
+  test('pulse(table).query() accepts PK types with length modifiers', () => {
+    expect(() => pulse(varcharPkTable).query()).not.toThrow();
+  });
+});
+
+describe('createPulseRegistry — derived-queries-only contract (D-04, D-06)', () => {
+  test('rejects a bare collection, instructing to call .query() first', () => {
+    expect(() =>
+      createPulseRegistry({
+        // @ts-expect-error intentionally passing a bare collection to prove the registry's runtime guard (D-04)
+        allOrders: pulse(testTable),
+      }),
+    ).toThrowError(/\.query\(\)/);
+  });
+
+  test('rejects a table whose true PK is a composite primaryKey() declared in table extras', () => {
+    const columns = getColumns(compositePkTable);
+    const config: PulseQueryConfig<
+      typeof compositePkTable,
+      Record<string, boolean>,
+      Record<never, never>
+    > = {
+      table: { source: compositePkTable },
+      pkColumn: columns.leftId,
+      columns,
+      selectedColumns: columns,
+      argsSchema: null,
+      queryFn: null,
+      transformFn: null,
+      order: null,
+      limit: null,
+    };
+    const builder = new PulseBuilder(config);
+
+    expect(() => createPulseRegistry({ compositeQuery: builder })).toThrowError(
+      'has multiple primary keys',
+    );
+  });
+
+  test('a valid derived-queries registry builds and resolve() output carries no eventsTable field', () => {
+    const registry = createPulseRegistry({ allOrders: pulse(testTable).query() });
 
     const query = registry.resolve('allOrders', undefined, { userId: null });
 
     expect(query.where).toBeNull();
+    expect(query).not.toHaveProperty('eventsTable');
     expect(Object.keys(query.selectedColumns)).toEqual(
       expect.arrayContaining(['id', 'name', 'status', 'score']),
     );
     expect(Object.keys(query.selectedColumns).length).toBe(4);
     expect(query.order).toBe('asc');
-  });
-
-  test('pulse(table) rejects composite primary keys when no custom pk is provided', () => {
-    const pulse = createPulse();
-
-    expect(() => pulse(compositePkTable)).toThrowError('has multiple primary keys');
-  });
-
-  test('pulse(table) rejects unsupported default PK SQL types', () => {
-    const pulse = createPulse();
-
-    expect(() => pulse(unsupportedPkTable)).toThrowError('unsupported SQL type');
-  });
-
-  test('pulse(table) accepts PK types with length modifiers', () => {
-    const pulse = createPulse();
-
-    expect(() => pulse(varcharPkTable)).not.toThrow();
   });
 });

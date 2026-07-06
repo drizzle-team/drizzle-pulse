@@ -67,7 +67,6 @@ export type WithPk<TRow extends Record<string, unknown>> = { $pk: unknown } & TR
 
 export type PulseBuilderTable<TTable extends PgTable> = {
   readonly source: TTable;
-  readonly events: PgTable | null;
 };
 
 export type PulseQueryConfig<

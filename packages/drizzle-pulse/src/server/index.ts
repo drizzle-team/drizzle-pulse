@@ -30,7 +30,6 @@ export {
   expose,
   RealtimeRuntime,
 } from './expose.js';
-export { createPulse } from './pulse.js';
 // Builder
 export { PulseBuilder } from './pulse-builder.js';
 export type { AnyPulseBuilder, AnyPulseBuilders as AnyQueries } from './pulse-registry.js';
