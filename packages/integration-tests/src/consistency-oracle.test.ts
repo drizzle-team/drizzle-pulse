@@ -10,11 +10,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:tes
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import { pulse } from 'drizzle-pulse';
 import { createPulseClient as createHttpClient, type PulseQuery } from 'drizzle-pulse/client';
 import type { PulseCollection } from 'drizzle-pulse/client/embedded';
 import { createPulseClient as createEmbeddedClient } from 'drizzle-pulse/client/embedded';
 import type { PulseAuthContext } from 'drizzle-pulse/server';
-import { createPulse, createPulseRegistry } from 'drizzle-pulse/server';
+import { createPulseRegistry } from 'drizzle-pulse/server';
 import type { Pool } from 'pg';
 import { fullOrdersFixture } from './fixtures/full-orders/index.js';
 import type {
@@ -40,57 +41,55 @@ const { orders } = oracleFixture.tables;
 // Registry — all operator queries defined once so the suite key is stable
 // ---------------------------------------------------------------------------
 
-const pulse = createPulse();
-
 // eq (fixed predicate)
 const ordersEqAccepted = pulse(orders)
-  .$eventsTable(oracleFixture.tables.eventsPublicOrders)
+  .query()
   .order('asc')
   .query((ctx) => ctx.query({ status: 'accepted' }));
 
 // eq (args — parity with the embedded-collection suite)
 const ordersByStatus = pulse(orders)
-  .$eventsTable(oracleFixture.tables.eventsPublicOrders)
+  .query()
   .args(oracleFixture.schemas.ordersByStatusArgs)
   .order('asc')
   .query((ctx) => ctx.query({ status: ctx.args.status }));
 
 // ne over text column
 const ordersNeCompleted = pulse(orders)
-  .$eventsTable(oracleFixture.tables.eventsPublicOrders)
+  .query()
   .order('asc')
   .query((ctx) => ctx.query({ status: { ne: 'completed' } }));
 
 // ne over nullable integer — must EXCLUDE rows where driverId IS NULL
 const ordersDriverNe1 = pulse(orders)
-  .$eventsTable(oracleFixture.tables.eventsPublicOrders)
+  .query()
   .order('asc')
   .query((ctx) => ctx.query({ driverId: { ne: 1 } }));
 
 // gt / gte / lt / lte
 const ordersPriceGt10 = pulse(orders)
-  .$eventsTable(oracleFixture.tables.eventsPublicOrders)
+  .query()
   .order('asc')
   .query((ctx) => ctx.query({ price: { gt: 10 } }));
 
 const ordersPriceGte10 = pulse(orders)
-  .$eventsTable(oracleFixture.tables.eventsPublicOrders)
+  .query()
   .order('asc')
   .query((ctx) => ctx.query({ price: { gte: 10 } }));
 
 const ordersPriceLt50 = pulse(orders)
-  .$eventsTable(oracleFixture.tables.eventsPublicOrders)
+  .query()
   .order('asc')
   .query((ctx) => ctx.query({ price: { lt: 50 } }));
 
 const ordersPriceLte50 = pulse(orders)
-  .$eventsTable(oracleFixture.tables.eventsPublicOrders)
+  .query()
   .order('asc')
   .query((ctx) => ctx.query({ price: { lte: 50 } }));
 
 // in (non-empty)
 const ordersStatusIn = pulse(orders)
-  .$eventsTable(oracleFixture.tables.eventsPublicOrders)
+  .query()
   .order('asc')
   .query((ctx) =>
     ctx.query({
@@ -102,7 +101,7 @@ const ordersStatusIn = pulse(orders)
 
 // in (empty → always false, zero rows)
 const ordersStatusInEmpty = pulse(orders)
-  .$eventsTable(oracleFixture.tables.eventsPublicOrders)
+  .query()
   .order('asc')
   .query((ctx) =>
     ctx.query({ status: { in: [] as ('requested' | 'accepted' | 'completed' | 'cancelled')[] } }),
@@ -110,30 +109,30 @@ const ordersStatusInEmpty = pulse(orders)
 
 // isNull / isNotNull on nullable column
 const ordersDriverIsNull = pulse(orders)
-  .$eventsTable(oracleFixture.tables.eventsPublicOrders)
+  .query()
   .order('asc')
   .query((ctx) => ctx.query({ driverId: { isNull: true } }));
 
 const ordersDriverIsNotNull = pulse(orders)
-  .$eventsTable(oracleFixture.tables.eventsPublicOrders)
+  .query()
   .order('asc')
   .query((ctx) => ctx.query({ driverId: { isNotNull: true } }));
 
 // NOT (incl. a NULL-driverId row so NOT-with-null-field is exercised)
 const ordersNotCompleted = pulse(orders)
-  .$eventsTable(oracleFixture.tables.eventsPublicOrders)
+  .query()
   .order('asc')
   .query((ctx) => ctx.query({ NOT: { status: 'completed' } }));
 
 // AND — both conjuncts must hold
 const ordersAnd = pulse(orders)
-  .$eventsTable(oracleFixture.tables.eventsPublicOrders)
+  .query()
   .order('asc')
   .query((ctx) => ctx.query({ AND: [{ status: 'accepted' }, { price: { gt: 5 } }] }));
 
 // OR — either disjunct suffices
 const ordersOr = pulse(orders)
-  .$eventsTable(oracleFixture.tables.eventsPublicOrders)
+  .query()
   .order('asc')
   .query((ctx) => ctx.query({ OR: [{ status: 'accepted' }, { status: 'requested' }] }));
 

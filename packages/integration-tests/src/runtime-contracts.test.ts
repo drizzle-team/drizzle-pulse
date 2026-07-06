@@ -2,7 +2,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:tes
 import { randomUUID } from 'node:crypto';
 import { eq, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
-import { createPulse, createPulseRegistry } from 'drizzle-pulse/server';
+import { pulse } from 'drizzle-pulse';
+import { createPulseRegistry } from 'drizzle-pulse/server';
 import type { Hono } from 'hono';
 import type { Pool } from 'pg';
 import SuperJSON from 'superjson';
@@ -27,15 +28,14 @@ describe('Runtime Contracts', () => {
 
   const fixture = fullOrdersFixture;
   const { orders } = fixture.tables;
-  const pulse = createPulse();
   const ordersByStatus = pulse(orders)
-    .$eventsTable(fixture.tables.eventsPublicOrders)
+    .query()
     .args(fixture.schemas.ordersByStatusArgs)
     .order('desc')
     .limit(5)
     .query((ctx) => ctx.query({ status: ctx.args.status }));
   const authScopedByStatus = pulse(orders)
-    .$eventsTable(fixture.tables.eventsPublicOrders)
+    .query()
     .args(fixture.schemas.ordersByStatusArgs)
     .order('desc')
     .limit(2)
@@ -236,12 +236,12 @@ describe('Runtime Contracts', () => {
       }),
     });
 
-    await db.execute(sql`TRUNCATE TABLE realtime.events_public_orders RESTART IDENTITY`);
+    await db.execute(sql`TRUNCATE TABLE drizzle.__events_public_orders RESTART IDENTITY`);
     await db.execute(
-      sql`INSERT INTO realtime.events_public_orders (id, "$op") OVERRIDING SYSTEM VALUE VALUES (1, 'snapshot')`,
+      sql`INSERT INTO drizzle.__events_public_orders (id, "$op") OVERRIDING SYSTEM VALUE VALUES (1, 'snapshot')`,
     );
     await db.execute(
-      sql`SELECT setval(pg_get_serial_sequence('realtime.events_public_orders', '$snapshot'), 1, true)`,
+      sql`SELECT setval(pg_get_serial_sequence('drizzle.__events_public_orders', '$snapshot'), 1, true)`,
     );
 
     const pullResponse = await pullClient(

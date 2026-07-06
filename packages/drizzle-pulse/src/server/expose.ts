@@ -102,8 +102,13 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
   private readonly pgPoolConfig: PoolConfig;
   private readonly reconnectConfig: Required<NonNullable<ExposeWalConfig['reconnect']>>;
   private readonly loggingConfig: Required<WalLoggingConfig>;
-  private readonly publicationName: string;
-  private readonly slotName: string;
+  // Public (not private): the integration-test harness augments a RealtimeRuntime
+  // instance with its own `{ publicationName, slotName }` via Object.assign for test
+  // introspection (see packages/integration-tests/src/helpers/test-harness.ts). A
+  // private field of the same name makes that intersection type collapse to `never`
+  // (TS treats private members as nominal), so these two stay public readonly.
+  readonly publicationName: string;
+  readonly slotName: string;
   private readonly eventsSchema: string;
 
   private pool: Pool | null = null;

@@ -2,8 +2,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:tes
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import { pulse } from 'drizzle-pulse';
 import { createPulseClient } from 'drizzle-pulse/client/embedded';
-import { createPulse, createPulseRegistry } from 'drizzle-pulse/server';
+import { createPulseRegistry } from 'drizzle-pulse/server';
 import type { Pool } from 'pg';
 import { fullOrdersFixture } from './fixtures/full-orders/index.js';
 import { pgDataTypesFixture } from './fixtures/pg-data-types/index.js';
@@ -29,9 +30,8 @@ describe('Embedded Collection', () => {
   const fixture = fullOrdersFixture;
   const { orders } = fixture.tables;
 
-  const pulse = createPulse();
   const ordersByStatus = pulse(orders)
-    .$eventsTable(fixture.tables.eventsPublicOrders)
+    .query()
     .args(fixture.schemas.ordersByStatusArgs)
     .order('asc')
     .query((ctx) => ctx.query({ status: ctx.args.status }));
@@ -200,9 +200,8 @@ describe('Embedded Collection lifecycle', () => {
   const lifecycleFixture = { ...fullOrdersFixture, variantName: 'embedded-lifecycle' as const };
   const { orders } = lifecycleFixture.tables;
 
-  const lcPulse = createPulse();
-  const ordersByStatusLC = lcPulse(orders)
-    .$eventsTable(lifecycleFixture.tables.eventsPublicOrders)
+  const ordersByStatusLC = pulse(orders)
+    .query()
     .args(lifecycleFixture.schemas.ordersByStatusArgs)
     .order('asc')
     .query((ctx) => ctx.query({ status: ctx.args.status }));
@@ -270,10 +269,7 @@ describe('Embedded Collection — PG Data Types (WAL tap normalization)', () => 
   const fixture = pgDataTypesFixture;
   const { pgDataTypes } = fixture.tables;
 
-  const pulse = createPulse();
-  const allPgDataTypes = pulse(pgDataTypes)
-    .$eventsTable(fixture.tables.eventsPublicPgDataTypes)
-    .query(() => null);
+  const allPgDataTypes = pulse(pgDataTypes).query(() => null);
   const registry = createPulseRegistry({ allPgDataTypes });
 
   beforeAll(async () => {

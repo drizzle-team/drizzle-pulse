@@ -18,19 +18,32 @@ npm install drizzle-orm zod
 
 ## 60-second quickstart
 
-**Server** — define a query with `createPulse`, register it, and expose it over WAL:
+**Schema** — export a `pulse(table)` collection once per table, alongside its source table:
+
+```ts
+// schema.ts
+import { pulse } from 'drizzle-pulse';
+import { pgTable, serial, text } from 'drizzle-orm/pg-core';
+
+export const orders = pgTable('orders', {
+  id: serial('id').primaryKey(),
+  status: text('status').notNull(),
+});
+
+export const ordersCollection = pulse(orders);
+```
+
+**Server** — derive queries from the collection, register them, and expose over WAL:
 
 ```ts
 // server.ts
-import { createPulse, createPulseRegistry, expose } from 'drizzle-pulse/server';
+import { createPulseRegistry, expose } from 'drizzle-pulse/server';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
-import { orders, ordersEvents } from './schema.js';
+import { ordersCollection } from './schema.js';
 
-const pulse = createPulse();
-
-const activeOrders = pulse(orders)
-  .$eventsTable(ordersEvents) // realtime.events_orders — see "Server" section
+const activeOrders = ordersCollection
+  .query() // convention-resolved events table — see "Events tables" below
   .order('asc')
   .query((ctx) => ctx.query({ status: 'active' }));
 
@@ -41,10 +54,10 @@ const sourceDb = drizzle({ client: postgres(process.env.DATABASE_URL!) });
 const runtime = expose(registry, {
   databaseUrl: process.env.DATABASE_URL!, // must have wal_level=logical
   sourceDb,
-  wal: { publicationName: 'drizzle_pulse', slotName: 'drizzle_pulse_slot' },
 });
 
-await runtime.start();
+await runtime.start(); // rejects loudly if the publication, events tables, or
+// REPLICA IDENTITY FULL aren't in place — see "Events tables" below
 
 // wire runtime.handlers.subscribe / .pull / .loadMore into your HTTP router
 ```
@@ -65,33 +78,47 @@ const query = client.activeOrders();
 // consume `query` with `PulseQuery` (framework-agnostic) or `usePulseQuery` (React) — see below
 ```
 
+## `drizzle-pulse`
+
+The root entrypoint owns the collection: `pulse(table)` wraps a Drizzle table into a `PulseTable`, exported once from your schema file (the cross-package contract drizzle-kit recognizes for codegen).
+
+- `pulse(table)` — returns a `PulseTable` wrapping `table`; construct unconditionally, at schema-definition time
+- `PulseTable` — the collection; call `.query(fn?)` to derive a query (`.query()` for match-all, `.query(fn)` to seed a where-clause)
+- `isPulseTable(value)` / `getPulseTableConfig(entity)` — recognition + payload accessors (used by drizzle-kit; rarely needed directly)
+
 ## `drizzle-pulse/server`
 
-The server runtime: define queries, register them, and expose a WAL-fed runtime that serves subscribe/pull requests.
+Derive queries from collections outside the schema file, register them, and expose a WAL-fed runtime that serves subscribe/pull requests.
 
-- `createPulse()` — returns a `PulseFactory` that wraps a Drizzle table into a `PulseBuilder`
-- `PulseBuilder` — fluent builder: `.columns()`, `.args(zodSchema)`, `.query(ctx => WhereClause)`, `.order()`, `.limit()`, `.transform()`, `.$eventsTable(table)`
-- `createPulseRegistry(queries)` — collects builders into a `PulseRegistry`
+- `PulseBuilder` — fluent builder returned by `.query()`: `.columns()`, `.args(zodSchema)`, `.query(ctx => WhereClause)`, `.order()`, `.limit()`, `.transform()`
+- `createPulseRegistry(queries)` — collects builders into a `PulseRegistry`; rejects a bare `PulseTable` (queries must be derived via `.query()` first)
 - `expose(registry, config)` — returns a `RealtimeRuntime`; call `.start()` to connect WAL, `runtime.handlers.{subscribe,pull,loadMore}` to serve requests
 - `RealtimeRuntime` — WAL listener + request handlers; `.start()` / `.stop()`
 
 ```ts
-import { createPulse, createPulseRegistry, expose } from 'drizzle-pulse/server';
-
-const pulse = createPulse();
+import { pulse } from 'drizzle-pulse';
+import { createPulseRegistry, expose } from 'drizzle-pulse/server';
 
 const ordersByStatus = pulse(orders)
-  .$eventsTable(ordersEvents)
+  .query()
   .args(z.object({ status: z.string() }))
   .order('desc')
   .query((ctx) => ctx.query({ status: ctx.args.status }));
 
 const registry = createPulseRegistry({ ordersByStatus });
-const runtime = expose(registry, { databaseUrl, sourceDb, wal: { publicationName, slotName } });
+const runtime = expose(registry, { databaseUrl, sourceDb }); // publication/slot default to 'drizzle_pulse'
 await runtime.start();
 ```
 
-Every source table needs a matching `realtime.events_<table>` table (created via migration) linked with `.$eventsTable()` — WAL changes are persisted there and replayed to clients.
+### Events tables
+
+Every pulsed source table needs a matching **events table** — WAL changes are persisted there and replayed to clients. Events tables are generated infrastructure, resolved entirely by convention (no hand-declared Drizzle table, no `.$eventsTable()` linkage):
+
+- **Location:** `<eventsSchema>.__events_<sourceSchema>_<sourceTable>` — `eventsSchema` defaults to `'drizzle'` (override via `expose()`'s `eventsSchema` option, matching your drizzle.config `migrations.schema`)
+- **Creation:** as of this version, generate them from `emitEventsTableDdl(sourceTable)` (exported from `drizzle-pulse/server`) and run the returned `CREATE SCHEMA`/`CREATE TABLE` statements as a migration; Phase 14+ drizzle-kit codegen automates this from your `pulse()` schema exports
+- **Startup guard:** `runtime.start()` asserts — in one aggregated, loudly-thrown error listing every unmet precondition — that the publication exists, every pulsed table is a member of it (or the publication is `FOR ALL TABLES`), every events table exists, every pulsed table has `REPLICA IDENTITY FULL`, and `wal_level = logical`
+
+See [`docs/events-table-convention.md`](../../docs/events-table-convention.md) for the full name-derivation and column-mapping contract.
 
 ## `drizzle-pulse/client`
 
