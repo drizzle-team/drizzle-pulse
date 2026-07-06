@@ -529,3 +529,60 @@ describe('subscribe reads the snapshot cursor before the baseline SELECT (CR-04)
     expect(callOrder).toEqual(['snapshot', 'select']);
   });
 });
+
+// subscribe() must not let a caller who guesses/reuses another user's clientId +
+// subscriptionId overwrite that user's live subscription — matches the ownership check
+// pull()/loadMore() already enforce (WR-06).
+describe('subscribe rejects cross-user subscriptionId reuse (WR-06)', () => {
+  test('a mismatched-auth re-subscribe gets a fresh subscriptionId and leaves the original subscription untouched', async () => {
+    const registry = createRegistry();
+    const subscriptionManager = new SubscriptionManager();
+    const sourceRows = [
+      [{ id: 101, status: 'requested', price: 20 }],
+      [{ id: 102, status: 'requested', price: 25 }],
+    ];
+    const sourceDb = createMockSourceDb(sourceRows);
+    const pulseSourceDb = createPulseSourceDbMock(() => sourceDb.takeRows());
+    const realtimeService = createRealtimeServiceMock({ latestSnapshot: 2 });
+
+    const requestHandler = new RealtimeRequestHandler(
+      registry,
+      pulseSourceDb,
+      subscriptionManager,
+      () => realtimeService,
+      () => resolveEventsTable(ordersTable),
+    );
+
+    const clientId = 'shared-client-id';
+    const victimAuth: PulseAuthContext = { userId: 1 };
+    const attackerAuth: PulseAuthContext = { userId: 2 };
+
+    const victimResult = await requestHandler.subscribe(
+      { clientId, queryName: QUERY_DATA.queryName, args: QUERY_DATA.args },
+      victimAuth,
+    );
+    expect(victimResult.status).toBe(200);
+    const victimSubscriptionId = (victimResult.body as SubscribeResponseBody).subscriptionId;
+
+    const attackerResult = await requestHandler.subscribe(
+      {
+        clientId,
+        queryName: QUERY_DATA.queryName,
+        args: QUERY_DATA.args,
+        subscriptionId: victimSubscriptionId,
+      },
+      attackerAuth,
+    );
+    expect(attackerResult.status).toBe(200);
+    const attackerSubscriptionId = (attackerResult.body as SubscribeResponseBody).subscriptionId;
+
+    // Attacker must not be handed (or able to reuse) the victim's subscription id.
+    expect(attackerSubscriptionId).not.toBe(victimSubscriptionId);
+
+    // The victim's original subscription must be completely untouched: still present
+    // under its original id, still owned by the victim, query unchanged.
+    const victimSubscription = subscriptionManager.get(clientId, victimSubscriptionId);
+    expect(victimSubscription).not.toBeNull();
+    expect(victimSubscription?.auth.userId).toBe(1);
+  });
+});

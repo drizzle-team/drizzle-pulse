@@ -115,13 +115,23 @@ export class RealtimeRequestHandler {
 
       let subscription =
         subscriptionId && clientId ? this.subscriptionManager.get(clientId, subscriptionId) : null;
+      // A client-supplied clientId/subscriptionId pair from a different user must not
+      // overwrite an existing subscription's query/auth. Discard the found subscription
+      // AND refuse to reuse the disputed subscriptionId for creation — reusing it would
+      // still silently overwrite the victim's entry in the store under the same key
+      // (SubscriptionManager.create() unconditionally .set()s), so this falls all the
+      // way through to the final branch, which mints a genuinely fresh random id (WR-06).
+      const ownershipMismatch = subscription !== null && subscription.auth.userId !== auth.userId;
+      if (ownershipMismatch) {
+        subscription = null;
+      }
       if (subscription) {
         this.subscriptionManager.update(clientId, subscription.id, {
           query: resolvedQuery,
           queryName,
           auth,
         });
-      } else if (subscriptionId) {
+      } else if (subscriptionId && !ownershipMismatch) {
         subscription = this.subscriptionManager.create(
           clientId,
           queryName,
