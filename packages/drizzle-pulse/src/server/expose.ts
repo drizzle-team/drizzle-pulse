@@ -75,18 +75,12 @@ const DEFAULT_LOGGING: Required<WalLoggingConfig> = {
 
 const DEFAULT_WAL_NAME = 'drizzle_pulse';
 
-function parseDatabaseUrl(databaseUrl: string) {
-  const url = new URL(databaseUrl);
-
-  return {
-    host: url.hostname,
-    port: parseInt(url.port || '5432', 10),
-    database: url.pathname.slice(1) || 'postgres',
-    user: url.username || 'postgres',
-    password: url.password || 'postgres',
-  };
-}
-
+// `pg` parses `connectionString` itself (via its own `parse` dependency), which correctly
+// percent-decodes user/password/database and honors query params (`sslmode`, `ssl`,
+// `application_name`, ...). Re-parsing the URL by hand here (previous implementation)
+// silently dropped percent-encoding and every query param, including `sslmode=require` —
+// a silent TLS downgrade. Passing `connectionString` straight through avoids re-deriving
+// any of that.
 function withQuietPgOptions<T extends ClientConfig | PoolConfig>(config: T): T {
   return {
     ...config,
@@ -188,7 +182,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       });
     }
 
-    const pg = parseDatabaseUrl(this.config.databaseUrl);
+    const pg = { connectionString: this.config.databaseUrl };
 
     this.pgConfig = {
       ...withQuietPgOptions(pg),
