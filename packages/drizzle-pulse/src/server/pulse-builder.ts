@@ -48,6 +48,18 @@ export class PulseBuilder<
   columns<TNewSelection extends Record<string, boolean>>(
     selection: TNewSelection,
   ): PulseBuilder<TTable, TNewSelection, TArgs, ColumnsSelection<TTable, TNewSelection>> {
+    // .columns() re-parameterizes TResult to ColumnsSelection<TTable, TNewSelection> — a
+    // previously-chained .transform() was typed against the OLD TResult, so silently
+    // carrying it over here would either type-check against the wrong shape or (as the
+    // prior implementation did) get silently dropped at runtime while callers still
+    // believe it's active (WR-08). Fail loudly instead: require .columns() before
+    // .transform() in the chain.
+    if (this.config.transformFn !== null) {
+      throw new Error(
+        '.columns() cannot follow .transform(); call .columns() before .transform() instead',
+      );
+    }
+
     const selectedColumns = columnsToSelectedColumns(selection, this.config.columns);
 
     return new PulseBuilder<TTable, TNewSelection, TArgs, ColumnsSelection<TTable, TNewSelection>>({

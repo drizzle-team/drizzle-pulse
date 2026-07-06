@@ -80,6 +80,25 @@ describe('PulseBuilder', () => {
     expect(builder.config.transformFn).toBe(transformFn);
   });
 
+  test('.columns() after .transform() throws loudly instead of silently dropping the transform (WR-08)', () => {
+    const transformFn = (rows: Record<string, unknown>[]) => rows;
+    const builder = new PulseBuilder(makeEmptyConfig()).transform(transformFn);
+
+    expect(() => builder.columns({ name: true })).toThrow(
+      '.columns() cannot follow .transform(); call .columns() before .transform() instead',
+    );
+  });
+
+  test('.columns() before .transform() still works (correct chain order)', () => {
+    const transformFn = (rows: Record<string, unknown>[]) => rows;
+    const builder = new PulseBuilder(makeEmptyConfig())
+      .columns({ name: true })
+      .transform(transformFn);
+
+    expect(builder.config.transformFn).toBe(transformFn);
+    expect(Object.keys(builder.config.selectedColumns)).toEqual(['name']);
+  });
+
   test('.order() stores sort direction', () => {
     const builder = new PulseBuilder(makeEmptyConfig()).order('desc');
     expect(builder.config.order).toBe('desc');
