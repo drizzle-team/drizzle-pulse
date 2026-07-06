@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { types } from 'pg';
 import { RealtimeRuntime } from '../server/expose.js';
 import { createPulseRegistry } from '../server/pulse-registry.js';
 import type { PulseSourceDb } from '../server/pulse-sql.js';
@@ -35,5 +36,30 @@ describe('connection-string handling (WR-03)', () => {
     const runtime = makeRuntime('postgresql://user:pass@localhost/test') as any;
     expect(runtime.pgConfig.replication).toBe('database');
     expect(runtime.pgPoolConfig.replication).toBeUndefined();
+  });
+});
+
+describe('type-parser scoping (WR-05)', () => {
+  test('pgConfig/pgPoolConfig scope raw-text OIDs to this runtime only, not the global pg registry', () => {
+    const runtime = makeRuntime('postgresql://user:pass@localhost/test') as any;
+
+    const scoped = runtime.pgConfig.types;
+    expect(scoped).toBeDefined();
+    expect(runtime.pgPoolConfig.types).toBe(scoped);
+
+    for (const oid of [1082, 1114, 1184, 1186, 600]) {
+      const parser = scoped.getTypeParser(oid);
+      expect(parser('2024-01-01T00:00:00.000Z')).toBe('2024-01-01T00:00:00.000Z');
+    }
+
+    // Non-overridden OIDs delegate to pg's real getTypeParser (e.g. int4 stays numeric).
+    const int4Parser = scoped.getTypeParser(23);
+    expect(int4Parser('42')).toBe(42);
+
+    // The global `pg` module registry itself must be untouched — a host application's
+    // own `pg` client sharing this process still gets parsed Date objects for
+    // timestamptz (1184), not raw text.
+    const globalTimestampTzParser = types.getTypeParser(1184 as any);
+    expect(globalTimestampTzParser('2024-01-01 00:00:00+00')).toBeInstanceOf(Date);
   });
 });

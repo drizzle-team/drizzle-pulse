@@ -17,8 +17,25 @@ type RuntimeLifecycleListener = () => void;
 // parses into an object ({x,y}), which can't feed the point:tuple codec. Drizzle's own
 // SELECTs cast these to text regardless, so this only shapes the replication decode path.
 const RAW_TEXT_PG_OIDS = [1082, 1114, 1184, 1186, 600] as const;
+const RAW_TEXT_PG_OID_SET = new Set<number>(RAW_TEXT_PG_OIDS);
 
-let rawTextParsersConfigured = false;
+// Scoped to this runtime's own pg connections via the per-pool/per-client `types` option
+// (rather than `pg`'s shared global `types.setTypeParser` registry), so a host
+// application's own `pg` clients in the same process keep receiving parsed Date objects
+// for these OIDs instead of being silently switched to raw text.
+function createScopedTypeParser(): { getTypeParser: typeof types.getTypeParser } {
+  const getTypeParser = ((id: number, format?: 'text' | 'binary') => {
+    if (RAW_TEXT_PG_OID_SET.has(id)) {
+      return (value: string) => value;
+    }
+    return types.getTypeParser(
+      id as Parameters<typeof types.getTypeParser>[0],
+      format as Parameters<typeof types.getTypeParser>[1],
+    );
+  }) as typeof types.getTypeParser;
+
+  return { getTypeParser };
+}
 
 export interface WalListenerConfig {
   pgConfig: ClientConfig & { replication: 'database' };
@@ -182,7 +199,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       });
     }
 
-    const pg = { connectionString: this.config.databaseUrl };
+    const pg = { connectionString: this.config.databaseUrl, types: createScopedTypeParser() };
 
     this.pgConfig = {
       ...withQuietPgOptions(pg),
@@ -245,16 +262,6 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
   }
 
   async start(): Promise<void> {
-    if (!rawTextParsersConfigured) {
-      for (const oid of RAW_TEXT_PG_OIDS) {
-        // @types/pg's TypeId union omits some builtin OIDs (e.g. point=600); the
-        // runtime accepts any numeric OID.
-        types.setTypeParser(oid as Parameters<typeof types.setTypeParser>[0], (value) => value);
-      }
-
-      rawTextParsersConfigured = true;
-    }
-
     if (this._isRunning) {
       this.log('[WAL Listener] Already running');
       return;
