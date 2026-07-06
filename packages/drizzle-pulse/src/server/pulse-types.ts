@@ -4,13 +4,6 @@ import type { z } from 'zod';
 import type { PulseAuthContext, QueryDescriptor, WhereClause, WhereCondition } from '../types.js';
 import type { PulseBuilder } from './pulse-builder.js';
 
-export type PulseColumnSelection<TRow extends Record<string, unknown>> = {
-  [K in keyof TRow]?: boolean;
-};
-
-export type IsIncludeMode<TSelection extends Record<string, boolean>> =
-  TSelection[keyof TSelection] extends false ? false : true;
-
 export type ApplyColumns<
   TRow extends Record<string, unknown>,
   TSelection extends Record<string, boolean>,
