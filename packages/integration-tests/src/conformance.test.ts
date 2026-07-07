@@ -20,7 +20,7 @@ import { createPulseRegistry, expose } from 'drizzle-pulse/server';
 import postgres from 'postgres';
 import { pulseConformanceFixture } from './fixtures/pulse-conformance/index.js';
 import { orders } from './fixtures/pulse-conformance/schema.js';
-import { generatePulseMigrationSql, kitBinExists } from './helpers/kit-generate.js';
+import { generatePulseMigrationSql, kitAvailable } from './helpers/kit-generate.js';
 import {
   baseDatabaseUrl,
   buildDatabaseUrl,
@@ -58,14 +58,14 @@ async function waitForWalSlot(slotName: string, timeoutMs = 5000): Promise<void>
   throw new Error(`Timeout: WAL listener did not initialize slot ${slotName} in ${timeoutMs}ms`);
 }
 
-// Skips (not fails) when the local pulse-branch drizzle-kit build isn't present — e.g. a
-// fresh clone or CI without a sibling drizzle-orm checkout. Mirrors how the
-// absent-fixture-repo suites skip. Build the kit (or set DRIZZLE_KIT_PULSE_BIN) to run it.
-describe.skipIf(!kitBinExists())('kit-generate to WAL events conformance', () => {
+// Skips (not fails) when the pulse-branch drizzle-kit package isn't installed — e.g. a
+// fresh clone or CI without the sibling drizzle-orm checkout to link. Mirrors how the
+// absent-fixture-repo suites skip. Link the local kit (or install it) to run it.
+describe.skipIf(!kitAvailable())('kit-generate to WAL events conformance', () => {
   test('local pulse kit generates real infra; runtime boots on it and streams a real write into the kit-generated events table', async () => {
     // --- Setup guard: fail loudly if the resolved kit is pulse-blind. A passing
     // conformance test against a pulse-blind kit would prove nothing. ---
-    const migrationSql = generatePulseMigrationSql(
+    const migrationSql = await generatePulseMigrationSql(
       FIXTURE_CONFIG_PATH,
       pulseConformanceFixture.migrationsPath,
     );
