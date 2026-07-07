@@ -6,7 +6,6 @@ import type { QueryDescriptor } from 'drizzle-pulse';
 import { createPulseClient, PulseQuery } from 'drizzle-pulse/client';
 import {
   type AnyQueries,
-  emitEventsTableDdl,
   expose,
   type LoadMoreRequest,
   type PullRequest,
@@ -24,6 +23,7 @@ import SuperJSON from 'superjson';
 import { z } from 'zod';
 import type { ProcessDbOperationsOptions } from './db-helpers.js';
 import { insertTestUser, processDbOperations } from './db-helpers.js';
+import { emitEventsTableDdl } from './events-table-ddl.js';
 
 // Re-export shared helpers so downstream tests can import from one place
 export { processDbOperations, insertTestUser };

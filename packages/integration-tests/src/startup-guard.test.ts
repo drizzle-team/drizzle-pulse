@@ -11,10 +11,11 @@
 import { afterAll, describe, expect, test } from 'bun:test';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
-import { createPulseRegistry, emitEventsTableDdl, expose } from 'drizzle-pulse/server';
+import { createPulseRegistry, expose } from 'drizzle-pulse/server';
 import type { Pool } from 'pg';
 import postgres from 'postgres';
 import { orders } from './fixtures/minimal-orders/schema.js';
+import { emitEventsTableDdl } from './helpers/events-table-ddl.js';
 import {
   baseDatabaseUrl,
   buildDatabaseUrl,
@@ -116,7 +117,7 @@ describe('Startup Guard', () => {
 
       const startPromise = runtime.start();
       await expect(startPromise).rejects.toThrow(publicationName);
-      await expect(startPromise).rejects.toThrow('__events_public_orders');
+      await expect(startPromise).rejects.toThrow('public_orders');
       // Aggregation proof: two independent failures surface as two distinct lines in
       // the SAME thrown error, not two separate throws.
       const error: Error = await startPromise.then(
@@ -260,7 +261,7 @@ describe('Startup Guard', () => {
       // matched), deferring the failure to a confusing insert-time error instead.
       await ctx.pool.query('CREATE SCHEMA IF NOT EXISTS "drizzle_pulse"');
       await ctx.pool.query(
-        'CREATE VIEW "drizzle_pulse"."__events_public_orders" AS SELECT 1 AS placeholder',
+        'CREATE VIEW "drizzle_pulse"."public_orders" AS SELECT 1 AS placeholder',
       );
 
       const registry = createPulseRegistry({ orders: pulse(orders).query() });
@@ -271,7 +272,7 @@ describe('Startup Guard', () => {
       });
 
       const startPromise = runtime.start();
-      await expect(startPromise).rejects.toThrow('__events_public_orders');
+      await expect(startPromise).rejects.toThrow('public_orders');
       await expect(startPromise).rejects.toThrow('does not exist');
     } finally {
       await sourceSql.end();

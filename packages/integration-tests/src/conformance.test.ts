@@ -6,7 +6,7 @@
  * the runtime's own emitEventsTableDdl — that would make the proof circular), boots the
  * drizzle-pulse runtime via expose() against that generated infrastructure, writes to the
  * source table, and asserts the resulting WAL events land in the kit-generated
- * drizzle_pulse.__events_public_orders table and are readable through the runtime's own pull
+ * drizzle_pulse.public_orders table and are readable through the runtime's own pull
  * surface. Two independent implementations (kit synthesis vs. runtime resolver) cannot
  * silently drift while this test is green.
  */
@@ -70,7 +70,7 @@ describe.skipIf(!kitAvailable())('kit-generate to WAL events conformance', () =>
       pulseConformanceFixture.migrationsPath,
     );
     expect(migrationSql).toContain('CREATE PUBLICATION');
-    expect(migrationSql).toContain('CREATE TABLE "drizzle_pulse"."__events_public_orders"');
+    expect(migrationSql).toContain('CREATE TABLE "drizzle_pulse"."public_orders"');
 
     // --- Isolate a fresh database (randomized name, per the test-isolation convention) ---
     const databaseName = `pulse_conformance_${randomSuffix()}`;

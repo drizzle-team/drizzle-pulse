@@ -8,7 +8,7 @@
   },
   "dependencies": {
     "drizzle-pulse": "workspace:*",
-    "drizzle-orm": "^1.0.0-rc.4",
+    "drizzle-orm": "file:../../../drizzle-orm/drizzle-orm/package.tgz",
     "fast-check": "^3.23.2",
     "hono": "^4.6.0",
     "pg": "^8.13.0",

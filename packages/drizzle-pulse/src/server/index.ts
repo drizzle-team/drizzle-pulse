@@ -20,7 +20,6 @@ export type {
 } from '../shared/protocol-types.js';
 export type { PulseAuthContext } from '../types.js';
 // Events-table convention
-export { emitEventsTableDdl } from './events-table-ddl.js';
 export {
   DEFAULT_EVENTS_SCHEMA,
   getEventsTableName,

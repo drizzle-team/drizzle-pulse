@@ -4,18 +4,15 @@ import {
   DEFAULT_EVENTS_SCHEMA,
   getEventsTableName,
   resolveEventsTable,
-} from './events-table-resolver.js';
+} from 'drizzle-pulse/server';
 
 function quoteIdentifier(identifier: string): string {
   return `"${identifier.replace(/"/g, '""')}"`;
 }
 
 // Enum columns are the one column family whose `getSQLType()` returns a bare,
-// developer-controlled identifier (the enum's name) rather than a fixed SQL type keyword
-// — unlike every other type keyword, it must go through the same quoting/schema-
-// qualification as table/column identifiers. Duck-typed (rather than an `instanceof`
-// check against an imported enum-column class) so it works across duplicated drizzle-orm
-// package copies, matching the resolver's existing approach to internal drizzle-orm shapes.
+// developer-controlled identifier (the enum's name) rather than a fixed SQL type keyword —
+// it must go through the same quoting/schema-qualification as table/column identifiers.
 interface ColumnWithEnum {
   enum: { enumName: string; schema: string | undefined };
 }
@@ -27,9 +24,6 @@ function getEnumInstance(
   return candidate && typeof candidate.enumName === 'string' ? candidate : null;
 }
 
-// Renders the column's base SQL type, quoting/schema-qualifying enum type names
-// and appending one `[]` per array dimension (`column.dimensions`) so array-typed source
-// columns don't lose their dimensionality in the emitted DDL.
 function renderColumnSqlType(column: PgColumn): string {
   const enumInstance = getEnumInstance(column);
   const baseType = enumInstance
@@ -38,8 +32,6 @@ function renderColumnSqlType(column: PgColumn): string {
   return baseType + '[]'.repeat(column.dimensions);
 }
 
-// Only `$timestamp` is ever given a runtime default in this pipeline (defaultNow()) —
-// every other column, including cloned ones, has its default stripped by the resolver.
 function renderColumnDdl(column: PgColumn): string {
   const parts = [quoteIdentifier(column.name), renderColumnSqlType(column)];
 
@@ -58,6 +50,11 @@ function renderColumnDdl(column: PgColumn): string {
   return parts.join(' ');
 }
 
+/**
+ * Test-only utility: renders `CREATE SCHEMA`/`CREATE TABLE` for an events table strictly
+ * from `resolveEventsTable`'s output. Production events-table DDL is drizzle-kit's job; this
+ * exists so the integration harness can create events tables without hand-mirrored SQL.
+ */
 export function emitEventsTableDdl(
   sourceTable: PgTable,
   options?: { eventsSchema?: string },

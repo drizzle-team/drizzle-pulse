@@ -2,32 +2,37 @@
 
 This document pins the naming and column-derivation contract for the events table each
 `pulse()`-tracked source table gets, by convention, with no hand-declared mirror table.
-It is the interface contract two other consumers rely on byte-for-byte:
+It is the interface contract two other consumers rely on:
 
 - **drizzle-kit** generates the equivalent `CREATE TABLE` migration from the same source
-  table and must match this document exactly.
-- **The cross-repo conformance test** diffs drizzle-kit's generated SQL
-  against `emitEventsTableDdl`'s output and fails on any drift.
+  table and must match this document exactly. That generated DDL is pinned by kit's own
+  golden test.
+- **The cross-repo conformance test** applies kit's generated migration to real Postgres
+  and boots the runtime resolver against it, failing on any interop drift.
 
 The normative implementation is
 [`packages/drizzle-pulse/src/server/events-table-resolver.ts`](../packages/drizzle-pulse/src/server/events-table-resolver.ts)
-(`resolveEventsTable`, `getEventsTableName`, `DEFAULT_EVENTS_SCHEMA`). The SQL rendering
-reference — the exact text drizzle-kit's generated migrations must byte-match — is
-[`packages/drizzle-pulse/src/server/events-table-ddl.ts`](../packages/drizzle-pulse/src/server/events-table-ddl.ts)
-(`emitEventsTableDdl`). Both are pure functions: no database connection, no I/O.
+(`resolveEventsTable`, `getEventsTableName`, `DEFAULT_EVENTS_SCHEMA`) — a pure function:
+no database connection, no I/O.
 
 ## 1. Name derivation
 
 The events table name is:
 
 ```
-__events_<sourceSchema>_<sourceTable>
+<escapedSourceSchema>_<escapedSourceTable>
 ```
 
 - `sourceSchema` is the source table's schema; if the source table has no explicit
   schema (i.e. it lives in `public`), `sourceSchema` falls back to the literal string
   `public`.
 - `sourceTable` is the source table's SQL name (not its JS export name).
+- **Escaping:** each component has every `_` doubled to `__` before the two are joined
+  with a single `_`. Because a `_` inside a component always appears as `__`, the single
+  joining `_` is the only place a lone underscore occurs — so the split back into
+  `(schema, table)` is unambiguous. Distinct `(schema, table)` pairs always derive
+  distinct names (e.g. schema `tenant_a` table `orders` → `tenant__a_orders`, while
+  schema `tenant` table `a_orders` → `tenant_a__orders` — no collision).
 
 The events table itself lives in a dedicated **events schema** — never in the source
 table's own schema, and independent of the project's migrations schema. It defaults to
@@ -40,17 +45,8 @@ generated.
 `eventsSchema` left at its default, resolves to:
 
 ```
-"drizzle_pulse"."__events_public_orders"
+"drizzle_pulse"."public_orders"
 ```
-
-**Known ambiguity (accepted):** because the derivation joins `sourceSchema` and
-`sourceTable` with a plain underscore, two distinct source tables can derive the same
-events table name when one name's underscore boundary reads as the other's schema/table
-split — e.g. schema `tenant_a` table `orders` and schema `tenant` table `a_orders` both
-derive `__events_tenant_a_orders`. This is a known, currently-unmitigated gap (no
-unambiguous separator exists that is itself legal inside a Postgres identifier); avoid
-schema/table name pairs that collide under this join until a disambiguating scheme ships
-(tracked as a contract change requiring coordination with drizzle-kit's codegen).
 
 ## 2. Column derivation
 
@@ -144,7 +140,7 @@ $old_mood_col: moodEnum('$old_mood_col'),                         // same enum i
 ### 2.6 Enum type identifiers in emitted DDL
 
 An enum column's SQL type is a developer-controlled identifier, not a fixed type
-keyword, so `emitEventsTableDdl` renders it like any other identifier: quoted, and
+keyword, so the generated DDL renders it like any other identifier: quoted, and
 schema-qualified when the enum was declared in a non-default schema (e.g.
 `"app"."order_status"` for `pgSchema('app').enum('order_status', ...)`, or
 `"order_status"` for an enum with no schema). Every other column type keyword
@@ -214,25 +210,19 @@ rejects would reintroduce the exact drift this guard exists to prevent.
   (`db.insert(eventsTable).values(...)` in `realtime-store.ts`), so codec-faithful
   column reconstruction (reusing each source column's own `mapToDriverValue`/
   `mapFromDriverValue`) is part of this contract, not an implementation detail.
-- [`events-table-ddl.ts`](../packages/drizzle-pulse/src/server/events-table-ddl.ts)'s
-  `emitEventsTableDdl(sourceTable, options?)` is the **byte-match reference** for
-  drizzle-kit's generated migrations: it derives every column strictly from `resolveEventsTable`'s
-  output — never re-deriving names or types from the source table independently — so
-  the resolver and its DDL can never drift from each other. Its output is also what
-  this repo's integration-test harness uses to create events tables in test databases
-  (no hand-mirrored SQL fixtures).
-  - **Byte-match carve-out (`$snapshot` identity clause):** "byte-match" governs the
-    column *set, order, SQL types, nullability, and names* — the things that determine
-    whether the runtime resolver can read a kit-generated events table. It does **not**
-    require identical identity-clause text: drizzle-kit's general-purpose `create_table`
-    convertor renders `$snapshot` as `GENERATED ALWAYS AS IDENTITY (sequence name "…")`
-    (its house style for every identity column), whereas `emitEventsTableDdl` emits the
-    bare `GENERATED ALWAYS AS IDENTITY`. Both are valid, semantically identical Postgres,
-    and the runtime only *reads* the events table — it never diffs DDL text — so this
-    difference is inert. The conformance test (which applies kit's generated SQL
-    to real Postgres and boots the runtime against it) is the authority that the two
-    representations interoperate; reconciling the identity renderer in kit is deliberately
-    out of scope (it would ripple into every entity kind's identity columns).
+- Production events-table DDL is **drizzle-kit's** job. Kit generates the `CREATE TABLE`
+  from the same source table, pinned by kit's own golden test. The runtime only *reads*
+  the events table (`db.insert(eventsTable).values(...)`) — it never emits or diffs DDL
+  text — so kit is free to render, for example, `$snapshot`'s identity clause in its own
+  house style (`GENERATED ALWAYS AS IDENTITY (sequence name "…")`) as long as the column
+  *set, order, SQL types, nullability, and names* match this document. The cross-repo
+  conformance test (which applies kit's generated SQL to real Postgres and boots the
+  runtime resolver against it) is the authority that the two interoperate.
+- A test-only `emitEventsTableDdl` helper lives in the integration-tests package
+  (`packages/integration-tests/src/helpers/events-table-ddl.ts`); it derives DDL strictly
+  from `resolveEventsTable`'s output and exists solely so the test harness can create
+  events tables in test databases without hand-mirrored SQL. It is not published and is
+  not a normative reference.
 - Unit tests over the full edge-case type matrix live in
   [`events-table-resolver.test.ts`](../packages/drizzle-pulse/src/__tests__/events-table-resolver.test.ts).
   Any change to the derivation rules above must keep those tests passing, and any

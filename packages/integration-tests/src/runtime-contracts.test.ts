@@ -237,12 +237,12 @@ describe('Runtime Contracts', () => {
       }),
     });
 
-    await db.execute(sql`TRUNCATE TABLE drizzle_pulse.__events_public_orders RESTART IDENTITY`);
+    await db.execute(sql`TRUNCATE TABLE drizzle_pulse.public_orders RESTART IDENTITY`);
     await db.execute(
-      sql`INSERT INTO drizzle_pulse.__events_public_orders (id, "$op") OVERRIDING SYSTEM VALUE VALUES (1, 'snapshot')`,
+      sql`INSERT INTO drizzle_pulse.public_orders (id, "$op") OVERRIDING SYSTEM VALUE VALUES (1, 'snapshot')`,
     );
     await db.execute(
-      sql`SELECT setval(pg_get_serial_sequence('drizzle_pulse.__events_public_orders', '$snapshot'), 1, true)`,
+      sql`SELECT setval(pg_get_serial_sequence('drizzle_pulse.public_orders', '$snapshot'), 1, true)`,
     );
 
     const pullResponse = await pullClient(
