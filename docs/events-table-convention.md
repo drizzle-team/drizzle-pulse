@@ -223,6 +223,18 @@ rejects would reintroduce the exact drift this guard exists to prevent.
   the resolver and its DDL can never drift from each other. Its output is also what
   this repo's integration-test harness uses to create events tables in test databases
   (no hand-mirrored SQL fixtures).
+  - **Byte-match carve-out (`$snapshot` identity clause):** "byte-match" governs the
+    column *set, order, SQL types, nullability, and names* — the things that determine
+    whether the runtime resolver can read a kit-generated events table. It does **not**
+    require identical identity-clause text: drizzle-kit's general-purpose `create_table`
+    convertor renders `$snapshot` as `GENERATED ALWAYS AS IDENTITY (sequence name "…")`
+    (its house style for every identity column), whereas `emitEventsTableDdl` emits the
+    bare `GENERATED ALWAYS AS IDENTITY`. Both are valid, semantically identical Postgres,
+    and the runtime only *reads* the events table — it never diffs DDL text — so this
+    difference is inert. The INTG-01 conformance test (which applies kit's generated SQL
+    to real Postgres and boots the runtime against it) is the authority that the two
+    representations interoperate; reconciling the identity renderer in kit is deliberately
+    out of scope (it would ripple into every entity kind's identity columns).
 - Unit tests over the full edge-case type matrix live in
   [`events-table-resolver.test.ts`](../packages/drizzle-pulse/src/__tests__/events-table-resolver.test.ts).
   Any change to the derivation rules above must keep those tests passing, and any
