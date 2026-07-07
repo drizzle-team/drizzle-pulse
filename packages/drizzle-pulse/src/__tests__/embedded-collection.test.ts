@@ -1,53 +1,14 @@
 import { describe, expect, test } from 'bun:test';
-import { getColumns } from 'drizzle-orm';
-import { integer, pgTable, serial, text } from 'drizzle-orm/pg-core';
 import { createPulseClient, PulseCollection } from '../client/embedded/index.js';
 import type { PulseSourceDb } from '../server/pulse-sql.js';
 import { WalEventEmitter } from '../server/wal-event-emitter.js';
-import type { PulseRegistryQuery, ResolvedPulseQuery } from '../types.js';
+import { makeMockSourceDb, makeRegistryStub, makeResolvedQuery } from './mock-runtime.js';
 
 // ---------------------------------------------------------------------------
 // Minimal inline fixtures — no DB required. Real WAL/rebaseline scenarios are
 // covered by the integration suite and resilience.test.ts; this file covers the
 // user-facing error paths of the embedded client only.
 // ---------------------------------------------------------------------------
-
-const ordersTable = pgTable('orders', {
-  id: serial('id').primaryKey(),
-  status: text('status').notNull(),
-  price: integer('price'),
-});
-
-function makeMockSourceDb(rows: Record<string, unknown>[] = []): PulseSourceDb {
-  const dynamicQuery: any = Object.assign(Promise.resolve(rows), {
-    $dynamic() {
-      return dynamicQuery;
-    },
-    orderBy() {
-      return dynamicQuery;
-    },
-    limit(n: number) {
-      return Promise.resolve(rows.slice(0, n));
-    },
-  });
-  return {
-    select() {
-      return {
-        from() {
-          return {
-            where() {
-              return {
-                $dynamic() {
-                  return dynamicQuery;
-                },
-              };
-            },
-          };
-        },
-      };
-    },
-  } as unknown as PulseSourceDb;
-}
 
 const mockSourceDb = makeMockSourceDb();
 
@@ -121,42 +82,6 @@ function makeMockSourceDbThatThrows(error: Error): PulseSourceDb {
       };
     },
   } as unknown as PulseSourceDb;
-}
-
-const ordersColumns = getColumns(ordersTable);
-
-function makeResolvedQuery(overrides: Partial<ResolvedPulseQuery> = {}): ResolvedPulseQuery {
-  return {
-    table: ordersTable,
-    pkColumn: ordersColumns.id,
-    columns: ordersColumns,
-    selectedColumns: ordersColumns,
-    allowedColumnNames: new Set(Object.keys(ordersColumns)),
-    order: 'asc',
-    limit: null,
-    argsSchema: null,
-    where: null,
-    hasTransform: false,
-    transformRows: async (rows) => rows,
-    ...overrides,
-  };
-}
-
-function makeRegistryStub(overrides: Partial<PulseRegistryQuery> = {}): PulseRegistryQuery {
-  return {
-    table: ordersTable,
-    pkColumn: ordersColumns.id,
-    columns: ordersColumns,
-    selectedColumns: ordersColumns,
-    allowedColumnNames: new Set(Object.keys(ordersColumns)),
-    order: 'asc',
-    limit: null,
-    argsSchema: null,
-    queryFn: null,
-    hasTransform: false,
-    transformRows: async (rows) => rows,
-    ...overrides,
-  };
 }
 
 function makeMockRuntime(opts: { isRunning?: boolean; hasTransform?: boolean } = {}) {

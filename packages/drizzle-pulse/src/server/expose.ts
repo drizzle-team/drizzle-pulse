@@ -280,7 +280,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     }
 
     if (this._isRunning) {
-      this.log('[WAL Listener] Already running');
+      console.log('[WAL Listener] Already running');
       return;
     }
 
@@ -332,7 +332,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       await pool.end();
     }
 
-    this.log('[WAL Listener] Stopped');
+    console.log('[WAL Listener] Stopped');
   }
 
   private initializeDatabaseServices(): void {
@@ -437,7 +437,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
 
   private onReplicationStart(): void {
     if (!this._isRunning) return;
-    this.log('[WAL Listener] Replication started');
+    console.log('[WAL Listener] Replication started');
     if (this.everConnected) {
       for (const listener of [...this.reconnectListeners]) {
         listener();
@@ -469,7 +469,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
             await replicationService.acknowledge(lsn);
           }
         } catch (error) {
-          this.error('[WAL Listener] Error processing message:', error);
+          console.error('[WAL Listener] Error processing message:', error);
         }
       });
 
@@ -478,7 +478,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
           return;
         }
 
-        this.error('[WAL Listener] Replication error:', error);
+        console.error('[WAL Listener] Replication error:', error);
         await this.handleDisconnect(replicationService);
       });
 
@@ -487,14 +487,14 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       });
 
       replicationService.on('acknowledge', (lsn: string) => {
-        this.log(`[WAL Listener] Acknowledged LSN: ${lsn}`);
+        console.log(`[WAL Listener] Acknowledged LSN: ${lsn}`);
       });
 
       replicationService.on(
         'heartbeat',
         (lsn: string, timestamp: number, shouldRespond: boolean) => {
           if (shouldRespond) {
-            this.log(`[WAL Listener] Heartbeat at LSN: ${lsn}, timestamp: ${timestamp}`);
+            console.log(`[WAL Listener] Heartbeat at LSN: ${lsn}, timestamp: ${timestamp}`);
           }
         },
       );
@@ -509,24 +509,24 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       );
 
       if (result.rows.length === 0) {
-        this.log(`[WAL Listener] Creating replication slot '${slotName}'`);
+        console.log(`[WAL Listener] Creating replication slot '${slotName}'`);
         await adminDb.execute(
           sql`SELECT pg_create_logical_replication_slot(${slotName}, ${'pgoutput'})`,
         );
       } else {
         const slot = result.rows[0];
         if (slot?.active && slot.active_pid) {
-          this.log(
+          console.log(
             `[WAL Listener] Terminating stale connection on slot '${slotName}' (PID ${slot.active_pid})`,
           );
           await adminDb.execute(sql`SELECT pg_terminate_backend(${slot.active_pid})`);
           await new Promise((resolve) => setTimeout(resolve, 500));
         }
 
-        this.log(`[WAL Listener] Replication slot '${slotName}' ready`);
+        console.log(`[WAL Listener] Replication slot '${slotName}' ready`);
       }
 
-      this.log(`[WAL Listener] Subscribing to slot '${this.slotName}'`);
+      console.log(`[WAL Listener] Subscribing to slot '${this.slotName}'`);
       const streaming = replicationService.subscribe(plugin, this.slotName);
       await Promise.race([
         new Promise((resolve) => replicationService.once('start', resolve)),
@@ -534,7 +534,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       ]);
       void streaming.catch(() => {}); // stream-end errors already handled via the 'error' listener
     } catch (error) {
-      this.error('[WAL Listener] Connection error:', error);
+      console.error('[WAL Listener] Connection error:', error);
       await this.handleDisconnect(this.replicationService);
     }
   }
@@ -547,7 +547,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       try {
         await replicationService.stop();
       } catch (error) {
-        this.error('[WAL Listener] Error during stop:', error);
+        console.error('[WAL Listener] Error during stop:', error);
       }
     }
 
@@ -558,7 +558,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     this.clearReconnectTimer();
 
     if (this.reconnectAttempts >= this.reconnectConfig.maxRetries) {
-      this.error('[WAL Listener] Max reconnection attempts reached. Giving up.');
+      console.error('[WAL Listener] Max reconnection attempts reached. Giving up.');
       this._isRunning = false;
       return;
     }
@@ -568,7 +568,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     const delay = Math.min(exponentialDelay + jitter, this.reconnectConfig.maxDelayMs);
 
     this.reconnectAttempts += 1;
-    this.log(
+    console.log(
       `[WAL Listener] Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts}/${this.reconnectConfig.maxRetries})`,
     );
 
@@ -764,20 +764,12 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     return this.config.sourceDb;
   }
 
-  private log(message: string, ...args: unknown[]): void {
-    console.log(message, ...args);
-  }
-
-  private error(message: string, ...args: unknown[]): void {
-    console.error(message, ...args);
-  }
-
   private logEvent(message: string, ...args: unknown[]): void {
     if (!this.loggingConfig.events) {
       return;
     }
 
-    this.log(message, ...args);
+    console.log(message, ...args);
   }
 }
 

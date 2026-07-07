@@ -1,62 +1,19 @@
 import { describe, expect, test } from 'bun:test';
-import { getColumns } from 'drizzle-orm';
-import { integer, pgTable, serial, text } from 'drizzle-orm/pg-core';
 import { PulseCollection } from '../client/embedded/index.js';
-import { RealtimeRuntime } from '../server/expose.js';
-import { createPulseRegistry } from '../server/pulse-registry.js';
 import type { PulseSourceDb } from '../server/pulse-sql.js';
 import type { WalTapPayload } from '../server/wal-event-emitter.js';
 import { WalEventEmitter } from '../server/wal-event-emitter.js';
 import type { PulseAuthContext, PulseRegistryQuery, ResolvedPulseQuery } from '../types.js';
-
-// ---------------------------------------------------------------------------
-// Inline table fixtures (no DB required)
-// ---------------------------------------------------------------------------
-
-const ordersTable = pgTable('orders', {
-  id: serial('id').primaryKey(),
-  status: text('status').notNull(),
-  price: integer('price'),
-});
-
-const ordersColumns = getColumns(ordersTable);
+import {
+  makeMockSourceDb,
+  makeRealtimeRuntime,
+  makeRegistryStub,
+  makeResolvedQuery,
+} from './mock-runtime.js';
 
 // ---------------------------------------------------------------------------
 // Mock helpers
 // ---------------------------------------------------------------------------
-
-// Mutable-row mock sourceDb: pass an array reference; mutations to it are
-// reflected on the next await of the same dynamicQuery promise.
-function makeMockSourceDb(rows: Record<string, unknown>[] = []): PulseSourceDb {
-  const dynamicQuery: any = Object.assign(Promise.resolve(rows), {
-    $dynamic() {
-      return dynamicQuery;
-    },
-    orderBy() {
-      return dynamicQuery;
-    },
-    limit(n: number) {
-      return Promise.resolve(rows.slice(0, n));
-    },
-  });
-  return {
-    select() {
-      return {
-        from() {
-          return {
-            where() {
-              return {
-                $dynamic() {
-                  return dynamicQuery;
-                },
-              };
-            },
-          };
-        },
-      };
-    },
-  } as unknown as PulseSourceDb;
-}
 
 // Blocking mock: the FIRST select (startHandshake) resolves immediately;
 // subsequent selects (rebaseline) block until release() is called.
@@ -109,40 +66,6 @@ function makeBlockingDb(rows: Record<string, unknown>[]): {
   return { db, release: releaseRebaseline, state };
 }
 
-function makeResolvedQuery(overrides: Partial<ResolvedPulseQuery> = {}): ResolvedPulseQuery {
-  return {
-    table: ordersTable,
-    pkColumn: ordersColumns.id,
-    columns: ordersColumns,
-    selectedColumns: ordersColumns,
-    allowedColumnNames: new Set(Object.keys(ordersColumns)),
-    order: 'asc',
-    limit: null,
-    argsSchema: null,
-    where: null,
-    hasTransform: false,
-    transformRows: async (rows) => rows,
-    ...overrides,
-  };
-}
-
-function makeRegistryStub(overrides: Partial<PulseRegistryQuery> = {}): PulseRegistryQuery {
-  return {
-    table: ordersTable,
-    pkColumn: ordersColumns.id,
-    columns: ordersColumns,
-    selectedColumns: ordersColumns,
-    allowedColumnNames: new Set(Object.keys(ordersColumns)),
-    order: 'asc',
-    limit: null,
-    argsSchema: null,
-    queryFn: null,
-    hasTransform: false,
-    transformRows: async (rows) => rows,
-    ...overrides,
-  };
-}
-
 type MockRuntime = {
   isRunning: boolean;
   walEventEmitter: WalEventEmitter;
@@ -171,16 +94,6 @@ function makeMockRuntime(
       resolve: () => resolved,
     },
   };
-}
-
-// Construct a real RealtimeRuntime with an empty registry (no DB required).
-function makeRealtimeRuntime(sourceDb?: PulseSourceDb): RealtimeRuntime<any> {
-  const emptyRegistry = createPulseRegistry({});
-  return new RealtimeRuntime(emptyRegistry as any, {
-    databaseUrl: 'postgresql://user:pass@localhost/test',
-    sourceDb: sourceDb ?? makeMockSourceDb(),
-    wal: { publicationName: 'test_pub', slotName: 'test_slot' },
-  });
 }
 
 // ---------------------------------------------------------------------------

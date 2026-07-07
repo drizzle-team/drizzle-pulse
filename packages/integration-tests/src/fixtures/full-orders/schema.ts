@@ -28,6 +28,5 @@ export const orders = pgTable(
   ],
 );
 
-export const userSchema = createSelectSchema(users);
-export const orderSchema = createSelectSchema(orders);
+const orderSchema = createSelectSchema(orders);
 export const ordersByStatusArgsSchema = orderSchema.pick({ status: true });

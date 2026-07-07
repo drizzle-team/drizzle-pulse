@@ -35,7 +35,6 @@ import {
   varchar,
   vector,
 } from 'drizzle-orm/pg-core';
-import { createSelectSchema } from 'drizzle-orm/zod';
 
 export const moodEnum = pgEnum('fixture_pg_data_types_mood', ['sad', 'ok', 'happy']);
 
@@ -97,5 +96,3 @@ export const pgDataTypes = pgTable('pg_data_types', {
   bitCol: bit('bit_col', { dimensions: 8 }),
   moodCol: moodEnum('mood_col'),
 });
-
-export const pgDataTypesRowSchema = createSelectSchema(pgDataTypes);

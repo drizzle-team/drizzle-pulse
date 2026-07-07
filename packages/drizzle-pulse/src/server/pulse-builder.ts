@@ -63,33 +63,21 @@ export class PulseBuilder<
     const selectedColumns = columnsToSelectedColumns(selection, this.config.columns);
 
     return new PulseBuilder<TTable, TNewSelection, TArgs, ColumnsSelection<TTable, TNewSelection>>({
-      table: this.config.table,
-      pkColumn: this.config.pkColumn,
-      columns: this.config.columns,
+      ...this.config,
       selectedColumns,
-      argsSchema: this.config.argsSchema,
-      queryFn: this.config.queryFn,
       transformFn: null,
-      order: this.config.order,
-      limit: this.config.limit,
-    });
+    } as PulseQueryConfig<TTable, TNewSelection, TArgs, ColumnsSelection<TTable, TNewSelection>>);
   }
 
   args<TNewArgs>(schema: z.ZodType<TNewArgs>): PulseBuilder<TTable, TSelection, TNewArgs, TResult> {
     return new PulseBuilder<TTable, TSelection, TNewArgs, TResult>({
-      table: this.config.table,
-      pkColumn: this.config.pkColumn,
-      columns: this.config.columns,
-      selectedColumns: this.config.selectedColumns,
+      ...this.config,
       argsSchema: schema,
       // The second QueryFn type param is the full source row type (PulseQueryConfig's
       // `queryFn: QueryFn<TArgs, InferSelectModel<TTable>>`), not the column-selection
       // map TSelection — the row shape doesn't change across .args(), only TArgs does.
       queryFn: this.config.queryFn as QueryFn<TNewArgs, InferSelectModel<TTable>> | null,
-      transformFn: this.config.transformFn,
-      order: this.config.order,
-      limit: this.config.limit,
-    });
+    } as unknown as PulseQueryConfig<TTable, TSelection, TNewArgs, TResult>);
   }
 
   transform<TTransformed extends Record<string, unknown>>(
@@ -101,59 +89,25 @@ export class PulseBuilder<
     ) => Promise<TTransformed[]> | TTransformed[],
   ): PulseBuilder<TTable, TSelection, TArgs, TTransformed> {
     return new PulseBuilder<TTable, TSelection, TArgs, TTransformed>({
-      table: this.config.table,
-      pkColumn: this.config.pkColumn,
-      columns: this.config.columns,
-      selectedColumns: this.config.selectedColumns,
-      argsSchema: this.config.argsSchema,
-      queryFn: this.config.queryFn,
+      ...this.config,
       transformFn: fn,
-      order: this.config.order,
-      limit: this.config.limit,
-    });
+    } as unknown as PulseQueryConfig<TTable, TSelection, TArgs, TTransformed>);
   }
 
   order(direction: 'asc' | 'desc'): PulseBuilder<TTable, TSelection, TArgs, TResult> {
     return new PulseBuilder<TTable, TSelection, TArgs, TResult>({
-      table: this.config.table,
-      pkColumn: this.config.pkColumn,
-      columns: this.config.columns,
-      selectedColumns: this.config.selectedColumns,
-      argsSchema: this.config.argsSchema,
-      queryFn: this.config.queryFn,
-      transformFn: this.config.transformFn,
+      ...this.config,
       order: direction,
-      limit: this.config.limit,
     });
   }
 
   limit(n: number): PulseBuilder<TTable, TSelection, TArgs, TResult> {
-    return new PulseBuilder<TTable, TSelection, TArgs, TResult>({
-      table: this.config.table,
-      pkColumn: this.config.pkColumn,
-      columns: this.config.columns,
-      selectedColumns: this.config.selectedColumns,
-      argsSchema: this.config.argsSchema,
-      queryFn: this.config.queryFn,
-      transformFn: this.config.transformFn,
-      order: this.config.order,
-      limit: n,
-    });
+    return new PulseBuilder<TTable, TSelection, TArgs, TResult>({ ...this.config, limit: n });
   }
 
   query(
     fn: (ctx: PulseQueryContext<TArgs, InferSelectModel<TTable>>) => WhereClause | null,
   ): PulseBuilder<TTable, TSelection, TArgs, TResult> {
-    return new PulseBuilder<TTable, TSelection, TArgs, TResult>({
-      table: this.config.table,
-      pkColumn: this.config.pkColumn,
-      columns: this.config.columns,
-      selectedColumns: this.config.selectedColumns,
-      argsSchema: this.config.argsSchema,
-      queryFn: fn,
-      transformFn: this.config.transformFn,
-      order: this.config.order,
-      limit: this.config.limit,
-    });
+    return new PulseBuilder<TTable, TSelection, TArgs, TResult>({ ...this.config, queryFn: fn });
   }
 }

@@ -9,39 +9,19 @@
  */
 
 import { afterAll, describe, expect, test } from 'bun:test';
-import { randomUUID } from 'node:crypto';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createPulseRegistry, emitEventsTableDdl, expose } from 'drizzle-pulse/server';
-import { Pool } from 'pg';
+import type { Pool } from 'pg';
 import postgres from 'postgres';
 import { orders } from './fixtures/minimal-orders/schema.js';
-
-const DEFAULT_DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/postgres';
-
-function baseDatabaseUrl(): string {
-  return process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL;
-}
-
-function buildDatabaseUrl(base: string, databaseName: string): string {
-  const url = new URL(base);
-  url.pathname = `/${databaseName}`;
-  return url.toString();
-}
-
-function randomSuffix(): string {
-  return randomUUID().replaceAll('-', '').slice(0, 10);
-}
-
-function withQuietPostgresUrl(databaseUrl: string): string {
-  const url = new URL(databaseUrl);
-  url.searchParams.set('options', '-c client_min_messages=warning');
-  return url.toString();
-}
-
-function createQuietPool(databaseUrl: string): Pool {
-  return new Pool({ connectionString: withQuietPostgresUrl(databaseUrl) });
-}
+import {
+  baseDatabaseUrl,
+  buildDatabaseUrl,
+  createQuietPool,
+  randomSuffix,
+  withQuietPostgresUrl,
+} from './helpers/test-harness.js';
 
 // A single shared admin pool (connected to the base `postgres` database) creates/drops
 // every scenario's standalone database and cleans up cluster-wide replication slots —
@@ -115,15 +95,6 @@ function failureLines(message: string): string[] {
   return message.split('\n').filter((line) => line.startsWith('- '));
 }
 
-async function captureStartRejection(runtime: { start: () => Promise<void> }): Promise<Error> {
-  try {
-    await runtime.start();
-  } catch (error) {
-    return error instanceof Error ? error : new Error(String(error));
-  }
-  throw new Error('Expected runtime.start() to reject, but it resolved');
-}
-
 describe('Startup Guard', () => {
   test('(a) missing publication AND missing events table: one aggregated rejection naming both', async () => {
     const ctx = await setupGuardScenario('a');
@@ -143,12 +114,17 @@ describe('Startup Guard', () => {
         wal: { publicationName, slotName },
       });
 
-      const error = await captureStartRejection(runtime);
-
-      expect(error.message).toContain(publicationName);
-      expect(error.message).toContain('__events_public_orders');
+      const startPromise = runtime.start();
+      await expect(startPromise).rejects.toThrow(publicationName);
+      await expect(startPromise).rejects.toThrow('__events_public_orders');
       // Aggregation proof: two independent failures surface as two distinct lines in
       // the SAME thrown error, not two separate throws.
+      const error: Error = await startPromise.then(
+        () => {
+          throw new Error('Expected runtime.start() to reject, but it resolved');
+        },
+        (e: unknown) => (e instanceof Error ? e : new Error(String(e))),
+      );
       expect(failureLines(error.message).length).toBeGreaterThanOrEqual(2);
     } finally {
       await sourceSql.end();
@@ -173,9 +149,7 @@ describe('Startup Guard', () => {
         sourceDb: drizzle({ client: sourceSql }),
       });
 
-      const error = await captureStartRejection(runtime);
-
-      expect(error.message).toContain('drizzle_pulse');
+      await expect(runtime.start()).rejects.toThrow('drizzle_pulse');
     } finally {
       await sourceSql.end();
       await teardownGuardScenario(ctx);
@@ -234,10 +208,9 @@ describe('Startup Guard', () => {
         wal: { publicationName, slotName },
       });
 
-      const error = await captureStartRejection(runtime);
-
-      expect(error.message).toContain('public.orders');
-      expect(error.message).toContain(publicationName);
+      const startPromise = runtime.start();
+      await expect(startPromise).rejects.toThrow('public.orders');
+      await expect(startPromise).rejects.toThrow(publicationName);
     } finally {
       await sourceSql.end();
       await ctx.pool.query(`DROP PUBLICATION IF EXISTS ${publicationName}`).catch(() => {});
@@ -264,9 +237,7 @@ describe('Startup Guard', () => {
         wal: { publicationName, slotName },
       });
 
-      const error = await captureStartRejection(runtime);
-
-      expect(error.message).toContain('REPLICA IDENTITY FULL');
+      await expect(runtime.start()).rejects.toThrow('REPLICA IDENTITY FULL');
     } finally {
       await sourceSql.end();
       await ctx.pool.query(`DROP PUBLICATION IF EXISTS ${publicationName}`).catch(() => {});
@@ -299,10 +270,9 @@ describe('Startup Guard', () => {
         wal: { publicationName, slotName },
       });
 
-      const error = await captureStartRejection(runtime);
-
-      expect(error.message).toContain('__events_public_orders');
-      expect(error.message).toContain('does not exist');
+      const startPromise = runtime.start();
+      await expect(startPromise).rejects.toThrow('__events_public_orders');
+      await expect(startPromise).rejects.toThrow('does not exist');
     } finally {
       await sourceSql.end();
       await ctx.pool.query(`DROP PUBLICATION IF EXISTS ${publicationName}`).catch(() => {});

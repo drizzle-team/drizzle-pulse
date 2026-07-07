@@ -2,22 +2,12 @@ import { describe, expect, test } from 'bun:test';
 import { RealtimeRuntime } from '../server/expose.js';
 import { createPulseRegistry } from '../server/pulse-registry.js';
 import type { PulseSourceDb } from '../server/pulse-sql.js';
-
-// Construct a real RealtimeRuntime with an empty registry (no DB required) — mirrors
-// resilience.test.ts's makeRealtimeRuntime helper.
-function makeRuntime(databaseUrl: string): RealtimeRuntime<any> {
-  const emptyRegistry = createPulseRegistry({});
-  return new RealtimeRuntime(emptyRegistry as any, {
-    databaseUrl,
-    sourceDb: {} as PulseSourceDb,
-    wal: { publicationName: 'test_pub', slotName: 'test_slot' },
-  });
-}
+import { makeRealtimeRuntime } from './mock-runtime.js';
 
 describe('connection-string handling', () => {
   test('pgConfig/pgPoolConfig pass the raw connectionString through instead of re-parsing it', () => {
     const databaseUrl = 'postgresql://user:p%40ss@localhost:5433/my_db?sslmode=require';
-    const runtime = makeRuntime(databaseUrl) as any;
+    const runtime = makeRealtimeRuntime({ databaseUrl }) as any;
 
     expect(runtime.pgConfig.connectionString).toBe(databaseUrl);
     expect(runtime.pgPoolConfig.connectionString).toBe(databaseUrl);
@@ -32,7 +22,9 @@ describe('connection-string handling', () => {
   });
 
   test('replication flag is still layered onto pgConfig only', () => {
-    const runtime = makeRuntime('postgresql://user:pass@localhost/test') as any;
+    const runtime = makeRealtimeRuntime({
+      databaseUrl: 'postgresql://user:pass@localhost/test',
+    }) as any;
     expect(runtime.pgConfig.replication).toBe('database');
     expect(runtime.pgPoolConfig.replication).toBeUndefined();
   });
@@ -40,7 +32,9 @@ describe('connection-string handling', () => {
 
 describe('start() failure rolls back to a restartable state', () => {
   test('a throw after the guard resets _isRunning and tears down the pool instead of leaving a zombie', async () => {
-    const runtime = makeRuntime('postgresql://user:pass@localhost/test') as any;
+    const runtime = makeRealtimeRuntime({
+      databaseUrl: 'postgresql://user:pass@localhost/test',
+    }) as any;
 
     let poolEnded = 0;
     runtime.initializeDatabaseServices();
@@ -82,7 +76,9 @@ describe('start() failure rolls back to a restartable state', () => {
 
 describe('subscription idle sweep lifecycle', () => {
   test('subscriptionTtl config falls back to defaults and honors overrides', () => {
-    const defaultRuntime = makeRuntime('postgresql://user:pass@localhost/test') as any;
+    const defaultRuntime = makeRealtimeRuntime({
+      databaseUrl: 'postgresql://user:pass@localhost/test',
+    }) as any;
     expect(defaultRuntime.subscriptionTtlConfig).toEqual({
       idleMs: 24 * 60 * 60 * 1000,
       sweepIntervalMs: 5 * 60 * 1000,
@@ -98,7 +94,9 @@ describe('subscription idle sweep lifecycle', () => {
   });
 
   test('start() begins the sweep timer and stop() clears it', async () => {
-    const runtime = makeRuntime('postgresql://user:pass@localhost/test') as any;
+    const runtime = makeRealtimeRuntime({
+      databaseUrl: 'postgresql://user:pass@localhost/test',
+    }) as any;
 
     runtime.runStartupGuard = async () => {};
     runtime.ensureBaselines = async () => {};
@@ -114,7 +112,9 @@ describe('subscription idle sweep lifecycle', () => {
   });
 
   test('a failed start() never leaves a dangling sweep timer', async () => {
-    const runtime = makeRuntime('postgresql://user:pass@localhost/test') as any;
+    const runtime = makeRealtimeRuntime({
+      databaseUrl: 'postgresql://user:pass@localhost/test',
+    }) as any;
 
     runtime.runStartupGuard = async () => {};
     runtime.ensureBaselines = async () => {

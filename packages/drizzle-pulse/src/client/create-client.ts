@@ -53,14 +53,7 @@ export class PullClient {
       return this.inFlight;
     }
 
-    const subscriptions = Array.from(this.handles.values())
-      .map((handle) => handle.getSubscriptionState())
-      .filter((state): state is PullSubscription => state !== null);
-
-    if (subscriptions.length === 0) {
-      return;
-    }
-
+    const subscriptions: PullSubscription[] = [];
     const handleBySubscriptionId = new Map<string, PullSubscriberHandle>();
     for (const handle of this.handles.values()) {
       const state = handle.getSubscriptionState();
@@ -68,7 +61,12 @@ export class PullClient {
         continue;
       }
 
+      subscriptions.push(state);
       handleBySubscriptionId.set(state.subscriptionId, handle);
+    }
+
+    if (subscriptions.length === 0) {
+      return;
     }
 
     this.inFlight = (async () => {

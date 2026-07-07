@@ -137,20 +137,3 @@ export async function insertTestUser(
   }
   return row;
 }
-
-/**
- * Derive the snapshot cursor from the last event returned by
- * `waitForEventsForFixture()`.
- *
- * Returns the `snapshot` value of the last event in the array, or
- * `fallback` when the array is empty.  This is the lightweight
- * snapshot-progression pattern: no new helper abstractions, just a
- * one-liner that makes the intent clear at call sites.
- */
-export function getLastEventSnapshot(events: ReadonlyArray<HarnessEvent>, fallback = 0): number {
-  if (events.length === 0) {
-    return fallback;
-  }
-  const last = events[events.length - 1];
-  return last?.snapshot ?? fallback;
-}

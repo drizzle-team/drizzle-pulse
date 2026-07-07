@@ -8,6 +8,7 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { eq } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
@@ -161,18 +162,6 @@ const registry = createPulseRegistry({
 const sortByPk = (rows: readonly Record<string, unknown>[]) =>
   [...rows].sort((a, b) => String(a.$pk).localeCompare(String(b.$pk)));
 
-// Deep-equality predicate reusing bun's toEqual semantics (order-insensitive on keys,
-// Date/Decimal-aware) so the retry loop's convergence check matches the final assertion
-// exactly. Returns false instead of throwing so it can drive the bounded retry.
-function rowsMatch(actual: unknown, expected: unknown): boolean {
-  try {
-    expect(actual).toEqual(expected);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function assertOracleMatch(
   runtime: RuntimeOf<typeof registry>,
   collection: PulseCollection<Record<string, unknown> & { $pk: unknown }>,
@@ -202,7 +191,7 @@ async function assertOracleMatch(
     await pullQuery.poll();
     const sortedEmbed = sortByPk([...collection.list()] as Record<string, unknown>[]);
     const sortedPull = sortByPk([...pullQuery.getState().data] as Record<string, unknown>[]);
-    if (rowsMatch(sortedEmbed, sortedHttp) && rowsMatch(sortedPull, sortedHttp)) {
+    if (isDeepStrictEqual(sortedEmbed, sortedHttp) && isDeepStrictEqual(sortedPull, sortedHttp)) {
       return;
     }
     await new Promise<void>((resolve) => setTimeout(resolve, 50));

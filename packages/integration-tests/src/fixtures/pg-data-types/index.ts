@@ -1,14 +1,13 @@
 import { fileURLToPath } from 'node:url';
 import { resolveEventsTable } from 'drizzle-pulse/server';
 import type { IntegrationTestFixture } from '../../helpers/test-harness.js';
-import { pgDataTypes, pgDataTypesRowSchema } from './schema.js';
+import { pgDataTypes } from './schema.js';
 
 const migrationsDir = fileURLToPath(new URL('./drizzle', import.meta.url));
 
 export const pgDataTypesFixture = {
   variantName: 'pg-data-types',
   migrationsPath: migrationsDir,
-  sourceTable: 'pg_data_types',
   eventsTable: resolveEventsTable(pgDataTypes),
   pulsedTables: [pgDataTypes],
   cleanupTables: ['pg_data_types'] as const,
@@ -16,7 +15,5 @@ export const pgDataTypesFixture = {
   tables: {
     pgDataTypes,
   },
-  schemas: {
-    row: pgDataTypesRowSchema,
-  },
+  schemas: {},
 } satisfies IntegrationTestFixture;

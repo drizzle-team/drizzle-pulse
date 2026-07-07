@@ -11,5 +11,5 @@ export const orders = pgTable('orders', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
-export const orderSchema = createSelectSchema(orders);
+const orderSchema = createSelectSchema(orders);
 export const ordersByStatusArgsSchema = orderSchema.pick({ status: true });

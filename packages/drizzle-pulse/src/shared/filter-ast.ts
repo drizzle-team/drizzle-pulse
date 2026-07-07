@@ -93,10 +93,6 @@ type WhereAst =
       not: WhereAst | null;
     };
 
-function parseColumnCondition(columnName: string, filterValue: unknown) {
-  return { columnName, filterValue };
-}
-
 function validateLogicalNodeShape(condition: FilterConditionObject): void {
   const hasAnd = condition.AND !== undefined;
   const hasOr = condition.OR !== undefined;
@@ -146,7 +142,7 @@ export function parseWhereClause(condition: WhereClause | unknown | null | undef
       continue;
     }
 
-    columns.push(parseColumnCondition(key, value));
+    columns.push({ columnName: key, filterValue: value });
   }
 
   const and = Array.isArray(filterCondition.AND)

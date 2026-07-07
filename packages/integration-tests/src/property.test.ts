@@ -111,13 +111,6 @@ function readNumber(value: unknown, field: string): number {
   return value;
 }
 
-function readPrice(value: unknown, field: string): number {
-  if (typeof value !== 'number') {
-    throw new Error(`Expected ${field} to be a number`);
-  }
-  return value;
-}
-
 function readStatus(value: unknown, field: string): HarnessOrderStatus {
   if (
     value === 'requested' ||
@@ -212,7 +205,7 @@ function projectRows(rows: ReadonlyArray<Record<string, unknown>>): Array<{
   return rows.map((row, index) => ({
     pk: readNumber(row.$pk, `rows[${index}].$pk`),
     status: readStatus(row.status, `rows[${index}].status`),
-    price: readPrice(row.price, `rows[${index}].price`),
+    price: readNumber(row.price, `rows[${index}].price`),
   }));
 }
 
@@ -353,26 +346,20 @@ describe('Property Invariants', () => {
   test(
     'property: completeness invariant for requested subscription state',
     async () => {
-      try {
-        await fc.assert(
-          fc.asyncProperty(operationSequenceArb, async (sequence) => {
-            const result = await executeSequence(sequence, 'completeness');
+      await fc.assert(
+        fc.asyncProperty(operationSequenceArb, async (sequence) => {
+          const result = await executeSequence(sequence, 'completeness');
 
-            const clientPks = extractPkList(result.clientRows);
-            expect(clientPks.length).toBe(result.expectedRequestedIds.length);
-            expect(new Set(clientPks).size).toBe(clientPks.length);
+          const clientPks = extractPkList(result.clientRows);
+          expect(clientPks.length).toBe(result.expectedRequestedIds.length);
+          expect(new Set(clientPks).size).toBe(clientPks.length);
 
-            for (const expectedId of result.expectedRequestedIds) {
-              expect(clientPks.includes(expectedId)).toBe(true);
-            }
-          }),
-          { numRuns: 20 },
-        );
-      } catch (error) {
-        console.error('[fast-check][completeness] seed/path is included in the failure output:');
-        console.error(error);
-        throw error;
-      }
+          for (const expectedId of result.expectedRequestedIds) {
+            expect(clientPks.includes(expectedId)).toBe(true);
+          }
+        }),
+        { numRuns: 20 },
+      );
     },
     PROPERTY_TEST_TIMEOUT_MS,
   );
@@ -380,36 +367,30 @@ describe('Property Invariants', () => {
   test(
     'property: WAL snapshots are strictly increasing and pull snapshot advances',
     async () => {
-      try {
-        await fc.assert(
-          fc.asyncProperty(operationSequenceArb, async (sequence) => {
-            const result = await executeSequence(sequence, 'ordering');
+      await fc.assert(
+        fc.asyncProperty(operationSequenceArb, async (sequence) => {
+          const result = await executeSequence(sequence, 'ordering');
 
-            expect(result.walEvents.length).toBe(result.sequenceLength);
-            const snapshots = result.walEvents.map((event) => event.snapshot);
+          expect(result.walEvents.length).toBe(result.sequenceLength);
+          const snapshots = result.walEvents.map((event) => event.snapshot);
 
-            for (let index = 1; index < snapshots.length; index += 1) {
-              const previous = snapshots[index - 1];
-              const current = snapshots[index];
-              if (previous === undefined || current === undefined) {
-                throw new Error('Expected snapshot values while checking ordering invariant');
-              }
-
-              expect(current).toBeGreaterThan(previous);
+          for (let index = 1; index < snapshots.length; index += 1) {
+            const previous = snapshots[index - 1];
+            const current = snapshots[index];
+            if (previous === undefined || current === undefined) {
+              throw new Error('Expected snapshot values while checking ordering invariant');
             }
 
-            const lastSnapshot = snapshots[snapshots.length - 1];
-            if (lastSnapshot !== undefined) {
-              expect(result.pullSnapshot).toBe(lastSnapshot);
-            }
-          }),
-          { numRuns: 20 },
-        );
-      } catch (error) {
-        console.error('[fast-check][ordering] seed/path is included in the failure output:');
-        console.error(error);
-        throw error;
-      }
+            expect(current).toBeGreaterThan(previous);
+          }
+
+          const lastSnapshot = snapshots[snapshots.length - 1];
+          if (lastSnapshot !== undefined) {
+            expect(result.pullSnapshot).toBe(lastSnapshot);
+          }
+        }),
+        { numRuns: 20 },
+      );
     },
     PROPERTY_TEST_TIMEOUT_MS,
   );
@@ -417,29 +398,23 @@ describe('Property Invariants', () => {
   test(
     'property: polling PulseCore twice is idempotent',
     async () => {
-      try {
-        await fc.assert(
-          fc.asyncProperty(operationSequenceArb, async (sequence) => {
-            const result = await executeSequence(sequence, 'idempotency');
+      await fc.assert(
+        fc.asyncProperty(operationSequenceArb, async (sequence) => {
+          const result = await executeSequence(sequence, 'idempotency');
 
-            // First poll result captured by executeSequence
-            const afterFirstPoll = projectRows(result.clientRows);
+          // First poll result captured by executeSequence
+          const afterFirstPoll = projectRows(result.clientRows);
 
-            // Poll the same PulseQuery instance again — this re-runs executeSequence
-            // which creates a fresh PulseQuery, so we verify structural idempotency:
-            // the same operation sequence always produces the same final state
-            const result2 = await executeSequence(sequence, 'idempotency');
-            const afterSecondRun = projectRows(result2.clientRows);
+          // Poll the same PulseQuery instance again — this re-runs executeSequence
+          // which creates a fresh PulseQuery, so we verify structural idempotency:
+          // the same operation sequence always produces the same final state
+          const result2 = await executeSequence(sequence, 'idempotency');
+          const afterSecondRun = projectRows(result2.clientRows);
 
-            expect(afterSecondRun).toEqual(afterFirstPoll);
-          }),
-          { numRuns: 20 },
-        );
-      } catch (error) {
-        console.error('[fast-check][idempotency] seed/path is included in the failure output:');
-        console.error(error);
-        throw error;
-      }
+          expect(afterSecondRun).toEqual(afterFirstPoll);
+        }),
+        { numRuns: 20 },
+      );
     },
     PROPERTY_TEST_TIMEOUT_MS,
   );
@@ -447,24 +422,16 @@ describe('Property Invariants', () => {
   test(
     'property: filter consistency keeps only requested rows',
     async () => {
-      try {
-        await fc.assert(
-          fc.asyncProperty(operationSequenceArb, async (sequence) => {
-            const result = await executeSequence(sequence, 'filter-consistency');
+      await fc.assert(
+        fc.asyncProperty(operationSequenceArb, async (sequence) => {
+          const result = await executeSequence(sequence, 'filter-consistency');
 
-            for (const [index, row] of result.clientRows.entries()) {
-              expect(readStatus(row.status, `clientRows[${index}].status`)).toBe('requested');
-            }
-          }),
-          { numRuns: 20 },
-        );
-      } catch (error) {
-        console.error(
-          '[fast-check][filter-consistency] seed/path is included in the failure output:',
-        );
-        console.error(error);
-        throw error;
-      }
+          for (const [index, row] of result.clientRows.entries()) {
+            expect(readStatus(row.status, `clientRows[${index}].status`)).toBe('requested');
+          }
+        }),
+        { numRuns: 20 },
+      );
     },
     PROPERTY_TEST_TIMEOUT_MS,
   );
@@ -472,21 +439,15 @@ describe('Property Invariants', () => {
   test(
     'property: client rows always preserve descending $pk sort order',
     async () => {
-      try {
-        await fc.assert(
-          fc.asyncProperty(operationSequenceArb, async (sequence) => {
-            const result = await executeSequence(sequence, 'sort-order');
-            const clientPks = extractPkList(result.clientRows);
-            const expectedOrder = [...clientPks].sort((left, right) => right - left);
-            expect(clientPks).toEqual(expectedOrder);
-          }),
-          { numRuns: 20 },
-        );
-      } catch (error) {
-        console.error('[fast-check][sort-order] seed/path is included in the failure output:');
-        console.error(error);
-        throw error;
-      }
+      await fc.assert(
+        fc.asyncProperty(operationSequenceArb, async (sequence) => {
+          const result = await executeSequence(sequence, 'sort-order');
+          const clientPks = extractPkList(result.clientRows);
+          const expectedOrder = [...clientPks].sort((left, right) => right - left);
+          expect(clientPks).toEqual(expectedOrder);
+        }),
+        { numRuns: 20 },
+      );
     },
     PROPERTY_TEST_TIMEOUT_MS,
   );
@@ -494,53 +455,45 @@ describe('Property Invariants', () => {
   test(
     'property: concurrent requested inserts preserve descending $pk sort order',
     async () => {
-      try {
-        await fc.assert(
-          fc.asyncProperty(concurrentInsertCountArb, async (insertCount) => {
-            await cleanupBetweenTestsForFixture(fullOrdersFixture, pool);
-            const seededUser = await insertTestUser(
-              db,
-              `concurrent_property_driver_${randomUUID().slice(0, 8)}`,
-            );
+      await fc.assert(
+        fc.asyncProperty(concurrentInsertCountArb, async (insertCount) => {
+          await cleanupBetweenTestsForFixture(fullOrdersFixture, pool);
+          const seededUser = await insertTestUser(
+            db,
+            `concurrent_property_driver_${randomUUID().slice(0, 8)}`,
+          );
 
-            const fetchImpl = createRouterFetchAdapter(router);
-            const client = createPulseClient<typeof registry.$client>({
-              url: 'http://localhost',
-              fetchImpl,
-            });
-            const core = new PulseQuery(client.ordersByStatus({ status: 'requested' }));
+          const fetchImpl = createRouterFetchAdapter(router);
+          const client = createPulseClient<typeof registry.$client>({
+            url: 'http://localhost',
+            fetchImpl,
+          });
+          const core = new PulseQuery(client.ordersByStatus({ status: 'requested' }));
 
-            await core.subscribe();
+          await core.subscribe();
 
-            await runDbOperations(
-              Array.from({ length: insertCount }, (_, index) =>
-                db.insert(orders).values({
-                  driverId: seededUser.id,
-                  pickup: `Concurrent Property Pickup ${insertCount}-${index + 1}`,
-                  dropoff: `Concurrent Property Dropoff ${insertCount}-${index + 1}`,
-                  price: 401 + index,
-                  status: 'requested',
-                }),
-              ),
-              { mode: 'concurrent' },
-            );
+          await runDbOperations(
+            Array.from({ length: insertCount }, (_, index) =>
+              db.insert(orders).values({
+                driverId: seededUser.id,
+                pickup: `Concurrent Property Pickup ${insertCount}-${index + 1}`,
+                dropoff: `Concurrent Property Dropoff ${insertCount}-${index + 1}`,
+                price: 401 + index,
+                status: 'requested',
+              }),
+            ),
+            { mode: 'concurrent' },
+          );
 
-            await core.poll();
+          await core.poll();
 
-            const clientPks = extractPkList([...core.getState().data] as Record<string, unknown>[]);
-            const expectedOrder = [...clientPks].sort((left, right) => right - left);
-            expect(clientPks).toEqual(expectedOrder);
-            expect(clientPks).toHaveLength(insertCount);
-          }),
-          { numRuns: 20 },
-        );
-      } catch (error) {
-        console.error(
-          '[fast-check][concurrent-sort-order] seed/path is included in the failure output:',
-        );
-        console.error(error);
-        throw error;
-      }
+          const clientPks = extractPkList([...core.getState().data] as Record<string, unknown>[]);
+          const expectedOrder = [...clientPks].sort((left, right) => right - left);
+          expect(clientPks).toEqual(expectedOrder);
+          expect(clientPks).toHaveLength(insertCount);
+        }),
+        { numRuns: 20 },
+      );
     },
     PROPERTY_TEST_TIMEOUT_MS,
   );

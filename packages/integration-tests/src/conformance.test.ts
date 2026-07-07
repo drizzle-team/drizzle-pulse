@@ -12,64 +12,32 @@
  */
 
 import { afterAll, describe, expect, test } from 'bun:test';
-import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createPulseRegistry, expose } from 'drizzle-pulse/server';
-import { Pool } from 'pg';
 import postgres from 'postgres';
 import { pulseConformanceFixture } from './fixtures/pulse-conformance/index.js';
 import { orders } from './fixtures/pulse-conformance/schema.js';
 import { generatePulseMigrationSql, kitBinExists } from './helpers/kit-generate.js';
 import {
+  baseDatabaseUrl,
+  buildDatabaseUrl,
+  createQuietPool,
+  createQuietPostgresClient,
   createRealtimeRouterWithAuth,
   processDbOperations,
   pullClient,
+  randomSuffix,
   subscribeClient,
+  withQuietPostgresUrl,
 } from './helpers/test-harness.js';
 
-const DEFAULT_DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/postgres';
 // Absolute path: `bun test` may run from the workspace root, not this package's directory.
 const FIXTURE_CONFIG_PATH = fileURLToPath(
   new URL('./fixtures/pulse-conformance/drizzle.config.ts', import.meta.url),
 );
-
-function baseDatabaseUrl(): string {
-  return process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL;
-}
-
-function randomSuffix(): string {
-  return randomUUID().replaceAll('-', '').slice(0, 10);
-}
-
-function buildDatabaseUrl(base: string, databaseName: string): string {
-  const url = new URL(base);
-  url.pathname = `/${databaseName}`;
-  return url.toString();
-}
-
-function withQuietPostgresUrl(databaseUrl: string): string {
-  const url = new URL(databaseUrl);
-  url.searchParams.set('options', '-c client_min_messages=warning');
-  return url.toString();
-}
-
-function createQuietPool(databaseUrl: string): Pool {
-  return new Pool({ connectionString: withQuietPostgresUrl(databaseUrl) });
-}
-
-// `processDbOperations` reads a "since" snapshot baseline BEFORE running the operations
-// array — but a raw `pg.Pool.query()` call fires its network request the instant it's
-// constructed (not when awaited), racing that baseline read if passed directly in the
-// array literal. Drizzle's query builder is lazy (nothing runs until awaited), which is
-// why every other suite in this package writes through `db.insert(...)`/`db.update(...)`
-// rather than a raw Pool — this test does the same, never `testPool.query()` for writes
-// that need snapshot-baseline correctness.
-function createQuietPostgresClient(databaseUrl: string) {
-  return postgres(withQuietPostgresUrl(databaseUrl));
-}
 
 const adminPool = createQuietPool(baseDatabaseUrl());
 
@@ -112,6 +80,13 @@ describe.skipIf(!kitBinExists())('INTG-01: kit-generate to WAL events conformanc
     const publicationName = pulseConformanceFixture.publicationName;
     const slotName = `pulse_conformance_slot_${randomSuffix()}`;
     const sourceSql = postgres(withQuietPostgresUrl(databaseUrl));
+    // `processDbOperations` reads a "since" snapshot baseline BEFORE running the operations
+    // array — but a raw `pg.Pool.query()` call fires its network request the instant it's
+    // constructed (not when awaited), racing that baseline read if passed directly in the
+    // array literal. Drizzle's query builder is lazy (nothing runs until awaited), which is
+    // why every other suite in this package writes through `db.insert(...)`/`db.update(...)`
+    // rather than a raw Pool — this test does the same, never `testPool.query()` for writes
+    // that need snapshot-baseline correctness.
     const writeSql = createQuietPostgresClient(databaseUrl);
     const db = drizzle({ client: writeSql });
 

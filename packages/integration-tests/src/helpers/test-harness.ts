@@ -23,10 +23,10 @@ import postgres from 'postgres';
 import SuperJSON from 'superjson';
 import { z } from 'zod';
 import type { ProcessDbOperationsOptions } from './db-helpers.js';
-import { getLastEventSnapshot, insertTestUser, processDbOperations } from './db-helpers.js';
+import { insertTestUser, processDbOperations } from './db-helpers.js';
 
 // Re-export shared helpers so downstream tests can import from one place
-export { processDbOperations, insertTestUser, getLastEventSnapshot };
+export { processDbOperations, insertTestUser };
 
 const DEFAULT_DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/postgres';
 const TEST_DATABASE_PREFIX = 'drizzle_realtime_test';
@@ -46,7 +46,6 @@ type FixtureSchemaMap = Record<string, unknown>;
 export type IntegrationTestFixture = {
   variantName: string;
   migrationsPath: string;
-  sourceTable: string;
   eventsTable: PgTable;
   pulsedTables: PgTable[];
   cleanupTables: readonly string[];
@@ -191,27 +190,31 @@ function getSuiteContextKey(fixture: IntegrationTestFixture, registry: PulseRegi
   return `${fixture.variantName}::${queryNames}::${getRegistryIdentity(registry)}`;
 }
 
-function buildDatabaseUrl(baseDatabaseUrl: string, databaseName: string): string {
-  const url = new URL(baseDatabaseUrl);
+export function baseDatabaseUrl(): string {
+  return process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL;
+}
+
+export function buildDatabaseUrl(baseUrl: string, databaseName: string): string {
+  const url = new URL(baseUrl);
   url.pathname = `/${databaseName}`;
   return url.toString();
 }
 
-function randomSuffix(): string {
+export function randomSuffix(): string {
   return randomUUID().replaceAll('-', '').slice(0, 10);
 }
 
-function withQuietPostgresUrl(databaseUrl: string): string {
+export function withQuietPostgresUrl(databaseUrl: string): string {
   const url = new URL(databaseUrl);
   url.searchParams.set('options', '-c client_min_messages=warning');
   return url.toString();
 }
 
-function createQuietPool(databaseUrl: string): Pool {
+export function createQuietPool(databaseUrl: string): Pool {
   return new Pool({ connectionString: withQuietPostgresUrl(databaseUrl) });
 }
 
-function createQuietPostgresClient(databaseUrl: string) {
+export function createQuietPostgresClient(databaseUrl: string) {
   return postgres(withQuietPostgresUrl(databaseUrl));
 }
 
@@ -469,15 +472,15 @@ export async function setupTestSuiteForFixture<
     return toTestSuiteResult(existing) as TestSuiteResult<TFixture, TQueries>;
   }
 
-  const baseDatabaseUrl = process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL;
-  const adminPool = createQuietPool(baseDatabaseUrl);
+  const base = baseDatabaseUrl();
+  const adminPool = createQuietPool(base);
   const databaseName = `${TEST_DATABASE_PREFIX}_${randomSuffix()}`;
   const runtimeStartupError = { current: null as Error | null };
 
   await cleanupStaleTestSlots(adminPool);
   await ensureCleanTestDatabase(adminPool, databaseName);
 
-  const databaseUrl = buildDatabaseUrl(baseDatabaseUrl, databaseName);
+  const databaseUrl = buildDatabaseUrl(base, databaseName);
   const testPool = createQuietPool(databaseUrl);
 
   await applyFixtureMigrations(databaseUrl, fixture.migrationsPath);
