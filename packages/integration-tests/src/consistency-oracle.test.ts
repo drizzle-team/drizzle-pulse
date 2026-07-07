@@ -44,53 +44,44 @@ const { orders } = oracleFixture.tables;
 
 // eq (fixed predicate)
 const ordersEqAccepted = pulse(orders)
-  .query()
   .order('asc')
   .query((ctx) => ctx.query({ status: 'accepted' }));
 
 // eq (args — parity with the embedded-collection suite)
 const ordersByStatus = pulse(orders)
-  .query()
   .args(oracleFixture.schemas.ordersByStatusArgs)
   .order('asc')
   .query((ctx) => ctx.query({ status: ctx.args.status }));
 
 // ne over text column
 const ordersNeCompleted = pulse(orders)
-  .query()
   .order('asc')
   .query((ctx) => ctx.query({ status: { ne: 'completed' } }));
 
 // ne over nullable integer — must EXCLUDE rows where driverId IS NULL
 const ordersDriverNe1 = pulse(orders)
-  .query()
   .order('asc')
   .query((ctx) => ctx.query({ driverId: { ne: 1 } }));
 
 // gt / gte / lt / lte
 const ordersPriceGt10 = pulse(orders)
-  .query()
   .order('asc')
   .query((ctx) => ctx.query({ price: { gt: 10 } }));
 
 const ordersPriceGte10 = pulse(orders)
-  .query()
   .order('asc')
   .query((ctx) => ctx.query({ price: { gte: 10 } }));
 
 const ordersPriceLt50 = pulse(orders)
-  .query()
   .order('asc')
   .query((ctx) => ctx.query({ price: { lt: 50 } }));
 
 const ordersPriceLte50 = pulse(orders)
-  .query()
   .order('asc')
   .query((ctx) => ctx.query({ price: { lte: 50 } }));
 
 // in (non-empty)
 const ordersStatusIn = pulse(orders)
-  .query()
   .order('asc')
   .query((ctx) =>
     ctx.query({
@@ -102,7 +93,6 @@ const ordersStatusIn = pulse(orders)
 
 // in (empty → always false, zero rows)
 const ordersStatusInEmpty = pulse(orders)
-  .query()
   .order('asc')
   .query((ctx) =>
     ctx.query({ status: { in: [] as ('requested' | 'accepted' | 'completed' | 'cancelled')[] } }),
@@ -110,30 +100,25 @@ const ordersStatusInEmpty = pulse(orders)
 
 // isNull / isNotNull on nullable column
 const ordersDriverIsNull = pulse(orders)
-  .query()
   .order('asc')
   .query((ctx) => ctx.query({ driverId: { isNull: true } }));
 
 const ordersDriverIsNotNull = pulse(orders)
-  .query()
   .order('asc')
   .query((ctx) => ctx.query({ driverId: { isNotNull: true } }));
 
 // NOT (incl. a NULL-driverId row so NOT-with-null-field is exercised)
 const ordersNotCompleted = pulse(orders)
-  .query()
   .order('asc')
   .query((ctx) => ctx.query({ NOT: { status: 'completed' } }));
 
 // AND — both conjuncts must hold
 const ordersAnd = pulse(orders)
-  .query()
   .order('asc')
   .query((ctx) => ctx.query({ AND: [{ status: 'accepted' }, { price: { gt: 5 } }] }));
 
 // OR — either disjunct suffices
 const ordersOr = pulse(orders)
-  .query()
   .order('asc')
   .query((ctx) => ctx.query({ OR: [{ status: 'accepted' }, { status: 'requested' }] }));
 

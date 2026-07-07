@@ -83,7 +83,7 @@ export function makeRegistryStub(overrides: Partial<PulseRegistryQuery> = {}): P
 }
 
 // Construct a real RealtimeRuntime with an empty registry (no DB required).
-export function makeRealtimeRuntime(
+export function makePulseRuntime(
   opts: { databaseUrl?: string; sourceDb?: PulseSourceDb } = {},
 ): RealtimeRuntime<any> {
   const emptyRegistry = createPulseRegistry({});

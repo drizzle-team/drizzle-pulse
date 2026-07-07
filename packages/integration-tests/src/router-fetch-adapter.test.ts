@@ -35,7 +35,6 @@ type SuiteContext = {
 
 let ctx: SuiteContext;
 const ordersByStatus = pulse(fullOrdersFixture.tables.orders)
-  .query()
   .args(fullOrdersFixture.schemas.ordersByStatusArgs)
   .order('desc')
   .limit(5)

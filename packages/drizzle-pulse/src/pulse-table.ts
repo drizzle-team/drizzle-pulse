@@ -1,6 +1,7 @@
-import type { InferSelectModel } from 'drizzle-orm';
-import { getColumns, getTableUniqueName } from 'drizzle-orm';
+import type { InferModelFromColumns, InferSelectModel } from 'drizzle-orm';
+import { entityKind, getColumns, getTableUniqueName } from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
+import type { z } from 'zod';
 import { PulseBuilder } from './server/pulse-builder.js';
 import type {
   ColumnsSelection,
@@ -30,36 +31,66 @@ const SUPPORTED_PK_SQL_TYPES = new Set([
   'uuid',
 ]);
 
+// Global-registry keys for drizzle's table-extras config (stable `Symbol.for(...)` keys,
+// the same reflection mechanism the events-table resolver and the isPulseTable brand use).
+const EXTRA_CONFIG_BUILDER_SYMBOL = Symbol.for('drizzle:ExtraConfigBuilder');
+const EXTRA_CONFIG_COLUMNS_SYMBOL = Symbol.for('drizzle:ExtraConfigColumns');
+
+// Reads table-extras `primaryKey({ columns: [...] })` declarations without importing
+// pg-core's `getTableConfig` (banned from this platform-pure module). Runs the table's
+// extra-config builder and picks out PrimaryKeyBuilder entries by their drizzle entityKind.
+function getExtrasPrimaryKeyColumnNames(table: PgTable): string[] {
+  const reflected = table as unknown as Record<symbol, unknown>;
+  const extraConfigBuilder = reflected[EXTRA_CONFIG_BUILDER_SYMBOL];
+  if (typeof extraConfigBuilder !== 'function') return [];
+
+  const extraConfig = (extraConfigBuilder as (columns: unknown) => unknown)(
+    reflected[EXTRA_CONFIG_COLUMNS_SYMBOL],
+  );
+  const builders = Array.isArray(extraConfig)
+    ? extraConfig.flat(1)
+    : Object.values(extraConfig as object);
+
+  const names: string[] = [];
+  for (const builder of builders) {
+    const kind = (builder as { constructor?: Record<symbol, unknown> })?.constructor?.[entityKind];
+    if (kind !== 'PgPrimaryKeyBuilder') continue;
+    for (const column of (builder as { columns?: readonly { name: string }[] }).columns ?? []) {
+      names.push(column.name);
+    }
+  }
+  return names;
+}
+
 /**
- * Pure lazy PK validation: only sees inline `.primaryKey()` columns via bare
- * `getColumns`. Composite PKs declared via `primaryKey()` in table extras require
- * `getTableConfig` (a pg-core value import banned from this platform-pure module) —
- * that defensive check is added server-side by the registry/expose cutover.
+ * Resolves the single primary-key column drizzle-pulse tracks a table by. Prefers an
+ * inline `.primaryKey()` column; falls back to a table-extras `primaryKey({ columns: [...] })`
+ * declaration. Exactly one PK column is required — a true composite (multiple columns) is
+ * rejected — and its SQL type must be in the supported allowlist.
  */
 export function getPulsePkColumn(table: PgTable): PgColumn {
   const columns = Object.values(getColumns(table)) as PgColumn[];
   const inlinePkColumns = columns.filter((column) => column.primary);
 
-  if (inlinePkColumns.length === 0) {
-    // This function only ever sees inline `.primaryKey()` columns (see doc comment
-    // above), so it cannot tell "genuinely no PK" apart from "PK declared via table
-    // extras' `primaryKey({ columns: [...] })`" — the latter is a real PK, just not
-    // one this pure module can see. Name both possibilities so a single-column extras
-    // declaration doesn't send users hunting for a nonexistent missing PK.
+  let pkColumns = inlinePkColumns;
+  if (pkColumns.length === 0) {
+    const extrasNames = new Set(getExtrasPrimaryKeyColumnNames(table));
+    pkColumns = columns.filter((column) => extrasNames.has(column.name));
+  }
+
+  if (pkColumns.length === 0) {
     throw new Error(
-      `Table "${getTableUniqueName(table)}" has no inline .primaryKey() column (composite/extras primaryKey() declarations are not supported — declare the PK inline)`,
+      `Table "${getTableUniqueName(table)}" has no primary key — declare one via .primaryKey() or primaryKey({ columns: [...] })`,
     );
   }
 
-  if (inlinePkColumns.length > 1) {
+  if (pkColumns.length > 1) {
     throw new Error(`Table "${getTableUniqueName(table)}" has multiple primary keys`);
   }
 
-  const [pkColumn] = inlinePkColumns;
+  const [pkColumn] = pkColumns;
   if (!pkColumn) {
-    throw new Error(
-      `Table "${getTableUniqueName(table)}" has no inline .primaryKey() column (composite/extras primaryKey() declarations are not supported — declare the PK inline)`,
-    );
+    throw new Error(`Table "${getTableUniqueName(table)}" has no resolvable primary key`);
   }
 
   const pkSqlType = pkColumn.getSQLType().toLowerCase();
@@ -82,14 +113,12 @@ export class PulseTable<TTable extends PgTable = PgTable> {
   constructor(readonly table: TTable) {}
 
   /**
-   * `ctx.args` is typed `any` here (not `Record<never, never>`) so the user-canonical
-   * spelling `pulse(t).query(({ args }) => ...)` can read args before `.args()` has
-   * seeded a schema anywhere in the chain. This is runtime-safe ONLY if a schema is
-   * later chained via `.args()` — `resolve()` schema-parses args when an `argsSchema`
-   * is present, but otherwise substitutes an empty object rather than passing raw
-   * client input through, so `ctx.args` is safe to read but will always be `{}` for a
-   * query that never chains `.args(schema)`. Callers who want a fully-typed, non-empty
-   * `ctx.args` use `pulse(t).query().args(schema).query(fn)` instead, where the
+   * `ctx.args` is typed `any` here (not `Record<never, never>`) so the collection-level
+   * spelling `pulse(t).query(({ args }) => ...)` can read args before a schema is seeded.
+   * That is runtime-safe only when a schema is later chained via `.args()` — `resolve()`
+   * substitutes an empty object for a schemaless query rather than passing raw client
+   * input through, so `ctx.args` is always `{}` without `.args(schema)`. For a fully-typed
+   * `ctx.args`, start the chain with `pulse(t).args(schema).query(fn)`, where the
    * builder-level `.query()` sees the real `TArgs` generic.
    */
   query(
@@ -129,6 +158,35 @@ export class PulseTable<TTable extends PgTable = PgTable> {
     };
 
     return new PulseBuilder(config);
+  }
+
+  /** Start a builder chain with a typed args schema — `pulse(t).args(schema).query(fn)`. */
+  args<TNewArgs>(schema: z.ZodType<TNewArgs>) {
+    return this.query().args(schema);
+  }
+
+  /** Start a builder chain with a column selection. */
+  columns<TNewSelection extends Record<string, boolean>>(selection: TNewSelection) {
+    return this.query().columns(selection);
+  }
+
+  /** Start a builder chain with a sort direction. */
+  order(direction: 'asc' | 'desc') {
+    return this.query().order(direction);
+  }
+
+  /** Start a builder chain with a row limit. */
+  limit(n: number) {
+    return this.query().limit(n);
+  }
+
+  /** Start a builder chain with a row transform. */
+  transform<TTransformed extends Record<string, unknown>>(
+    fn: (
+      rows: InferModelFromColumns<TTable['_']['columns']>[],
+    ) => Promise<TTransformed[]> | TTransformed[],
+  ) {
+    return this.query().transform(fn);
   }
 }
 

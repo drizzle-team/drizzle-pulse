@@ -15,9 +15,10 @@ export interface Subscription {
   rangeStart: unknown | null;
   rangeEnd: unknown | null;
   hasMore: boolean;
-  // Updated on every successful pull() for this subscription; the sweep below
-  // uses it to evict subscriptions abandoned by clients that never call unsubscribe
-  // (e.g. a tab closed without running its cleanup) instead of accumulating forever.
+  /**
+   * Updated on every successful pull() for this subscription; the idle sweep uses it to
+   * evict subscriptions abandoned by clients that never call unsubscribe (e.g. a closed tab).
+   */
   lastSeenAt: number;
 }
 
@@ -89,9 +90,10 @@ export class SubscriptionManager {
     }
   }
 
-  // Marks a subscription as recently active — called from pull() on every request that
-  // resolves to a real (owned) subscription, so the sweep below only evicts subscriptions
-  // whose client has genuinely stopped polling.
+  /**
+   * Marks a subscription as recently active — called from pull() on every request that
+   * resolves to a real (owned) subscription, so the sweep only evicts truly idle ones.
+   */
   touch(clientId: string, id: string, now = Date.now()): void {
     const client = this.clients.get(clientId);
     const current = client?.subscriptions.get(id);
@@ -100,9 +102,10 @@ export class SubscriptionManager {
     client.subscriptions.set(id, { ...current, lastSeenAt: now });
   }
 
-  // Evicts every subscription whose lastSeenAt is older than maxIdleMs, freeing memory
-  // held by clients that disconnected without calling unsubscribe. Returns the
-  // number of subscriptions removed.
+  /**
+   * Evicts every subscription whose lastSeenAt is older than maxIdleMs, freeing memory
+   * held by clients that disconnected without calling unsubscribe. Returns the count removed.
+   */
   sweepIdle(maxIdleMs: number, now = Date.now()): number {
     let removed = 0;
     for (const [clientId, client] of this.clients) {

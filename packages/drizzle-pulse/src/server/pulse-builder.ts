@@ -108,6 +108,11 @@ export class PulseBuilder<
   query(
     fn: (ctx: PulseQueryContext<TArgs, InferSelectModel<TTable>>) => WhereClause | null,
   ): PulseBuilder<TTable, TSelection, TArgs, TResult> {
+    if (this.config.queryFn !== null) {
+      throw new Error(
+        '.query() may only be called once per chain; the where-function is already set',
+      );
+    }
     return new PulseBuilder<TTable, TSelection, TArgs, TResult>({ ...this.config, queryFn: fn });
   }
 }

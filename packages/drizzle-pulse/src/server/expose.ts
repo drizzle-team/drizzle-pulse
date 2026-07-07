@@ -29,7 +29,6 @@ export interface WalListenerConfig {
   pgPoolConfig: PoolConfig;
   publicationName: string;
   slotName: string;
-  logging?: WalLoggingConfig;
   reconnect?: {
     maxRetries?: number;
     baseDelayMs?: number;
@@ -37,13 +36,17 @@ export interface WalListenerConfig {
   };
 }
 
-export interface WalLoggingConfig {
-  events?: boolean;
-}
-
 export type ExposeWalConfig = Partial<
-  Pick<WalListenerConfig, 'publicationName' | 'slotName' | 'reconnect' | 'logging'>
+  Pick<WalListenerConfig, 'publicationName' | 'slotName' | 'reconnect'>
 >;
+
+/**
+ * Runtime log verbosity. `debug` adds per-WAL-event traces, `info` (default) adds
+ * listener-lifecycle messages, `error` keeps only failures, `silent` disables all output.
+ */
+export type LogLevel = 'debug' | 'info' | 'error' | 'silent';
+
+const LOG_LEVEL_RANK: Record<LogLevel, number> = { silent: 0, error: 1, info: 2, debug: 3 };
 
 export type SubscriptionTtlConfig = {
   // How long a subscription may go without a pull() before the sweep evicts it:
@@ -59,6 +62,7 @@ export type ExposeConfig = {
   eventsSchema?: string;
   wal?: ExposeWalConfig;
   subscriptionTtl?: SubscriptionTtlConfig;
+  logLevel?: LogLevel;
 };
 
 type SourceTableMetadata = {
@@ -82,10 +86,6 @@ const DEFAULT_RECONNECT = {
   maxDelayMs: 30000,
 };
 
-const DEFAULT_LOGGING: Required<WalLoggingConfig> = {
-  events: true,
-};
-
 const DEFAULT_WAL_NAME = 'drizzle_pulse';
 
 const DEFAULT_SUBSCRIPTION_TTL: Required<SubscriptionTtlConfig> = {
@@ -93,12 +93,6 @@ const DEFAULT_SUBSCRIPTION_TTL: Required<SubscriptionTtlConfig> = {
   sweepIntervalMs: 5 * 60 * 1000, // 5m
 };
 
-// `pg` parses `connectionString` itself (via its own `parse` dependency), which correctly
-// percent-decodes user/password/database and honors query params (`sslmode`, `ssl`,
-// `application_name`, ...). Re-parsing the URL by hand here (previous implementation)
-// silently dropped percent-encoding and every query param, including `sslmode=require` —
-// a silent TLS downgrade. Passing `connectionString` straight through avoids re-deriving
-// any of that.
 function withQuietPgOptions<T extends ClientConfig | PoolConfig>(config: T): T {
   return {
     ...config,
@@ -113,14 +107,9 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
   private readonly pgConfig: ClientConfig & { replication: 'database' };
   private readonly pgPoolConfig: PoolConfig;
   private readonly reconnectConfig: Required<NonNullable<ExposeWalConfig['reconnect']>>;
-  private readonly loggingConfig: Required<WalLoggingConfig>;
+  private readonly logLevel: LogLevel;
   private readonly subscriptionTtlConfig: Required<SubscriptionTtlConfig>;
   private subscriptionSweepTimer: ReturnType<typeof setInterval> | null = null;
-  // Public (not private): the integration-test harness augments a RealtimeRuntime
-  // instance with its own `{ publicationName, slotName }` via Object.assign for test
-  // introspection (see packages/integration-tests/src/helpers/test-harness.ts). A
-  // private field of the same name makes that intersection type collapse to `never`
-  // (TS treats private members as nominal), so these two stay public readonly.
   readonly publicationName: string;
   readonly slotName: string;
   private readonly eventsSchema: string;
@@ -129,32 +118,16 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
   private realtimeService: RealtimeService | null = null;
   private replicationService: LogicalReplicationService | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private _isRunning = false;
+  isRunning = false;
   private reconnectAttempts = 0;
-  private _lastPersistedSnapshot = 0;
-  private readonly _walEventEmitter = new WalEventEmitter();
+  lastPersistedSnapshot = 0;
+  readonly walEventEmitter = new WalEventEmitter();
   private everConnected = false;
   private readonly reconnectListeners = new Set<RuntimeLifecycleListener>();
   private readonly stopListeners = new Set<RuntimeLifecycleListener>();
 
-  get walEventEmitter(): WalEventEmitter {
-    return this._walEventEmitter;
-  }
-
-  get lastPersistedSnapshot(): number {
-    return this._lastPersistedSnapshot;
-  }
-
-  get registry(): PulseRegistry<TQueries> {
-    return this._registry;
-  }
-
   get sourceDb(): PulseSourceDb {
     return this.getSourceDb();
-  }
-
-  get isRunning(): boolean {
-    return this._isRunning;
   }
 
   // Lifecycle edges the in-process (embedded) client subscribes to. The runtime does
@@ -172,7 +145,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
   }
 
   constructor(
-    private readonly _registry: PulseRegistry<TQueries>,
+    readonly registry: PulseRegistry<TQueries>,
     private readonly config: ExposeConfig,
   ) {
     const wal = this.config.wal ?? {};
@@ -181,9 +154,9 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     this.eventsSchema = this.config.eventsSchema ?? DEFAULT_EVENTS_SCHEMA;
 
     this.sourceTableMetadata = new Map();
-    for (const queryName of this._registry.getQueryNames()) {
-      const pulseQuery = this._registry.getPulseQuery(queryName);
-      const sourceTable = this._registry.getSourceTable(queryName);
+    for (const queryName of this.registry.getQueryNames()) {
+      const pulseQuery = this.registry.getPulseQuery(queryName);
+      const sourceTable = this.registry.getSourceTable(queryName);
       if (
         !pulseQuery ||
         !sourceTable ||
@@ -210,14 +183,14 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     };
     this.pgPoolConfig = withQuietPgOptions(pg);
     this.reconnectConfig = { ...DEFAULT_RECONNECT, ...wal.reconnect };
-    this.loggingConfig = { ...DEFAULT_LOGGING, ...wal.logging };
+    this.logLevel = this.config.logLevel ?? 'info';
     this.subscriptionTtlConfig = {
       ...DEFAULT_SUBSCRIPTION_TTL,
       ...this.config.subscriptionTtl,
     };
 
     this.requestHandler = new RealtimeRequestHandler(
-      this._registry,
+      this.registry,
       this.getSourceDb(),
       this.subscriptionManager,
       () => this.getRealtimeService(),
@@ -232,7 +205,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
   // Total for registered queries — every source table gets an events table resolved
   // at construction, so an unknown queryName is the only throwing case.
   private getEventsTableForQuery(queryName: string): PgTable {
-    const sourceTable = this._registry.getSourceTable(queryName);
+    const sourceTable = this.registry.getSourceTable(queryName);
     if (!sourceTable) {
       throw new Error(`Unknown query: "${queryName}"`);
     }
@@ -249,9 +222,9 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     const currentRealtimeService = this.getRealtimeService();
     const sourceDb = this.getSourceDb();
 
-    for (const queryName of this._registry.getQueryNames()) {
-      const pulseQuery = this._registry.getPulseQuery(queryName);
-      const sourceTable = this._registry.getSourceTable(queryName);
+    for (const queryName of this.registry.getQueryNames()) {
+      const pulseQuery = this.registry.getPulseQuery(queryName);
+      const sourceTable = this.registry.getSourceTable(queryName);
       if (!pulseQuery || !sourceTable) continue;
 
       const [baselineRow] = await sourceDb
@@ -279,8 +252,8 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       rawTextParsersConfigured = true;
     }
 
-    if (this._isRunning) {
-      console.log('[WAL Listener] Already running');
+    if (this.isRunning) {
+      this.logInfo('[WAL Listener] Already running');
       return;
     }
 
@@ -289,7 +262,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     try {
       await this.runStartupGuard();
 
-      this._isRunning = true;
+      this.isRunning = true;
       await this.ensureBaselines();
 
       let maxSnapshot = 0;
@@ -298,12 +271,12 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
         const snap = await service.getLatestSnapshot(meta.eventsTable);
         maxSnapshot = Math.max(maxSnapshot, snap);
       }
-      this._lastPersistedSnapshot = maxSnapshot;
+      this.lastPersistedSnapshot = maxSnapshot;
 
       await this.connectReplication();
       this.startSubscriptionSweep();
     } catch (error) {
-      this._isRunning = false;
+      this.isRunning = false;
       await this.teardownFailedStart();
       throw error;
     }
@@ -314,7 +287,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       listener();
     }
 
-    this._isRunning = false;
+    this.isRunning = false;
     this.clearReconnectTimer();
     this.stopSubscriptionSweep();
 
@@ -332,7 +305,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       await pool.end();
     }
 
-    console.log('[WAL Listener] Stopped');
+    this.logInfo('[WAL Listener] Stopped');
   }
 
   private initializeDatabaseServices(): void {
@@ -365,6 +338,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     const adminDb = this.getRealtimeService().getDb();
     const failures: string[] = [];
 
+    // Publication exists, and (unless it's FOR ALL TABLES) every source table is a member.
     const publicationResult = await adminDb.execute<{ puballtables: boolean }>(
       sql`SELECT puballtables FROM pg_publication WHERE pubname = ${this.publicationName}`,
     );
@@ -393,6 +367,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       }
     }
 
+    // Each source table's events table has been created (migrations/codegen ran).
     for (const meta of this.sourceTableMetadata.values()) {
       const eventsConfig = getTableConfig(meta.eventsTable);
       const eventsSchemaName = eventsConfig.schema ?? this.eventsSchema;
@@ -406,6 +381,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       }
     }
 
+    // Each source table has REPLICA IDENTITY FULL (so old-row data reaches the WAL).
     for (const meta of this.sourceTableMetadata.values()) {
       const sourceConfig = getTableConfig(meta.sourceTable);
       const sourceSchemaName = sourceConfig.schema ?? 'public';
@@ -420,6 +396,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       }
     }
 
+    // wal_level=logical (logical replication is enabled server-wide).
     const walLevelResult = await adminDb.execute<{ wal_level: string }>(
       sql`SELECT current_setting('wal_level') AS wal_level`,
     );
@@ -436,8 +413,8 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
   }
 
   private onReplicationStart(): void {
-    if (!this._isRunning) return;
-    console.log('[WAL Listener] Replication started');
+    if (!this.isRunning) return;
+    this.logInfo('[WAL Listener] Replication started');
     if (this.everConnected) {
       for (const listener of [...this.reconnectListeners]) {
         listener();
@@ -469,7 +446,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
             await replicationService.acknowledge(lsn);
           }
         } catch (error) {
-          console.error('[WAL Listener] Error processing message:', error);
+          this.logError('[WAL Listener] Error processing message:', error);
         }
       });
 
@@ -478,7 +455,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
           return;
         }
 
-        console.error('[WAL Listener] Replication error:', error);
+        this.logError('[WAL Listener] Replication error:', error);
         await this.handleDisconnect(replicationService);
       });
 
@@ -487,14 +464,14 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       });
 
       replicationService.on('acknowledge', (lsn: string) => {
-        console.log(`[WAL Listener] Acknowledged LSN: ${lsn}`);
+        this.logDebug(`[WAL Listener] Acknowledged LSN: ${lsn}`);
       });
 
       replicationService.on(
         'heartbeat',
         (lsn: string, timestamp: number, shouldRespond: boolean) => {
           if (shouldRespond) {
-            console.log(`[WAL Listener] Heartbeat at LSN: ${lsn}, timestamp: ${timestamp}`);
+            this.logDebug(`[WAL Listener] Heartbeat at LSN: ${lsn}, timestamp: ${timestamp}`);
           }
         },
       );
@@ -509,24 +486,24 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       );
 
       if (result.rows.length === 0) {
-        console.log(`[WAL Listener] Creating replication slot '${slotName}'`);
+        this.logInfo(`[WAL Listener] Creating replication slot '${slotName}'`);
         await adminDb.execute(
           sql`SELECT pg_create_logical_replication_slot(${slotName}, ${'pgoutput'})`,
         );
       } else {
         const slot = result.rows[0];
         if (slot?.active && slot.active_pid) {
-          console.log(
+          this.logInfo(
             `[WAL Listener] Terminating stale connection on slot '${slotName}' (PID ${slot.active_pid})`,
           );
           await adminDb.execute(sql`SELECT pg_terminate_backend(${slot.active_pid})`);
           await new Promise((resolve) => setTimeout(resolve, 500));
         }
 
-        console.log(`[WAL Listener] Replication slot '${slotName}' ready`);
+        this.logInfo(`[WAL Listener] Replication slot '${slotName}' ready`);
       }
 
-      console.log(`[WAL Listener] Subscribing to slot '${this.slotName}'`);
+      this.logInfo(`[WAL Listener] Subscribing to slot '${this.slotName}'`);
       const streaming = replicationService.subscribe(plugin, this.slotName);
       await Promise.race([
         new Promise((resolve) => replicationService.once('start', resolve)),
@@ -534,7 +511,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       ]);
       void streaming.catch(() => {}); // stream-end errors already handled via the 'error' listener
     } catch (error) {
-      console.error('[WAL Listener] Connection error:', error);
+      this.logError('[WAL Listener] Connection error:', error);
       await this.handleDisconnect(this.replicationService);
     }
   }
@@ -547,19 +524,19 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       try {
         await replicationService.stop();
       } catch (error) {
-        console.error('[WAL Listener] Error during stop:', error);
+        this.logError('[WAL Listener] Error during stop:', error);
       }
     }
 
-    if (!this._isRunning) {
+    if (!this.isRunning) {
       return;
     }
 
     this.clearReconnectTimer();
 
     if (this.reconnectAttempts >= this.reconnectConfig.maxRetries) {
-      console.error('[WAL Listener] Max reconnection attempts reached. Giving up.');
-      this._isRunning = false;
+      this.logError('[WAL Listener] Max reconnection attempts reached. Giving up.');
+      this.isRunning = false;
       return;
     }
 
@@ -568,13 +545,13 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     const delay = Math.min(exponentialDelay + jitter, this.reconnectConfig.maxDelayMs);
 
     this.reconnectAttempts += 1;
-    console.log(
+    this.logInfo(
       `[WAL Listener] Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts}/${this.reconnectConfig.maxRetries})`,
     );
 
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      if (this._isRunning) {
+      if (this.isRunning) {
         void this.connectReplication();
       }
     }, delay);
@@ -627,7 +604,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       return;
     }
 
-    this.logEvent(
+    this.logDebug(
       `[WAL Listener] ${event.operation.toUpperCase()} on ${event.tableQualifiedName}:`,
       {
         lsn: event.lsn,
@@ -681,7 +658,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     const pkValue = pkSource?.[metadata.pkColumnName];
 
     if (pkValue === undefined || pkValue === null) {
-      this.logEvent(
+      this.logDebug(
         `[WAL Listener] Skipping ${event.operation} on ${event.tableQualifiedName}: missing pk (${String(pkValue)})`,
       );
       return;
@@ -703,7 +680,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       );
     } else if (event.operation === 'update') {
       if (!normalizedOldRowData) {
-        this.logEvent(
+        this.logDebug(
           `[WAL Listener] Skipping update on ${event.tableQualifiedName}: missing old row data for pk=${pkValue}`,
         );
         return;
@@ -720,7 +697,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       // pkValue for a delete is extracted from event.oldRowData above, so a non-null
       // pk guarantees normalizedOldRowData is present; the guard is defensive only.
       if (!normalizedOldRowData) {
-        this.logEvent(
+        this.logDebug(
           `[WAL Listener] Skipping delete on ${event.tableQualifiedName}: missing old row data for pk=${pkValue}`,
         );
         return;
@@ -734,8 +711,8 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       );
     }
 
-    this._lastPersistedSnapshot = Math.max(this._lastPersistedSnapshot, snapshot);
-    this._walEventEmitter.emit(
+    this.lastPersistedSnapshot = Math.max(this.lastPersistedSnapshot, snapshot);
+    this.walEventEmitter.emit(
       event.tableQualifiedName,
       event.operation,
       normalizedRowData,
@@ -743,7 +720,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       snapshot,
     );
 
-    this.logEvent(
+    this.logDebug(
       `[WAL Listener] Persisted ${event.operation} event on ${event.tableQualifiedName} (pk=${pkValue})`,
     );
   }
@@ -764,12 +741,16 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     return this.config.sourceDb;
   }
 
-  private logEvent(message: string, ...args: unknown[]): void {
-    if (!this.loggingConfig.events) {
-      return;
-    }
+  private logInfo(message: string, ...args: unknown[]): void {
+    if (LOG_LEVEL_RANK[this.logLevel] >= LOG_LEVEL_RANK.info) console.log(message, ...args);
+  }
 
-    console.log(message, ...args);
+  private logError(message: string, ...args: unknown[]): void {
+    if (LOG_LEVEL_RANK[this.logLevel] >= LOG_LEVEL_RANK.error) console.error(message, ...args);
+  }
+
+  private logDebug(message: string, ...args: unknown[]): void {
+    if (LOG_LEVEL_RANK[this.logLevel] >= LOG_LEVEL_RANK.debug) console.log(message, ...args);
   }
 }
 

@@ -55,19 +55,13 @@ export type IntegrationTestFixture = {
 };
 
 type TestRuntime<TQueries extends AnyQueries> = RealtimeRuntime<TQueries> & {
-  publicationName: string;
-  slotName: string;
   sourceSql: ReturnType<typeof postgres>;
 };
 
 /** Infer the harness runtime type from a concrete registry, for use in test variable declarations. */
 export type RuntimeOf<TRegistry extends PulseRegistry<AnyQueries>> =
   TRegistry extends PulseRegistry<infer TQueries>
-    ? RealtimeRuntime<TQueries> & {
-        publicationName: string;
-        slotName: string;
-        sourceSql: ReturnType<typeof postgres>;
-      }
+    ? RealtimeRuntime<TQueries> & { sourceSql: ReturnType<typeof postgres> }
     : never;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -166,11 +160,8 @@ const pullResponseSchema = z.object({
 
 const suiteContexts = new Map<string, TestSuiteContext<IntegrationTestFixture>>();
 
-// Two registries with identical query names (but different definitions — order/limit/
-// where) must never share a cached runtime, even if their query-name lists happen to
-// sort-and-join to the same string. Each distinct registry OBJECT gets its own
-// identity token here — assigned once, on first use — so the context key below can never
-// collide across registries, regardless of what their queries happen to look like.
+// Per-registry-object identity token so contexts never collide across registries with
+// identical query names.
 const registryIdentities = new WeakMap<PulseRegistry<any>, string>();
 let nextRegistryIdentity = 0;
 
@@ -328,20 +319,11 @@ function createTestRuntime<TQueries extends AnyQueries>(
   const runtime = expose(registry, {
     databaseUrl,
     sourceDb,
-    wal: {
-      publicationName,
-      slotName,
-      logging: {
-        events: false,
-      },
-    },
+    wal: { publicationName, slotName },
+    logLevel: 'error',
   });
 
-  return Object.assign(runtime, {
-    publicationName,
-    slotName,
-    sourceSql,
-  });
+  return Object.assign(runtime, { sourceSql });
 }
 
 function createRealtimeRouter(
@@ -467,8 +449,7 @@ export async function setupTestSuiteForFixture<
 
   if (existing && isFixtureContext(existing, fixture)) {
     existing.activeSuiteUsers += 1;
-    // Single type assertion at the cache-retrieval boundary: the context was stored with the
-    // correct TQueries for this key; `any` in the cache type is a storage convenience.
+    // Assert TQueries at the cache boundary — `any` in the cache type is a storage convenience.
     return toTestSuiteResult(existing) as TestSuiteResult<TFixture, TQueries>;
   }
 
@@ -526,10 +507,8 @@ export async function teardownTestSuiteForFixture<
   TFixture extends IntegrationTestFixture,
   TQueries extends AnyQueries,
 >(fixture: TFixture, registry: PulseRegistry<TQueries>): Promise<void> {
-  // Scoped to the exact context key setupTestSuiteForFixture() used: the prior
-  // implementation matched every context whose key started with `${variantName}::`,
-  // decrementing OTHER registries' same-variant contexts too whenever more than one
-  // registry shares a variantName in the same process.
+  // Keyed on the exact context setup used, so registries sharing a variantName don't
+  // decrement each other's ref count.
   const contextKey = getSuiteContextKey(fixture, registry);
   const ctx = suiteContexts.get(contextKey);
   if (!ctx) {

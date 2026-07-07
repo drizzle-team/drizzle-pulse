@@ -12,7 +12,7 @@ export interface MergeCoreOptions {
 
 export class PulseMergeCore<TRow extends Record<string, unknown> & { $pk: unknown }> {
   private _pkMap = new Map<PulsePk, TRow>();
-  private _data: TRow[] = [];
+  data: TRow[] = [];
   order: 'asc' | 'desc';
   limit: number | null;
   rangeStart: PulsePk | null;
@@ -25,10 +25,6 @@ export class PulseMergeCore<TRow extends Record<string, unknown> & { $pk: unknow
     this.rangeEnd = opts.rangeEnd;
   }
 
-  get data(): readonly TRow[] {
-    return this._data;
-  }
-
   rebuildFromRows(rows: TRow[]): void {
     const nextPkMap = new Map<PulsePk, TRow>();
     for (const row of rows) {
@@ -36,7 +32,7 @@ export class PulseMergeCore<TRow extends Record<string, unknown> & { $pk: unknow
       nextPkMap.set(row.$pk, row);
     }
     this._pkMap = nextPkMap;
-    this._data = rows;
+    this.data = rows;
   }
 
   // Appends load-more rows to the end without re-sorting. Returns true if any row was added.
@@ -51,14 +47,14 @@ export class PulseMergeCore<TRow extends Record<string, unknown> & { $pk: unknow
     for (const row of toAppend) {
       this._pkMap.set(row.$pk as PulsePk, row);
     }
-    this._data = [...this._data, ...toAppend];
+    this.data = [...this.data, ...toAppend];
     return true;
   }
 
   // Returns true only if at least one event mutated state (no-op-batch guard).
   applyEvents(events: readonly PulseEvent<TRow>[]): boolean {
     if (events.length === 0) return false;
-    let updated = [...this._data];
+    let updated = [...this.data];
     let mutated = false;
 
     for (const event of events) {
@@ -113,13 +109,13 @@ export class PulseMergeCore<TRow extends Record<string, unknown> & { $pk: unknow
       mutated = true;
     }
 
-    if (mutated) this._data = updated;
+    if (mutated) this.data = updated;
     return mutated;
   }
 
   clear(): void {
     this._pkMap = new Map();
-    this._data = [];
+    this.data = [];
     this.rangeStart = null;
     this.rangeEnd = null;
   }

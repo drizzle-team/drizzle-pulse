@@ -4,8 +4,8 @@
  * Unlike the other suites, these scenarios build fresh, deliberately-misconfigured
  * standalone databases (never `setupTestSuiteForFixture`, which now guarantees a healthy
  * setup) — the whole point is to exercise the guard's fail-closed paths. Each scenario
- * gets its own randomly-named database/publication/slot per the isolation convention
- * (CON-integration-tests-isolation) and tears itself down in a `finally` block.
+ * gets its own randomly-named database/publication/slot per the test-isolation convention
+ * and tears itself down in a `finally` block.
  */
 
 import { afterAll, describe, expect, test } from 'bun:test';

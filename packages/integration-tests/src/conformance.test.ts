@@ -1,5 +1,5 @@
 /**
- * INTG-01: the milestone's central anti-drift proof.
+ * Central anti-drift proof between drizzle-kit's codegen and the runtime resolver.
  *
  * Runs the LOCAL pulse-branch drizzle-kit `generate` CLI against a pulse(orders) fixture,
  * applies the KIT-GENERATED migration SQL to real Postgres (the docker WAL harness, never
@@ -59,12 +59,12 @@ async function waitForWalSlot(slotName: string, timeoutMs = 5000): Promise<void>
 }
 
 // Skips (not fails) when the local pulse-branch drizzle-kit build isn't present — e.g. a
-// fresh clone or CI without the sibling ~/dev/drizzle-orm checkout. Mirrors how the
+// fresh clone or CI without a sibling drizzle-orm checkout. Mirrors how the
 // absent-fixture-repo suites skip. Build the kit (or set DRIZZLE_KIT_PULSE_BIN) to run it.
-describe.skipIf(!kitBinExists())('INTG-01: kit-generate to WAL events conformance', () => {
+describe.skipIf(!kitBinExists())('kit-generate to WAL events conformance', () => {
   test('local pulse kit generates real infra; runtime boots on it and streams a real write into the kit-generated events table', async () => {
-    // --- Setup guard (Pitfall 4): fail loudly if the resolved kit is pulse-blind. A
-    // passing conformance test against the npm rc.4 kit would prove nothing. ---
+    // --- Setup guard: fail loudly if the resolved kit is pulse-blind. A passing
+    // conformance test against a pulse-blind kit would prove nothing. ---
     const migrationSql = generatePulseMigrationSql(
       FIXTURE_CONFIG_PATH,
       pulseConformanceFixture.migrationsPath,
@@ -72,7 +72,7 @@ describe.skipIf(!kitBinExists())('INTG-01: kit-generate to WAL events conformanc
     expect(migrationSql).toContain('CREATE PUBLICATION');
     expect(migrationSql).toContain('CREATE TABLE "drizzle"."__events_public_orders"');
 
-    // --- Isolate a fresh database (randomized name, per CON-integration-tests-isolation) ---
+    // --- Isolate a fresh database (randomized name, per the test-isolation convention) ---
     const databaseName = `pulse_conformance_${randomSuffix()}`;
     await adminPool.query(`CREATE DATABASE "${databaseName}"`);
     const databaseUrl = buildDatabaseUrl(baseDatabaseUrl(), databaseName);
@@ -103,7 +103,8 @@ describe.skipIf(!kitBinExists())('INTG-01: kit-generate to WAL events conformanc
       runtime = expose(registry, {
         databaseUrl,
         sourceDb: drizzle({ client: sourceSql }),
-        wal: { publicationName, slotName, logging: { events: false } },
+        wal: { publicationName, slotName },
+        logLevel: 'error',
       });
 
       const runtimeStartupError: { current: Error | null } = { current: null };

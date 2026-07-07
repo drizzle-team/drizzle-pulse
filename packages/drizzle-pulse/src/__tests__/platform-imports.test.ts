@@ -7,8 +7,7 @@ import ts from 'typescript';
 // Static import-graph audit: every module reachable via a VALUE import from the
 // platform-agnostic entrypoints must stay free of server/node-only runtime deps.
 // `import type` edges are erased at compile time and never execute, so they're
-// excluded from traversal. See .planning/seeds/SEED-001-sdk-platform-imports-test.md
-// (drizzle-orm) for the philosophy this port is based on.
+// excluded from traversal. Mirrors drizzle-orm's own platform-imports test philosophy.
 
 const SRC_ROOT = resolve(import.meta.dir, '..');
 const ENTRY_POINTS = [

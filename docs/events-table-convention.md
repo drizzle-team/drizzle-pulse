@@ -4,9 +4,8 @@ This document pins the naming and column-derivation contract for the events tabl
 `pulse()`-tracked source table gets, by convention, with no hand-declared mirror table.
 It is the interface contract two other consumers rely on byte-for-byte:
 
-- **drizzle-kit** (`~/dev/drizzle-orm/drizzle-kit`) generates the equivalent
-  `CREATE TABLE` migration from the same source table and must match this document
-  exactly.
+- **drizzle-kit** generates the equivalent `CREATE TABLE` migration from the same source
+  table and must match this document exactly.
 - **The cross-repo conformance test** diffs drizzle-kit's generated SQL
   against `emitEventsTableDdl`'s output and fails on any drift.
 
@@ -231,7 +230,7 @@ rejects would reintroduce the exact drift this guard exists to prevent.
     (its house style for every identity column), whereas `emitEventsTableDdl` emits the
     bare `GENERATED ALWAYS AS IDENTITY`. Both are valid, semantically identical Postgres,
     and the runtime only *reads* the events table — it never diffs DDL text — so this
-    difference is inert. The INTG-01 conformance test (which applies kit's generated SQL
+    difference is inert. The conformance test (which applies kit's generated SQL
     to real Postgres and boots the runtime against it) is the authority that the two
     representations interoperate; reconciling the identity renderer in kit is deliberately
     out of scope (it would ripple into every entity kind's identity columns).

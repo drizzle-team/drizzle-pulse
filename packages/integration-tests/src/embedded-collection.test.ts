@@ -31,7 +31,6 @@ describe('Embedded Collection', () => {
   const { orders } = fixture.tables;
 
   const ordersByStatus = pulse(orders)
-    .query()
     .args(fixture.schemas.ordersByStatusArgs)
     .order('asc')
     .query((ctx) => ctx.query({ status: ctx.args.status }));
@@ -121,7 +120,7 @@ describe('Embedded Collection', () => {
     const collection = await client.ordersByStatus({ status: 'accepted' });
 
     // processDbOperations waits for the events-table row, which is written
-    // before _walEventEmitter.emit() dispatches synchronously — so onChange
+    // before walEventEmitter.emit() dispatches synchronously — so onChange
     // has already fired by the time processDbOperations resolves.
     const changes: Array<{ events: readonly any[]; state: readonly any[]; snapshot: number }> = [];
     collection.onChange((c) => changes.push(c));
@@ -201,7 +200,6 @@ describe('Embedded Collection lifecycle', () => {
   const { orders } = lifecycleFixture.tables;
 
   const ordersByStatusLC = pulse(orders)
-    .query()
     .args(lifecycleFixture.schemas.ordersByStatusArgs)
     .order('asc')
     .query((ctx) => ctx.query({ status: ctx.args.status }));

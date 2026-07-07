@@ -47,8 +47,9 @@ export type EmbeddedPulseClient<TQueries extends AnyPulseBuilders> = {
 export class PulseCollection<TRow extends { $pk: unknown }> {
   /** @internal */
   readonly core: PulseMergeCore<TRow & Record<string, unknown>>;
-  // Underscore retained only to avoid colliding with the public `isReady` getter.
-  private _isReady = false;
+  // True while the collection is live: set once the initial sync completes (before the
+  // factory promise resolves), cleared again by dispose().
+  isReady = false;
   private disposed = false;
   private unsubscribe: (() => void) | null = null;
   private readonly onChangeListeners = new Set<(change: PulseCollectionChange<TRow>) => void>();
@@ -77,12 +78,6 @@ export class PulseCollection<TRow extends { $pk: unknown }> {
     return this.core.data;
   }
 
-  // True while the collection is live: set once the initial sync completes (before the
-  // factory promise resolves), cleared again by dispose().
-  get isReady(): boolean {
-    return this._isReady;
-  }
-
   onChange(listener: (change: PulseCollectionChange<TRow>) => void): () => void {
     this.onChangeListeners.add(listener);
     return () => this.onChangeListeners.delete(listener);
@@ -91,7 +86,7 @@ export class PulseCollection<TRow extends { $pk: unknown }> {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this._isReady = false;
+    this.isReady = false;
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.core.clear();
@@ -130,7 +125,7 @@ export class PulseCollection<TRow extends { $pk: unknown }> {
 
       // [1] Register tap listener FIRST — events are buffered until baseline completes.
       this.unsubscribe = this.runtime.walEventEmitter.subscribe(tableKey, (payload) => {
-        if (!this._isReady) {
+        if (!this.isReady) {
           buffer.push(payload);
         } else {
           this.applyTapPayload(payload);
@@ -164,7 +159,7 @@ export class PulseCollection<TRow extends { $pk: unknown }> {
       if (this.disposed) return;
 
       // [5] Mark ready; subsequent tap events are applied live.
-      this._isReady = true;
+      this.isReady = true;
     } catch (err) {
       // Detach tap listener so buffered events don't accumulate.
       this.unsubscribe?.();
@@ -228,7 +223,7 @@ export class PulseCollection<TRow extends { $pk: unknown }> {
     }
 
     const mutated = this.core.applyEvents([event]);
-    if (mutated && this._isReady) {
+    if (mutated && this.isReady) {
       this.fireOnChange([event], $snapshot);
     }
   }
@@ -250,7 +245,7 @@ export class PulseCollection<TRow extends { $pk: unknown }> {
     // A collection still completing startHandshake establishes its own fresh baseline;
     // rebaselining it concurrently would race the handshake and drop events. Skip until
     // ready — the handshake already reflects the reconnect's committed state.
-    if (!this._isReady) return;
+    if (!this.isReady) return;
     this.isRebaselining = true;
     // Both kept in this scope so the catch can recover events the drain (step [4]) left
     // unapplied when interrupted by a throw, using the same baselineSnapshot filter.

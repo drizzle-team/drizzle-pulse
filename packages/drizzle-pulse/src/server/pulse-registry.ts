@@ -1,6 +1,6 @@
 import { getTableUniqueName } from 'drizzle-orm';
 import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
-import { getPulsePkColumn, isPulseTable } from '../pulse-table.js';
+import { getPulsePkColumn } from '../pulse-table.js';
 import type {
   PulseAuthContext,
   PulseRegistryQuery,
@@ -82,14 +82,6 @@ export class PulseRegistry<TQueries extends AnyPulseBuilders> {
   private readonly sourceTables: Record<string, PgTable>;
 
   constructor(queries: TQueries) {
-    for (const [name, query] of Object.entries(queries)) {
-      if (isPulseTable(query)) {
-        throw new Error(
-          `Query "${name}" is a bare collection — call \`.query()\` on it first to derive a query (e.g. pulse(table).query())`,
-        );
-      }
-    }
-
     const builtEntries = Object.entries(queries).map<[string, BuiltQuery]>(([name, query]) => [
       name,
       buildPulseQuery(query),

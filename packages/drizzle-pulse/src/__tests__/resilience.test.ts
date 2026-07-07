@@ -6,7 +6,7 @@ import { WalEventEmitter } from '../server/wal-event-emitter.js';
 import type { PulseAuthContext, PulseRegistryQuery, ResolvedPulseQuery } from '../types.js';
 import {
   makeMockSourceDb,
-  makeRealtimeRuntime,
+  makePulseRuntime,
   makeRegistryStub,
   makeResolvedQuery,
 } from './mock-runtime.js';
@@ -104,13 +104,13 @@ function makeMockRuntime(
 
 describe('runtime reconnect edge', () => {
   test('onReconnect fires on reconnect but not on the first connect', () => {
-    const runtime = makeRealtimeRuntime();
+    const runtime = makePulseRuntime();
     let fired = 0;
     runtime.onReconnect(() => {
       fired++;
     });
 
-    (runtime as any)._isRunning = true;
+    (runtime as any).isRunning = true;
     (runtime as any).onReplicationStart(); // first connect — no reconnect edge
     expect(fired).toBe(0);
     (runtime as any).onReplicationStart(); // reconnect

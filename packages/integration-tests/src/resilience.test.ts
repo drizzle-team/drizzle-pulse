@@ -47,7 +47,6 @@ describe('Resilience', () => {
   let processDbOperations: HarnessProcessDbOperations;
 
   const ordersByStatus = pulse(orders)
-    .query()
     .args(fixture.schemas.ordersByStatusArgs)
     .order('asc')
     .query((ctx) => ctx.query({ status: ctx.args.status }));

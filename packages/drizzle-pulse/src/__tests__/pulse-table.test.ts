@@ -60,13 +60,6 @@ describe('pulse() / PulseTable brand and guards', () => {
     expect(isPulseTable(duckTyped)).toBe(true);
   });
 
-  test('no drizzle:entityKind marker is set on PulseTable instances', () => {
-    const entity = pulse(serialPkTable);
-    expect(
-      (entity as unknown as Record<symbol, unknown>)[Symbol.for('drizzle:entityKind')],
-    ).toBeUndefined();
-  });
-
   test('getPulseTableConfig() returns an object whose table is reference-equal to the input', () => {
     const entity = pulse(serialPkTable);
     const config = getPulseTableConfig(entity);
@@ -79,9 +72,9 @@ describe('pulse() construct-unconditionally + lazy .query()-time PK validation',
     expect(() => pulse(noPkTable)).not.toThrow();
   });
 
-  test('.query() on the no-PK table throws mentioning the table name and the inline-PK requirement', () => {
+  test('.query() on the no-PK table throws mentioning the table name and the missing-PK requirement', () => {
     const entity = pulse(noPkTable);
-    expect(() => entity.query()).toThrowError(/test\.no_pk_items.*has no inline \.primaryKey\(\)/);
+    expect(() => entity.query()).toThrowError(/test\.no_pk_items.*has no primary key/);
   });
 
   test('.query() on the two-inline-PK table throws mentioning "multiple primary keys"', () => {

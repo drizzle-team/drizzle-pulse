@@ -27,7 +27,6 @@ let runDbOperations: HarnessProcessDbOperations;
 const { orders } = fullOrdersFixture.tables;
 const PROPERTY_TEST_TIMEOUT_MS = 300_000;
 const ordersByStatus = pulse(orders)
-  .query()
   .args(fullOrdersFixture.schemas.ordersByStatusArgs)
   .order('desc')
   .limit(5)

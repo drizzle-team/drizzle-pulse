@@ -49,10 +49,8 @@ const compositePkTable = testSchema.table(
   (table) => [primaryKey({ columns: [table.leftId, table.rightId] })],
 );
 
-// PK declared via table extras, but as a SINGLE column: assertSinglePrimaryKeyName
-// sees exactly one distinct PK column name and passes, but getPulsePkColumn only ever sees
-// inline `.primaryKey()` columns, so this table has a real PK the registry still rejects —
-// the error message must say so instead of implying the table has no PK at all.
+// PK declared via table extras as a SINGLE column — a supported PK: `getPulsePkColumn`
+// resolves it from the extras `primaryKey()` declaration, so the table is accepted.
 const singleColumnExtrasPkTable = testSchema.table(
   'single_column_extras_items',
   {
@@ -214,8 +212,12 @@ describe('pulse(table) — collection-first construction', () => {
     expect(query.config.queryFn).toBeDefined();
   });
 
-  test('pulse(table).query() rejects a table with no inline primary key', () => {
-    expect(() => pulse(compositePkTable).query()).toThrowError('has no inline .primaryKey()');
+  test('pulse(table).query() rejects a table with a composite (multi-column) primary key', () => {
+    expect(() => pulse(compositePkTable).query()).toThrowError('has multiple primary keys');
+  });
+
+  test('pulse(table).query() accepts a single-column table-extras primary key', () => {
+    expect(() => pulse(singleColumnExtrasPkTable).query()).not.toThrow();
   });
 
   test('pulse(table).query() rejects unsupported default PK SQL types', () => {
@@ -228,15 +230,6 @@ describe('pulse(table) — collection-first construction', () => {
 });
 
 describe('createPulseRegistry — derived-queries-only contract', () => {
-  test('rejects a bare collection, instructing to call .query() first', () => {
-    expect(() =>
-      createPulseRegistry({
-        // @ts-expect-error intentionally passing a bare collection to prove the registry's runtime guard
-        allOrders: pulse(testTable),
-      }),
-    ).toThrowError(/\.query\(\)/);
-  });
-
   test('rejects a table whose true PK is a composite primaryKey() declared in table extras', () => {
     const columns = getColumns(compositePkTable);
     const config: PulseQueryConfig<
@@ -261,7 +254,7 @@ describe('createPulseRegistry — derived-queries-only contract', () => {
     );
   });
 
-  test('rejects a table whose true PK is a single-column primaryKey() declared in table extras, with a message naming the inline requirement', () => {
+  test('accepts a table whose PK is a single-column primaryKey() declared in table extras', () => {
     const columns = getColumns(singleColumnExtrasPkTable);
     const config: PulseQueryConfig<
       typeof singleColumnExtrasPkTable,
@@ -280,12 +273,8 @@ describe('createPulseRegistry — derived-queries-only contract', () => {
     };
     const builder = new PulseBuilder(config);
 
-    // assertSinglePrimaryKeyName passes (exactly one distinct PK column name), so this
-    // must fail at getPulsePkColumn instead — with a message that doesn't send users
-    // hunting for a nonexistent missing PK.
-    expect(() => createPulseRegistry({ singleColumnExtrasQuery: builder })).toThrowError(
-      'has no inline .primaryKey()',
-    );
+    // Exactly one distinct PK column resolved from the extras declaration → supported.
+    expect(() => createPulseRegistry({ singleColumnExtrasQuery: builder })).not.toThrow();
   });
 
   test('a valid derived-queries registry builds and resolve() output carries no eventsTable field', () => {

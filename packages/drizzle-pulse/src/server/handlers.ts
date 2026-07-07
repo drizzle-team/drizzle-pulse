@@ -269,9 +269,7 @@ export class RealtimeRequestHandler {
     }
   }
 
-  // Explicit teardown counterpart to subscribe(): without this, the only way a
-  // subscription is ever removed from the store is the idle sweep in pull(), so a client
-  // that unmounts cleanly should proactively free its slot rather than waiting it out.
+  // Lets a cleanly-unmounted client free its slot instead of waiting for the idle sweep.
   async unsubscribe(
     request: UnsubscribeRequest,
     auth: PulseAuthContext,
@@ -388,10 +386,8 @@ export class RealtimeRequestHandler {
     return rawClientId && rawClientId.length > 0 ? rawClientId : crypto.randomUUID();
   }
 
-  // Rows/WhereClauses built against SELECT-shaped data (query.columns) are keyed by the
-  // PK's JS property name, not its SQL name — the two diverge whenever a table declares
-  // e.g. `orderId: serial('order_id')`. Falls back to pkColumn.name only for the
-  // (unreachable in practice) case where the PK isn't present in query.columns at all.
+  // PK's JS property key (query.columns), which diverges from its SQL name for e.g.
+  // `orderId: serial('order_id')`; falls back to the SQL name only if it's absent there.
   private getPkQueryKey(query: ResolvedPulseQuery): string {
     return getQueryColumnKey(query.columns, query.pkColumn) ?? query.pkColumn.name;
   }

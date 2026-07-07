@@ -28,13 +28,11 @@ describe('Client State', () => {
     const fixture = fullOrdersFixture;
     const { orders } = fixture.tables;
     const ordersByStatus = pulse(orders)
-      .query()
       .args(fixture.schemas.ordersByStatusArgs)
       .order('desc')
       .limit(5)
       .query((ctx) => ctx.query({ status: ctx.args.status }));
     const unlimitedOrdersByStatus = pulse(orders)
-      .query()
       .args(fixture.schemas.ordersByStatusArgs)
       .order('desc')
       .query((ctx) => ctx.query({ status: ctx.args.status }));
@@ -485,7 +483,6 @@ describe('Client State', () => {
     const fixture = minimalOrdersFixture;
     const { orders } = fixture.tables;
     const ordersByStatus = pulse(orders)
-      .query()
       .args(fixture.schemas.ordersByStatusArgs)
       .order('desc')
       .limit(5)

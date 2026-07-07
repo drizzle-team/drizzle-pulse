@@ -3,18 +3,18 @@ import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// The LOCAL pulse-branch drizzle-kit build — NOT the npm `drizzle-kit` dep (that rc.4
-// build has zero pulse support, 15-RESEARCH.md Pitfall 4). Resolved by path, not as a
-// package dependency: a `file:` dep here would pin the sibling repo's whole tree into
-// this package's lockfile and break `bun install --frozen-lockfile` on any machine/CI
-// without the sibling checkout. `DRIZZLE_KIT_PULSE_BIN` overrides the default sibling
-// path (`~/dev/drizzle-orm/drizzle-kit`). Callers `skipIf(!kitBinExists())`.
+// The LOCAL pulse-branch drizzle-kit build — NOT the npm `drizzle-kit` dep (which has no
+// pulse support). Resolved by path, not as a package dependency: a `file:` dep here would
+// pin the sibling repo's whole tree into this package's lockfile and break
+// `bun install --frozen-lockfile` on any machine/CI without the sibling checkout.
+// `DRIZZLE_KIT_PULSE_BIN` overrides the default sibling drizzle-orm/drizzle-kit build path.
+// Callers `skipIf(!kitBinExists())`.
 export const KIT_BIN = process.env.DRIZZLE_KIT_PULSE_BIN
   ? resolve(process.env.DRIZZLE_KIT_PULSE_BIN)
   : resolve(
-    dirname(fileURLToPath(import.meta.url)),
-    '../../../../../drizzle-orm/drizzle-kit/dist/bin.cjs',
-  );
+      dirname(fileURLToPath(import.meta.url)),
+      '../../../../../drizzle-orm/drizzle-kit/dist/bin.cjs',
+    );
 
 export function kitBinExists(): boolean {
   return existsSync(KIT_BIN);
@@ -46,8 +46,8 @@ function runKitGenerate(configPath: string): GenerateJsonResult {
 
 /**
  * Runs the LOCAL pulse-branch kit's `generate` CLI (never `generateDrizzleJson`/
- * `generateMigration` from api-postgres — that path skips the pulse guard, 15-RESEARCH.md
- * Pitfall 6) against a fixture's drizzle.config and returns the generated migration SQL.
+ * `generateMigration` from api-postgres — that path skips the pulse guard) against a
+ * fixture's drizzle.config and returns the generated migration SQL.
  *
  * `generate` is stateless here: the fixture's configured `out` dir is wiped before and
  * after each call, so every invocation produces one fresh "initial" migration rather than
@@ -56,9 +56,9 @@ function runKitGenerate(configPath: string): GenerateJsonResult {
 export function generatePulseMigrationSql(configPath: string, outDir: string): string {
   if (!existsSync(KIT_BIN)) {
     throw new Error(
-      `Local pulse-branch drizzle-kit build not found at ${KIT_BIN}. Build it: ` +
-        'cd ~/dev/drizzle-orm/drizzle-kit && bun --bun run scripts/build.ts ' +
-        '(or set DRIZZLE_KIT_PULSE_BIN to the built bin.cjs).',
+      `Local pulse-branch drizzle-kit build not found at ${KIT_BIN}. Build the ` +
+        'drizzle-kit package in a sibling drizzle-orm checkout (or set ' +
+        'DRIZZLE_KIT_PULSE_BIN to the built bin.cjs).',
     );
   }
 

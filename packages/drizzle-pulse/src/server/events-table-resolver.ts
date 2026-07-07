@@ -13,6 +13,7 @@ import {
   text,
   timestamp,
 } from 'drizzle-orm/pg-core';
+import { getPulsePkColumn } from '../pulse-table.js';
 
 export const DEFAULT_EVENTS_SCHEMA = 'drizzle';
 
@@ -274,6 +275,7 @@ export function resolveEventsTable(
 
   const eventsTable = new PgTableClass(tableName, eventsSchema, tableName);
   const sourceColumns = getColumns(sourceTable);
+  const pkColumnName = getPulsePkColumn(sourceTable).name;
 
   const columns: Record<string, PgColumn> = {};
 
@@ -294,7 +296,7 @@ export function resolveEventsTable(
 
     addColumn(
       sourceColumn.name,
-      cloneColumn(eventsTable, sourceColumn, sourceColumn.name, sourceColumn.primary),
+      cloneColumn(eventsTable, sourceColumn, sourceColumn.name, sourceColumn.name === pkColumnName),
     );
 
     const oldName = `$old_${sourceColumn.name}`;

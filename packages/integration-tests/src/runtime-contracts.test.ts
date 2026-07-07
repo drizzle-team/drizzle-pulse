@@ -30,13 +30,11 @@ describe('Runtime Contracts', () => {
   const fixture = fullOrdersFixture;
   const { orders } = fixture.tables;
   const ordersByStatus = pulse(orders)
-    .query()
     .args(fixture.schemas.ordersByStatusArgs)
     .order('desc')
     .limit(5)
     .query((ctx) => ctx.query({ status: ctx.args.status }));
   const authScopedByStatus = pulse(orders)
-    .query()
     .args(fixture.schemas.ordersByStatusArgs)
     .order('desc')
     .limit(2)
