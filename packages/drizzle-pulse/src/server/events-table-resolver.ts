@@ -15,7 +15,7 @@ import {
 } from 'drizzle-orm/pg-core';
 import { getPulsePkColumn } from '../pulse-table.js';
 
-export const DEFAULT_EVENTS_SCHEMA = 'drizzle';
+export const DEFAULT_EVENTS_SCHEMA = 'drizzle_pulse';
 
 const POSTGRES_IDENTIFIER_BYTE_LIMIT = 63;
 

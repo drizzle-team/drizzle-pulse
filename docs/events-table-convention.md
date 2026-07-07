@@ -29,19 +29,18 @@ __events_<sourceSchema>_<sourceTable>
   `public`.
 - `sourceTable` is the source table's SQL name (not its JS export name).
 
-The events table itself lives in a separate **events schema** — never in the source
-table's own schema, and never in a dedicated `realtime` schema (the pre-restructure
-convention). The events schema defaults to **`drizzle`**, matching a project's
-`drizzle.config` `migrations.schema` by manual parity. It is configured at runtime via
-`ExposeConfig.eventsSchema` — the runtime never loads `drizzle.config` itself, so the
-value must be kept in sync by the project author (or by drizzle-kit's
-codegen, which reads `drizzle.config` directly).
+The events table itself lives in a dedicated **events schema** — never in the source
+table's own schema, and independent of the project's migrations schema. It defaults to
+**`drizzle_pulse`**, a constant both the runtime resolver and drizzle-kit's codegen
+hardcode, so the two agree with no configuration. It can be overridden at runtime via
+`ExposeConfig.eventsSchema`, but the override must then match whatever drizzle-kit
+generated.
 
 **Worked example:** a source table `orders` in the default `public` schema, with
 `eventsSchema` left at its default, resolves to:
 
 ```
-"drizzle"."__events_public_orders"
+"drizzle_pulse"."__events_public_orders"
 ```
 
 **Known ambiguity (accepted):** because the derivation joins `sourceSchema` and

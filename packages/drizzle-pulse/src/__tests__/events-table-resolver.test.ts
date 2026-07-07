@@ -95,7 +95,7 @@ describe('resolveEventsTable', () => {
     const config = getTableConfig(eventsTable);
     expect(config.name).toBe('__events_public_resolver_fixture');
     expect(config.schema).toBe(DEFAULT_EVENTS_SCHEMA);
-    expect(DEFAULT_EVENTS_SCHEMA).toBe('drizzle');
+    expect(DEFAULT_EVENTS_SCHEMA).toBe('drizzle_pulse');
     expect(getEventsTableName(sourceTable)).toBe('__events_public_resolver_fixture');
 
     const customSchema = resolveEventsTable(sourceTable, { eventsSchema: 'custom_schema' });
@@ -273,9 +273,9 @@ describe('emitEventsTableDdl', () => {
   test('returns CREATE SCHEMA followed by a CREATE TABLE targeting the synthesized table', () => {
     const statements = emitEventsTableDdl(sourceTable);
     expect(statements).toHaveLength(2);
-    expect(statements[0]).toBe('CREATE SCHEMA IF NOT EXISTS "drizzle"');
+    expect(statements[0]).toBe('CREATE SCHEMA IF NOT EXISTS "drizzle_pulse"');
     expect(statements[1]).toStartWith(
-      'CREATE TABLE "drizzle"."__events_public_resolver_fixture" (',
+      'CREATE TABLE "drizzle_pulse"."__events_public_resolver_fixture" (',
     );
   });
 

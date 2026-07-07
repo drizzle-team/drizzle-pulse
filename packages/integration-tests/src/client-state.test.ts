@@ -366,10 +366,10 @@ describe('Client State', () => {
       ]);
 
       await db.execute(
-        sql`INSERT INTO drizzle.__events_public_orders (id, "$op") OVERRIDING SYSTEM VALUE VALUES (2, 'snapshot')`,
+        sql`INSERT INTO drizzle_pulse.__events_public_orders (id, "$op") OVERRIDING SYSTEM VALUE VALUES (2, 'snapshot')`,
       );
       await db.execute(
-        sql`SELECT setval(pg_get_serial_sequence('drizzle.__events_public_orders', '$snapshot'), 999, true)`,
+        sql`SELECT setval(pg_get_serial_sequence('drizzle_pulse.__events_public_orders', '$snapshot'), 999, true)`,
       );
 
       await query.poll();
@@ -406,10 +406,10 @@ describe('Client State', () => {
       ]);
 
       await db.execute(
-        sql`INSERT INTO drizzle.__events_public_orders (id, "$op") OVERRIDING SYSTEM VALUE VALUES (9, 'snapshot')`,
+        sql`INSERT INTO drizzle_pulse.__events_public_orders (id, "$op") OVERRIDING SYSTEM VALUE VALUES (9, 'snapshot')`,
       );
       await db.execute(
-        sql`SELECT setval(pg_get_serial_sequence('drizzle.__events_public_orders', '$snapshot'), 999, true)`,
+        sql`SELECT setval(pg_get_serial_sequence('drizzle_pulse.__events_public_orders', '$snapshot'), 999, true)`,
       );
 
       await query.poll();

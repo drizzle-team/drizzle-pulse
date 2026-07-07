@@ -258,9 +258,9 @@ describe('Startup Guard', () => {
       // Deliberately a VIEW, not a TABLE, at the exact events-table name/schema: before the
       // relkind restriction, this false-passed the existence check (any pg_class relkind
       // matched), deferring the failure to a confusing insert-time error instead.
-      await ctx.pool.query('CREATE SCHEMA IF NOT EXISTS "drizzle"');
+      await ctx.pool.query('CREATE SCHEMA IF NOT EXISTS "drizzle_pulse"');
       await ctx.pool.query(
-        'CREATE VIEW "drizzle"."__events_public_orders" AS SELECT 1 AS placeholder',
+        'CREATE VIEW "drizzle_pulse"."__events_public_orders" AS SELECT 1 AS placeholder',
       );
 
       const registry = createPulseRegistry({ orders: pulse(orders).query() });
