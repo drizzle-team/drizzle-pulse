@@ -12,17 +12,49 @@ import { createWalRowNormalizer } from './wal-normalization.js';
 
 type RuntimeLifecycleListener = () => void;
 
-// OIDs forced to raw PG text so Drizzle's from-text codecs receive text everywhere:
-// date/timestamp/timestamptz/interval, plus point (600) — the one geometric type pg-types
-// parses into an object ({x,y}), which can't feed the point:tuple codec. This mutation
-// must stay process-global (not scoped per-pool via the `types` option): baseline reads
-// run on the app-supplied drizzle connection, whose pool this runtime does not own, and
-// without raw text there a point column decodes to {x,y} and round-trips into the events
-// table as "(undefined,undefined)". Scoping was tried and reverted for exactly that
-// failure; revisit only together with a runtime-owned baseline read path.
-const RAW_TEXT_PG_OIDS = [1082, 1114, 1184, 1186, 600] as const;
+// OIDs whose default pg-types parser yields a non-text JS value (Date, interval object,
+// {x,y}) that Drizzle's from-text codecs cannot consume: date/timestamp/timestamptz/
+// interval, plus point (600). Both decode paths this runtime owns force these back to raw
+// text — scoped per-connection, never via a process-global setTypeParser.
+const RAW_TEXT_PG_OIDS = new Set([1082, 1114, 1184, 1186, 600]);
 
-let rawTextParsersConfigured = false;
+const rawText = (value: string): string => value;
+
+// Identity for the raw-text OIDs, pg default otherwise — passed as the `types` option to
+// pulse-owned Pools so their reads (events-table decode) match the WAL text-decode path.
+const rawTextTypes = {
+  getTypeParser: (oid: number, format?: unknown) =>
+    RAW_TEXT_PG_OIDS.has(oid)
+      ? rawText
+      : (types.getTypeParser as (oid: number, format?: unknown) => unknown)(oid, format),
+} as PoolConfig['types'];
+
+// pg-logical-replication's PgoutputParser decodes WAL values through the process-global
+// pg-types registry, which this runtime must not mutate. Its pgoutput-v1 wire form is text,
+// and each relation message carries the per-column parser reused for every later tuple —
+// and parse() returns the very object it caches. Overriding those parsers to identity for
+// the raw-text OIDs keeps WAL values as text (for Drizzle's from-text codecs) with zero
+// global state, scoped to this plugin instance.
+// ponytail: couples to pg-logical-replication internals (relation.columns[].parser); the
+// runtime guard below fails loud if that shape changes on upgrade.
+function scopeRawTextWalParsers(plugin: PgoutputPlugin): PgoutputPlugin {
+  const parse = plugin.parse.bind(plugin);
+  plugin.parse = (buffer: Buffer) => {
+    const message = parse(buffer);
+    if (message.tag === 'relation') {
+      if (!Array.isArray(message.columns)) {
+        throw new Error('pg-logical-replication relation message shape changed: no columns[]');
+      }
+      for (const column of message.columns) {
+        if (RAW_TEXT_PG_OIDS.has(column.typeOid)) {
+          column.parser = rawText;
+        }
+      }
+    }
+    return message;
+  };
+  return plugin;
+}
 
 export interface WalListenerConfig {
   pgConfig: ClientConfig & { replication: 'database' };
@@ -58,6 +90,12 @@ export type SubscriptionTtlConfig = {
 
 export type ExposeConfig = {
   databaseUrl: string;
+  /**
+   * The app's own drizzle connection; baseline and query reads run on it so they keep the
+   * app's session context (RLS, search_path). A node-postgres-backed instance must
+   * configure its pool `types` to deliver date/timestamp/timestamptz/interval/point as
+   * raw text (postgres-js does so natively).
+   */
   sourceDb: PulseSourceDb;
   eventsSchema?: string;
   wal?: ExposeWalConfig;
@@ -181,7 +219,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       ...withQuietPgOptions(pg),
       replication: 'database',
     };
-    this.pgPoolConfig = withQuietPgOptions(pg);
+    this.pgPoolConfig = { ...withQuietPgOptions(pg), types: rawTextTypes };
     this.reconnectConfig = { ...DEFAULT_RECONNECT, ...wal.reconnect };
     this.logLevel = this.config.logLevel ?? 'info';
     this.subscriptionTtlConfig = {
@@ -242,16 +280,6 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
   }
 
   async start(): Promise<void> {
-    if (!rawTextParsersConfigured) {
-      for (const oid of RAW_TEXT_PG_OIDS) {
-        // @types/pg's TypeId union omits some builtin OIDs (e.g. point=600); the
-        // runtime accepts any numeric OID.
-        types.setTypeParser(oid as Parameters<typeof types.setTypeParser>[0], (value) => value);
-      }
-
-      rawTextParsersConfigured = true;
-    }
-
     if (this.isRunning) {
       this.logInfo('[WAL Listener] Already running');
       return;
@@ -434,10 +462,12 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       });
       this.replicationService = replicationService;
 
-      const plugin = new PgoutputPlugin({
-        protoVersion: 1,
-        publicationNames: [this.publicationName],
-      });
+      const plugin = scopeRawTextWalParsers(
+        new PgoutputPlugin({
+          protoVersion: 1,
+          publicationNames: [this.publicationName],
+        }),
+      );
 
       replicationService.on('data', async (lsn: string, log: Pgoutput.Message) => {
         try {
