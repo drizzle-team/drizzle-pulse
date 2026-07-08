@@ -1,9 +1,9 @@
 import { getColumns } from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 import {
+  buildEventsTable,
   DEFAULT_EVENTS_SCHEMA,
   getEventsTableName,
-  resolveEventsTable,
 } from 'drizzle-pulse/server';
 
 function quoteIdentifier(identifier: string): string {
@@ -52,7 +52,7 @@ function renderColumnDdl(column: PgColumn): string {
 
 /**
  * Test-only utility: renders `CREATE SCHEMA`/`CREATE TABLE` for an events table strictly
- * from `resolveEventsTable`'s output. Production events-table DDL is drizzle-kit's job; this
+ * from `buildEventsTable`'s output. Production events-table DDL is drizzle-kit's job; this
  * exists so the integration harness can create events tables without hand-mirrored SQL.
  */
 export function emitEventsTableDdl(
@@ -61,7 +61,7 @@ export function emitEventsTableDdl(
 ): string[] {
   const eventsSchema = options?.eventsSchema ?? DEFAULT_EVENTS_SCHEMA;
   const tableName = getEventsTableName(sourceTable);
-  const eventsTable = resolveEventsTable(sourceTable, options);
+  const eventsTable = buildEventsTable(sourceTable, options);
   const columns = Object.values(getColumns(eventsTable));
 
   const createSchema = `CREATE SCHEMA IF NOT EXISTS ${quoteIdentifier(eventsSchema)}`;

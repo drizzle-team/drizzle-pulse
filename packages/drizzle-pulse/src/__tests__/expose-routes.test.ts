@@ -1,11 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 import type { PgAsyncDatabase, PgQueryResultHKT } from 'drizzle-orm/pg-core';
-import { integer, pgTable, serial, text } from 'drizzle-orm/pg-core';
+import { integer, pgSchema, pgTable, serial, text } from 'drizzle-orm/pg-core';
 import { Hono } from 'hono';
 import SuperJSON from 'superjson';
 import { z } from 'zod';
 import { pulse } from '../pulse-table.js';
-import { resolveEventsTable } from '../server/events-table-resolver.js';
+import { buildEventsTable } from '../server/events-table-resolver.js';
+import { expose } from '../server/expose.js';
 import { RealtimeRequestHandler } from '../server/handlers.js';
 import type { PulseAuthContext } from '../server/index.js';
 import type { AnyPulseBuilders, PulseRegistry } from '../server/pulse-registry.js';
@@ -185,7 +186,7 @@ function createRouterHarness(params?: {
   latestSnapshot?: number;
   events?: Record<string, unknown>[];
   registry?: PulseRegistry<AnyPulseBuilders>;
-  eventsTable?: Parameters<typeof resolveEventsTable>[0];
+  eventsTable?: Parameters<typeof buildEventsTable>[0];
 }) {
   const registry = params?.registry ?? createRegistry();
   const eventsSourceTable = params?.eventsTable ?? ordersTable;
@@ -201,7 +202,7 @@ function createRouterHarness(params?: {
     pulseSourceDb,
     subscriptionManager,
     () => realtimeService,
-    () => resolveEventsTable(eventsSourceTable),
+    () => buildEventsTable(eventsSourceTable),
   );
 
   const router = new Hono();
@@ -517,7 +518,7 @@ describe('subscribe reads the snapshot cursor before the baseline SELECT', () =>
       pulseSourceDb,
       subscriptionManager,
       () => realtimeService,
-      () => resolveEventsTable(ordersTable),
+      () => buildEventsTable(ordersTable),
     );
 
     const result = await requestHandler.subscribe(
@@ -550,7 +551,7 @@ describe('subscribe rejects cross-user subscriptionId reuse', () => {
       pulseSourceDb,
       subscriptionManager,
       () => realtimeService,
-      () => resolveEventsTable(ordersTable),
+      () => buildEventsTable(ordersTable),
     );
 
     const clientId = 'shared-client-id';
@@ -603,7 +604,7 @@ describe('unsubscribe() and pull() activity tracking', () => {
       pulseSourceDb,
       subscriptionManager,
       () => realtimeService,
-      () => resolveEventsTable(ordersTable),
+      () => buildEventsTable(ordersTable),
     );
 
     return { requestHandler, subscriptionManager };
@@ -675,5 +676,26 @@ describe('unsubscribe() and pull() activity tracking', () => {
     const afterPull = subscriptionManager.get(clientId, subscriptionId);
     expect(afterPull?.lastSeenAt).toBeGreaterThan(1_000);
     expect(afterPull?.lastSeenAt).toBeGreaterThanOrEqual(beforePull?.lastSeenAt ?? 0);
+  });
+});
+
+describe('expose() rejects events-table name collisions', () => {
+  test('distinct source tables deriving the same events-table name throw, naming both', () => {
+    // Escaping is not injective: schema "a_" table "b" and schema "a" table "_b" both
+    // derive "a___b".
+    const tableA = pgSchema('a_').table('b', { id: serial('id').primaryKey() });
+    const tableB = pgSchema('a').table('_b', { id: serial('id').primaryKey() });
+
+    const registry = createPulseRegistry({
+      a: pulse(tableA).query(),
+      b: pulse(tableB).query(),
+    });
+
+    expect(() =>
+      expose(registry, {
+        databaseUrl: 'postgresql://unused',
+        sourceDb: createPulseSourceDbMock(() => []),
+      }),
+    ).toThrow(/a_\.b and a\._b both derive the same events-table name drizzle_pulse\.a___b/);
   });
 });

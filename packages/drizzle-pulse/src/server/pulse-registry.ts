@@ -1,5 +1,4 @@
-import { getTableUniqueName } from 'drizzle-orm';
-import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
+import type { PgTable } from 'drizzle-orm/pg-core';
 import { getPulsePkColumn } from '../pulse-table.js';
 import type {
   PulseAuthContext,
@@ -12,7 +11,7 @@ import type { PulseClientContract } from './pulse-types.js';
 
 // Re-exported for handlers.ts (server-only) — the implementations live in
 // pulse-projection.ts, which the embedded client entrypoint value-imports directly, so
-// that module (unlike this one) must stay free of drizzle-orm/pg-core value imports.
+// that module must stay free of drizzle-orm/pg-core value imports.
 export { applyResponsePipeline } from './pulse-projection.js';
 
 export type AnyPulseBuilder = PulseBuilder<
@@ -29,30 +28,10 @@ type BuiltQuery = {
   sourceTable: PgTable;
 };
 
-// Defensive re-check: `PulseTable.query()` only sees inline `.primaryKey()` columns
-// (a pure module can't value-import `getTableConfig`). Registries can receive a hand-built
-// AnyPulseBuilder that bypassed that gate, so union inline + table-extras `primaryKey()`
-// entries by name here and reject anything resolving to more than one distinct column.
-function assertSinglePrimaryKeyName(table: PgTable): void {
-  const tableConfig = getTableConfig(table);
-  const inlinePrimaryKeyColumns = tableConfig.columns.filter((column) => column.primary);
-  const compositePrimaryKeyColumns = tableConfig.primaryKeys.flatMap(
-    (primaryKey) => primaryKey.columns,
-  );
-  const primaryKeyColumnNames = new Set(
-    [...inlinePrimaryKeyColumns, ...compositePrimaryKeyColumns].map((column) => column.name),
-  );
-
-  if (primaryKeyColumnNames.size > 1) {
-    throw new Error(`Table "${getTableUniqueName(table)}" has multiple primary keys`);
-  }
-}
-
 function buildPulseQuery(query: AnyPulseBuilder) {
   const { config } = query;
   const sourceTable = config.table.source;
 
-  assertSinglePrimaryKeyName(sourceTable);
   getPulsePkColumn(sourceTable);
 
   const pulseQuery: PulseRegistryQuery = {
@@ -121,19 +100,8 @@ export class PulseRegistry<TQueries extends AnyPulseBuilders> {
         args,
         auth,
       }) ?? null;
-    return {
-      table: registryQuery.table,
-      pkColumn: registryQuery.pkColumn,
-      columns: registryQuery.columns,
-      selectedColumns: registryQuery.selectedColumns,
-      allowedColumnNames: registryQuery.allowedColumnNames,
-      order: registryQuery.order,
-      limit: registryQuery.limit,
-      argsSchema: registryQuery.argsSchema,
-      where,
-      hasTransform: registryQuery.hasTransform,
-      transformRows: registryQuery.transformRows,
-    };
+    const { queryFn, ...rest } = registryQuery;
+    return { ...rest, where };
   }
 }
 

@@ -105,19 +105,7 @@ export class PulseCollection<TRow extends { $pk: unknown }> {
     }
   }
 
-  /**
-   * One-time initial sync: subscribe to the WAL tap, take the baseline SELECT, drain the
-   * events buffered during it, then mark the collection live. The factory awaits this
-   * promise, so callers only ever see a ready collection. Everything up to the baseline
-   * SELECT runs synchronously within the factory call, and the tap is registered BEFORE
-   * `baselineSnapshot` is read — so no change committed between the factory call and the
-   * SELECT is missed: such events buffer, then apply only if newer than the baseline (the
-   * merge core's $pk backstop dedupes a row present in both the baseline and buffer). A
-   * concurrent dispose() bails silently, leaving isReady false — PulseClient.create turns
-   * that into a factory rejection; a failed baseline SELECT detaches the tap (so the
-   * buffer can't grow unbounded) and rethrows.
-   * @internal
-   */
+  /** One-time initial sync; the factory awaits it, so callers only ever see a ready collection. @internal */
   async startHandshake(): Promise<void> {
     try {
       const buffer: WalTapPayload[] = [];
@@ -228,17 +216,7 @@ export class PulseCollection<TRow extends { $pk: unknown }> {
     }
   }
 
-  /**
-   * Re-syncs a live collection after a WAL reconnect gap: re-reads the full baseline and
-   * swaps it in, keeping the collection live and its listeners intact (fires onChange
-   * for the changed list() ref — never re-runs the handshake). The buffer is opened
-   * synchronously before the SELECT so concurrent WAL events queue instead of mutating
-   * soon-to-be-replaced state (drained after, filtered by `baselineSnapshot`).
-   * `isRebaselining` serializes overlapping calls, not-yet-ready collections are skipped
-   * (startHandshake baselines them), and on a mid-drain throw only the un-applied events
-   * are recovered (shift()) so none are lost and none re-fire onChange.
-   * @internal
-   */
+  /** Re-syncs a live collection after a WAL reconnect gap, keeping listeners intact — never re-runs the handshake. @internal */
   async rebaseline(): Promise<void> {
     if (this.disposed) return;
     if (this.isRebaselining) return;

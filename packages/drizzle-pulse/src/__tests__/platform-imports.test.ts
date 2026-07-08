@@ -17,6 +17,16 @@ const ENTRY_POINTS = [
   join(SRC_ROOT, 'index.ts'),
 ];
 
+// The schema-definition / kit-recognition surface: reached only from the root entrypoint and
+// consumed server-side or by drizzle-kit (Node) — never browser bundles — so these modules
+// alone may value-import drizzle-orm/pg-core. events-table-resolver.ts is the events-table
+// builder the root re-exports for kit's dynamic-import guard. Every other banned specifier
+// still applies, and client/react/embedded reach none of these modules.
+const PG_CORE_ALLOWED = new Set([
+  join(SRC_ROOT, 'pulse-table.ts'),
+  join(SRC_ROOT, 'server/events-table-resolver.ts'),
+]);
+
 // Covers every bare (non-`node:`-prefixed) builtin specifier, including subpaths
 // like `fs/promises`; `node:`-prefixed specifiers are caught separately below.
 const NODE_BUILTINS = new Set(builtinModules);
@@ -68,7 +78,7 @@ function namedElementsHaveValueBinding(bindings: NamedBindingsLike): boolean {
 function importHasValueBinding(node: ts.ImportDeclaration): boolean {
   const clause = node.importClause;
   if (!clause) return true; // side-effect import: `import 'x';`
-  if (clause.isTypeOnly) return false;
+  if (clause.phaseModifier === ts.SyntaxKind.TypeKeyword) return false;
   if (clause.name) return true; // default import
   const bindings = clause.namedBindings;
   if (!bindings) return false;
@@ -168,6 +178,7 @@ function walkImportGraph(entryPoints: string[]): { visited: string[]; violations
 
       const reason = bannedReason(edge.specifier);
       if (reason) {
+        if (PG_CORE_ALLOWED.has(file) && edge.specifier.startsWith('drizzle-orm/pg-core')) continue;
         violations.push({ file, specifier: edge.specifier, reason });
       }
     }

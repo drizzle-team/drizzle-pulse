@@ -1,6 +1,6 @@
 import type { InferModelFromColumns, InferSelectModel } from 'drizzle-orm';
-import { entityKind, getColumns, getTableUniqueName } from 'drizzle-orm';
-import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
+import { entityKind, getColumns, getTableUniqueName, is } from 'drizzle-orm';
+import { getTableConfig, type PgColumn, type PgTable } from 'drizzle-orm/pg-core';
 import type { z } from 'zod';
 import { PulseBuilder } from './server/pulse-builder.js';
 import type {
@@ -10,11 +10,6 @@ import type {
   QueryFn,
 } from './server/pulse-types.js';
 import type { WhereClause } from './types.js';
-
-// Global symbol registry (not a module-local Symbol()) so the brand survives duplicated
-// package copies across node_modules trees — mirrors drizzle-orm's entity.ts mechanism,
-// but pulse-owned; this is the sole recognition marker (no drizzle entity-kind tag).
-const PulseTableBrand = Symbol.for('drizzle-pulse:isPulseTable');
 
 const SUPPORTED_PK_SQL_TYPES = new Set([
   'smallint',
@@ -31,52 +26,18 @@ const SUPPORTED_PK_SQL_TYPES = new Set([
   'uuid',
 ]);
 
-// Global-registry keys for drizzle's table-extras config (stable `Symbol.for(...)` keys,
-// the same reflection mechanism the events-table resolver and the isPulseTable brand use).
-const EXTRA_CONFIG_BUILDER_SYMBOL = Symbol.for('drizzle:ExtraConfigBuilder');
-const EXTRA_CONFIG_COLUMNS_SYMBOL = Symbol.for('drizzle:ExtraConfigColumns');
-
-// Reads table-extras `primaryKey({ columns: [...] })` declarations without importing
-// pg-core's `getTableConfig` (banned from this platform-pure module). Runs the table's
-// extra-config builder and picks out PrimaryKeyBuilder entries by their drizzle entityKind.
-function getExtrasPrimaryKeyColumnNames(table: PgTable): string[] {
-  const reflected = table as unknown as Record<symbol, unknown>;
-  const extraConfigBuilder = reflected[EXTRA_CONFIG_BUILDER_SYMBOL];
-  if (typeof extraConfigBuilder !== 'function') return [];
-
-  const extraConfig = (extraConfigBuilder as (columns: unknown) => unknown)(
-    reflected[EXTRA_CONFIG_COLUMNS_SYMBOL],
-  );
-  const builders = Array.isArray(extraConfig)
-    ? extraConfig.flat(1)
-    : Object.values(extraConfig as object);
-
-  const names: string[] = [];
-  for (const builder of builders) {
-    const kind = (builder as { constructor?: Record<symbol, unknown> })?.constructor?.[entityKind];
-    if (kind !== 'PgPrimaryKeyBuilder') continue;
-    for (const column of (builder as { columns?: readonly { name: string }[] }).columns ?? []) {
-      names.push(column.name);
-    }
-  }
-  return names;
-}
-
 /**
- * Resolves the single primary-key column drizzle-pulse tracks a table by. Prefers an
- * inline `.primaryKey()` column; falls back to a table-extras `primaryKey({ columns: [...] })`
+ * Resolves the single primary-key column drizzle-pulse tracks a table by, from either an
+ * inline `.primaryKey()` column or a table-extras `primaryKey({ columns: [...] })`
  * declaration. Exactly one PK column is required — a true composite (multiple columns) is
  * rejected — and its SQL type must be in the supported allowlist.
  */
 export function getPulsePkColumn(table: PgTable): PgColumn {
   const columns = Object.values(getColumns(table)) as PgColumn[];
-  const inlinePkColumns = columns.filter((column) => column.primary);
-
-  let pkColumns = inlinePkColumns;
-  if (pkColumns.length === 0) {
-    const extrasNames = new Set(getExtrasPrimaryKeyColumnNames(table));
-    pkColumns = columns.filter((column) => extrasNames.has(column.name));
-  }
+  const extrasPkNames = new Set(
+    getTableConfig(table).primaryKeys.flatMap((pk) => pk.columns).map((c) => c.name),
+  );
+  const pkColumns = columns.filter((column) => column.primary || extrasPkNames.has(column.name));
 
   if (pkColumns.length === 0) {
     throw new Error(
@@ -108,18 +69,14 @@ export function getPulsePkColumn(table: PgTable): PgColumn {
 }
 
 export class PulseTable<TTable extends PgTable = PgTable> {
-  readonly [PulseTableBrand] = true as const;
+  static readonly [entityKind]: string = 'PulseTable';
 
   constructor(readonly table: TTable) {}
 
   /**
-   * `ctx.args` is typed `any` here (not `Record<never, never>`) so the collection-level
-   * spelling `pulse(t).query(({ args }) => ...)` can read args before a schema is seeded.
-   * That is runtime-safe only when a schema is later chained via `.args()` — `resolve()`
-   * substitutes an empty object for a schemaless query rather than passing raw client
-   * input through, so `ctx.args` is always `{}` without `.args(schema)`. For a fully-typed
-   * `ctx.args`, start the chain with `pulse(t).args(schema).query(fn)`, where the
-   * builder-level `.query()` sees the real `TArgs` generic.
+   * `ctx.args` is `any` here so `pulse(t).query(({ args }) => ...)` can read args before a
+   * schema is chained; runtime-safe because `resolve()` substitutes `{}` for a schemaless
+   * query. For fully-typed args, chain `pulse(t).args(schema).query(fn)`.
    */
   query(
     fn?: (
@@ -195,11 +152,7 @@ export function pulse<TTable extends PgTable>(table: TTable): PulseTable<TTable>
 }
 
 export function isPulseTable(value: unknown): value is PulseTable {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    (value as Record<symbol, unknown>)[PulseTableBrand] === true
-  );
+  return is(value, PulseTable);
 }
 
 export function getPulseTableConfig<TTable extends PgTable>(

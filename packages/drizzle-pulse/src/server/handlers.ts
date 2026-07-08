@@ -118,12 +118,9 @@ export class RealtimeRequestHandler {
 
       let subscription =
         subscriptionId && clientId ? this.subscriptionManager.get(clientId, subscriptionId) : null;
-      // A client-supplied clientId/subscriptionId pair from a different user must not
-      // overwrite an existing subscription's query/auth. Discard the found subscription
-      // AND refuse to reuse the disputed subscriptionId for creation — reusing it would
-      // still silently overwrite the victim's entry in the store under the same key
-      // (SubscriptionManager.create() unconditionally .set()s), so this falls all the
-      // way through to the final branch, which mints a genuinely fresh random id.
+      // Trust boundary: a subscriptionId owned by a different user is neither updated nor
+      // reused for creation (create() would overwrite the victim's entry) — fall through
+      // to the final branch, which mints a fresh id.
       const ownershipMismatch = subscription !== null && subscription.auth.userId !== auth.userId;
       if (ownershipMismatch) {
         subscription = null;
@@ -563,13 +560,12 @@ export class RealtimeRequestHandler {
     // source table at construction, so this throws rather than returning null for a
     // genuinely unknown query (subscription lookup upstream already guards that case).
     const eventsTable = this.getEventsTable(subscription.queryName);
+    // buildEventsTable() keys every column by its SQL name, so getColumns() lookups by
+    // SQL name below need no re-keying.
     const eventTableColumns = getColumns(eventsTable);
-    const eventTableColumnsBySqlName = Object.fromEntries(
-      Object.values(eventTableColumns).map((column) => [column.name, column]),
-    );
     const eventColumns = Object.fromEntries(
       Object.entries(subscription.query.columns).map(([queryKey, sourceColumn]) => {
-        const eventColumn = eventTableColumnsBySqlName[sourceColumn.name];
+        const eventColumn = eventTableColumns[sourceColumn.name];
         if (!eventColumn) {
           throw new Error(`Missing events column "${sourceColumn.name}" for query`);
         }
@@ -579,7 +575,7 @@ export class RealtimeRequestHandler {
     const oldEventColumns = Object.fromEntries(
       Object.entries(subscription.query.columns).map(([queryKey, sourceColumn]) => {
         const oldColumnName = `$old_${sourceColumn.name}`;
-        const oldEventColumn = eventTableColumnsBySqlName[oldColumnName];
+        const oldEventColumn = eventTableColumns[oldColumnName];
         if (!oldEventColumn) {
           throw new Error(`Missing events old column "${oldColumnName}" for query`);
         }
@@ -612,13 +608,9 @@ export class RealtimeRequestHandler {
         : (currentPredicate ?? oldPredicate);
     const rawEvents = await eventsDb
       .select({
-        // Key the projection by SQL column name (not events-table JS property name)
-        // so the raw record matches extractRow's contract: rawEvent[$old_ + sourceColumn.name].
-        // resolveEventsTable() already keys both new-value and $old_ columns by SQL name
-        // (driver_id / $old_driver_id), so eventTableColumnsBySqlName is a defensive
-        // no-op re-keying today — but callers must not rely on that and should always
-        // re-key through it rather than assuming getColumns()'s own JS keys.
-        ...eventTableColumnsBySqlName,
+        // Projection keys must be SQL column names so the raw record matches extractRow's
+        // contract: rawEvent[$old_ + sourceColumn.name].
+        ...eventTableColumns,
         $matches_new: currentPredicate ? sql<boolean>`(${currentPredicate})` : sql<boolean>`true`,
         $matches_old: oldPredicate ? sql<boolean>`(${oldPredicate})` : sql<boolean>`true`,
       })

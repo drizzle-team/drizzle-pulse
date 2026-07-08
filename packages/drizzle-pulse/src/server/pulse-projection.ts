@@ -2,11 +2,9 @@ import { getTableUniqueName } from 'drizzle-orm';
 import type { ResolvedPulseQuery } from '../types.js';
 import { applyColumnFilter, getQueryColumnKey } from './pulse-types.js';
 
-// Kept in its own module (bare `drizzle-orm` value imports only, no `drizzle-orm/pg-core`
-// value imports) because the embedded client entrypoint value-imports applyProjectionPipeline
-// directly — platform-imports.test.ts walks every value import reachable from there, so
-// this file must stay free of drizzle-orm/pg-core VALUE imports (the registry-construction
-// logic in pulse-registry.ts, which needs getTableConfig, is not reachable from embedded).
+// Must stay free of drizzle-orm/pg-core VALUE imports (bare `drizzle-orm` only): the embedded
+// client entrypoint value-imports applyProjectionPipeline directly, and platform-imports.test.ts
+// enforces purity across everything reachable from there.
 export function addPrimaryKey(row: Record<string, unknown>, pulseQuery: ResolvedPulseQuery) {
   // `row` is SELECT-shaped (keyed by JS property name), which diverges from the PK
   // column's own SQL name whenever a table declares e.g. `orderId: serial('order_id')` —

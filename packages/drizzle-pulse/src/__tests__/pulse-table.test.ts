@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'bun:test';
+import { entityKind } from 'drizzle-orm';
 import {
   boolean,
   integer,
   pgSchema,
+  primaryKey,
   serial,
   smallserial,
   text,
@@ -44,6 +46,24 @@ const smallSerialPkTable = testSchema.table('smallserial_pk_items', {
   name: text('name').notNull(),
 });
 
+const tableLevelPkTable = testSchema.table(
+  'table_level_pk_items',
+  {
+    id: integer('id').notNull(),
+    name: text('name').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.id] })],
+);
+
+const compositePkTable = testSchema.table(
+  'composite_pk_items',
+  {
+    leftId: integer('left_id').notNull(),
+    rightId: integer('right_id').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.leftId, t.rightId] })],
+);
+
 describe('pulse() / PulseTable brand and guards', () => {
   test('isPulseTable() returns true for pulse(t) output', () => {
     expect(isPulseTable(pulse(serialPkTable))).toBe(true);
@@ -55,9 +75,11 @@ describe('pulse() / PulseTable brand and guards', () => {
     expect(isPulseTable(serialPkTable)).toBe(false);
   });
 
-  test('brand key is the global-registry symbol: duck-typed object literal also passes', () => {
-    const duckTyped = { [Symbol.for('drizzle-pulse:isPulseTable')]: true };
-    expect(isPulseTable(duckTyped)).toBe(true);
+  test('isPulseTable() recognizes a cross-copy PulseTable by its drizzle entityKind tag', () => {
+    // A PulseTable from a duplicated package copy: is() matches the entityKind string up the
+    // prototype chain, not class identity — so a foreign constructor carrying the tag passes.
+    const foreign = Object.create({ constructor: { [entityKind]: 'PulseTable' } });
+    expect(isPulseTable(foreign)).toBe(true);
   });
 
   test('getPulseTableConfig() returns an object whose table is reference-equal to the input', () => {
@@ -80,6 +102,14 @@ describe('pulse() construct-unconditionally + lazy .query()-time PK validation',
   test('.query() on the two-inline-PK table throws mentioning "multiple primary keys"', () => {
     const entity = pulse(twoInlinePkTable);
     expect(() => entity.query()).toThrowError('has multiple primary keys');
+  });
+
+  test('.query() on a single-column table-level primaryKey() succeeds', () => {
+    expect(() => pulse(tableLevelPkTable).query()).not.toThrow();
+  });
+
+  test('.query() on a composite table-level primaryKey() throws "multiple primary keys"', () => {
+    expect(() => pulse(compositePkTable).query()).toThrowError('has multiple primary keys');
   });
 
   test('.query() on the boolean-PK table throws mentioning the unsupported SQL type', () => {

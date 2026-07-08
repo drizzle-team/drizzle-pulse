@@ -21,9 +21,9 @@ export type {
 export type { PulseAuthContext } from '../types.js';
 // Events-table convention
 export {
+  buildEventsTable,
   DEFAULT_EVENTS_SCHEMA,
   getEventsTableName,
-  resolveEventsTable,
 } from './events-table-resolver.js';
 export type { WalListenerConfig } from './expose.js';
 export {

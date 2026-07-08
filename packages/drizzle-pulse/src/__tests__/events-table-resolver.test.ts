@@ -27,7 +27,7 @@ import {
 import {
   DEFAULT_EVENTS_SCHEMA,
   getEventsTableName,
-  resolveEventsTable,
+  buildEventsTable,
 } from '../server/events-table-resolver.js';
 
 const moodEnum = pgEnum('resolver_test_mood', ['sad', 'ok', 'happy']);
@@ -77,21 +77,21 @@ const SERIAL_COLUMN_TYPES = new Set([
   'PgBigSerial64',
 ]);
 
-describe('resolveEventsTable', () => {
+describe('buildEventsTable', () => {
   test('derives the events table name and schema by convention', () => {
-    const eventsTable = resolveEventsTable(sourceTable);
+    const eventsTable = buildEventsTable(sourceTable);
     const config = getTableConfig(eventsTable);
     expect(config.name).toBe('public_resolver__fixture');
     expect(config.schema).toBe(DEFAULT_EVENTS_SCHEMA);
     expect(DEFAULT_EVENTS_SCHEMA).toBe('drizzle_pulse');
     expect(getEventsTableName(sourceTable)).toBe('public_resolver__fixture');
 
-    const customSchema = resolveEventsTable(sourceTable, { eventsSchema: 'custom_schema' });
+    const customSchema = buildEventsTable(sourceTable, { eventsSchema: 'custom_schema' });
     expect(getTableConfig(customSchema).schema).toBe('custom_schema');
   });
 
   test('produces 2x source columns + 3 metadata columns, every name present', () => {
-    const eventsTable = resolveEventsTable(sourceTable);
+    const eventsTable = buildEventsTable(sourceTable);
     const sourceColumns = Object.values(getColumns(sourceTable));
     const eventsColumns = getColumns(eventsTable);
     const eventsColumnNames = Object.values(eventsColumns).map((column) => column.name);
@@ -108,7 +108,7 @@ describe('resolveEventsTable', () => {
   });
 
   test('only the PK new-value column is notNull; primaryKey is stripped everywhere', () => {
-    const eventsTable = resolveEventsTable(sourceTable);
+    const eventsTable = buildEventsTable(sourceTable);
 
     const idColumn = getColumnByName(eventsTable, 'id');
     expect(idColumn.notNull).toBe(true);
@@ -126,7 +126,7 @@ describe('resolveEventsTable', () => {
   });
 
   test('non-serial columns preserve the source getSQLType(); serial family relaxes to integer/bigint', () => {
-    const eventsTable = resolveEventsTable(sourceTable);
+    const eventsTable = buildEventsTable(sourceTable);
 
     for (const sourceColumn of Object.values(getColumns(sourceTable))) {
       if (SERIAL_COLUMN_TYPES.has(sourceColumn.columnType)) continue;
@@ -141,7 +141,7 @@ describe('resolveEventsTable', () => {
   });
 
   test('cloned columns carry no default/generated/identity config; metadata columns match the spec', () => {
-    const eventsTable = resolveEventsTable(sourceTable);
+    const eventsTable = buildEventsTable(sourceTable);
     const metadataNames = new Set(['$snapshot', '$op', '$timestamp']);
 
     for (const column of Object.values(getColumns(eventsTable))) {
@@ -168,7 +168,7 @@ describe('resolveEventsTable', () => {
   });
 
   test('enum columns reference the same enum instance on the twin', () => {
-    const eventsTable = resolveEventsTable(sourceTable);
+    const eventsTable = buildEventsTable(sourceTable);
     const sourceMood = getColumnByName(sourceTable, 'mood_col');
     const moodNew = getColumnByName(eventsTable, 'mood_col');
     const moodOld = getColumnByName(eventsTable, '$old_mood_col');
@@ -184,7 +184,7 @@ describe('resolveEventsTable', () => {
       id: serial('id').primaryKey(),
     });
 
-    expect(() => resolveEventsTable(longTable)).toThrow(
+    expect(() => buildEventsTable(longTable)).toThrow(
       /exceeding Postgres's 63-byte identifier limit/,
     );
   });
@@ -196,13 +196,24 @@ describe('resolveEventsTable', () => {
       longCol: text(longColumnName),
     });
 
-    expect(() => resolveEventsTable(longColumnTable)).toThrow(
+    expect(() => buildEventsTable(longColumnTable)).toThrow(
       /\$old_a+.*exceeding Postgres's 63-byte identifier limit/,
     );
   });
 
+  test('throws loudly when the derived $snapshot sequence name exceeds 63 bytes', () => {
+    // Events name is 55 bytes (fits), but `${name}_snapshot_seq` = 68 bytes (overflows).
+    const longSeqTable = pgTable('x'.repeat(48), {
+      id: serial('id').primaryKey(),
+    });
+
+    expect(() => buildEventsTable(longSeqTable)).toThrow(
+      /_snapshot_seq" is \d+ bytes, exceeding Postgres's 63-byte identifier limit/,
+    );
+  });
+
   test("the synthesized table passes drizzle's is(result, PgTable) check", () => {
-    const eventsTable = resolveEventsTable(sourceTable);
+    const eventsTable = buildEventsTable(sourceTable);
     expect(is(eventsTable, PgTable)).toBe(true);
   });
 
@@ -212,7 +223,7 @@ describe('resolveEventsTable', () => {
         id: serial('id').primaryKey(),
         collided: text(reservedName),
       });
-      expect(() => resolveEventsTable(collidingTable)).toThrow(
+      expect(() => buildEventsTable(collidingTable)).toThrow(
         /collides with a reserved events-table metadata column name/,
       );
     }
@@ -223,11 +234,11 @@ describe('resolveEventsTable', () => {
       id: serial('id').primaryKey(),
       collided: text('$old_id'),
     });
-    expect(() => resolveEventsTable(collidingTable)).toThrow(/reserved "\$old_" prefix/);
+    expect(() => buildEventsTable(collidingTable)).toThrow(/reserved "\$old_" prefix/);
   });
 
   test('array columns preserve dimensions and getSQLType on both new-value and $old_ clones', () => {
-    const eventsTable = resolveEventsTable(sourceTable);
+    const eventsTable = buildEventsTable(sourceTable);
     const sourceTags = getColumnByName(sourceTable, 'tags_col');
     const sourceTimes = getColumnByName(sourceTable, 'times_col');
 
@@ -244,7 +255,7 @@ describe('resolveEventsTable', () => {
   });
 
   test('cloned array columns keep the source column array (de)serialization codec', () => {
-    const eventsTable = resolveEventsTable(sourceTable);
+    const eventsTable = buildEventsTable(sourceTable);
     const timesClone = getColumnByName(eventsTable, 'times_col');
     const now = new Date('2024-01-01T00:00:00.000Z');
 

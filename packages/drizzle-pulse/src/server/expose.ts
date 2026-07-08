@@ -2,7 +2,7 @@ import { desc, getTableUniqueName, sql } from 'drizzle-orm';
 import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
 import { type ClientConfig, Pool, type PoolConfig, types } from 'pg';
 import { LogicalReplicationService, type Pgoutput, PgoutputPlugin } from 'pg-logical-replication';
-import { DEFAULT_EVENTS_SCHEMA, resolveEventsTable } from './events-table-resolver.js';
+import { buildEventsTable, DEFAULT_EVENTS_SCHEMA } from './events-table-resolver.js';
 import { RealtimeRequestHandler } from './handlers.js';
 import type { AnyPulseBuilders, PulseRegistry } from './pulse-registry.js';
 import type { PulseSourceDb } from './pulse-sql.js';
@@ -12,10 +12,8 @@ import { createWalRowNormalizer } from './wal-normalization.js';
 
 type RuntimeLifecycleListener = () => void;
 
-// OIDs whose default pg-types parser yields a non-text JS value (Date, interval object,
-// {x,y}) that Drizzle's from-text codecs cannot consume: date/timestamp/timestamptz/
-// interval, plus point (600). Both decode paths this runtime owns force these back to raw
-// text — scoped per-connection, never via a process-global setTypeParser.
+// date/timestamp/timestamptz/interval/point: pg-types' defaults yield non-text JS values
+// that Drizzle's from-text codecs cannot consume.
 const RAW_TEXT_PG_OIDS = new Set([1082, 1114, 1184, 1186, 600]);
 
 const rawText = (value: string): string => value;
@@ -29,12 +27,8 @@ const rawTextTypes = {
       : (types.getTypeParser as (oid: number, format?: unknown) => unknown)(oid, format),
 } as PoolConfig['types'];
 
-// pg-logical-replication's PgoutputParser decodes WAL values through the process-global
-// pg-types registry, which this runtime must not mutate. Its pgoutput-v1 wire form is text,
-// and each relation message carries the per-column parser reused for every later tuple —
-// and parse() returns the very object it caches. Overriding those parsers to identity for
-// the raw-text OIDs keeps WAL values as text (for Drizzle's from-text codecs) with zero
-// global state, scoped to this plugin instance.
+// Keeps WAL values for the raw-text OIDs as text without mutating the process-global
+// pg-types registry pg-logical-replication decodes through.
 // ponytail: couples to pg-logical-replication internals (relation.columns[].parser); the
 // runtime guard below fails loud if that shape changes on upgrade.
 function scopeRawTextWalParsers(plugin: PgoutputPlugin): PgoutputPlugin {
@@ -165,7 +159,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
   private readonly stopListeners = new Set<RuntimeLifecycleListener>();
 
   get sourceDb(): PulseSourceDb {
-    return this.getSourceDb();
+    return this.config.sourceDb;
   }
 
   // Lifecycle edges the in-process (embedded) client subscribes to. The runtime does
@@ -192,6 +186,10 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     this.eventsSchema = this.config.eventsSchema ?? DEFAULT_EVENTS_SCHEMA;
 
     this.sourceTableMetadata = new Map();
+    // The `_`->`__` escaping is not injective (see events-table-resolver.ts), so distinct
+    // source tables can derive the same events-table name; reject that here, where the full
+    // set of source tables is known, rather than let one table silently shadow another.
+    const eventsNameOrigin = new Map<string, string>();
     for (const queryName of this.registry.getQueryNames()) {
       const pulseQuery = this.registry.getPulseQuery(queryName);
       const sourceTable = this.registry.getSourceTable(queryName);
@@ -203,7 +201,18 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
         continue;
       }
 
-      const eventsTable = resolveEventsTable(sourceTable, { eventsSchema: this.eventsSchema });
+      const eventsTable = buildEventsTable(sourceTable, { eventsSchema: this.eventsSchema });
+
+      const eventsName = getTableConfig(eventsTable).name;
+      const sourceConfig = getTableConfig(sourceTable);
+      const sourceName = `${sourceConfig.schema ?? 'public'}.${sourceConfig.name}`;
+      const priorSourceName = eventsNameOrigin.get(eventsName);
+      if (priorSourceName && priorSourceName !== sourceName) {
+        throw new Error(
+          `Source tables ${priorSourceName} and ${sourceName} both derive the same events-table name ${this.eventsSchema}.${eventsName}; rename one to avoid the collision`,
+        );
+      }
+      eventsNameOrigin.set(eventsName, sourceName);
 
       this.sourceTableMetadata.set(getTableUniqueName(pulseQuery.table), {
         sourceTable,
@@ -229,7 +238,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
 
     this.requestHandler = new RealtimeRequestHandler(
       this.registry,
-      this.getSourceDb(),
+      this.config.sourceDb,
       this.subscriptionManager,
       () => this.getRealtimeService(),
       (queryName: string) => this.getEventsTableForQuery(queryName),
@@ -258,7 +267,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
 
   async ensureBaselines(): Promise<void> {
     const currentRealtimeService = this.getRealtimeService();
-    const sourceDb = this.getSourceDb();
+    const sourceDb = this.config.sourceDb;
 
     for (const queryName of this.registry.getQueryNames()) {
       const pulseQuery = this.registry.getPulseQuery(queryName);
@@ -761,14 +770,6 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     }
 
     return this.realtimeService;
-  }
-
-  private getSourceDb(): PulseSourceDb {
-    if (!this.config.sourceDb) {
-      throw new Error('source db has not been provided');
-    }
-
-    return this.config.sourceDb;
   }
 
   private logInfo(message: string, ...args: unknown[]): void {

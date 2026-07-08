@@ -48,12 +48,8 @@ export class PulseBuilder<
   columns<TNewSelection extends Record<string, boolean>>(
     selection: TNewSelection,
   ): PulseBuilder<TTable, TNewSelection, TArgs, ColumnsSelection<TTable, TNewSelection>> {
-    // .columns() re-parameterizes TResult to ColumnsSelection<TTable, TNewSelection> — a
-    // previously-chained .transform() was typed against the OLD TResult, so silently
-    // carrying it over here would either type-check against the wrong shape or (as the
-    // prior implementation did) get silently dropped at runtime while callers still
-    // believe it's active. Fail loudly instead: require .columns() before
-    // .transform() in the chain.
+    // A previously-chained .transform() was typed against the old TResult that .columns()
+    // re-parameterizes; fail loudly rather than silently carry or drop it.
     if (this.config.transformFn !== null) {
       throw new Error(
         '.columns() cannot follow .transform(); call .columns() before .transform() instead',
@@ -81,9 +77,8 @@ export class PulseBuilder<
   }
 
   transform<TTransformed extends Record<string, unknown>>(
-    // Plain (non-Bivariant) function type: the Bivariant wrapper hides TTransformed inside
-    // ReturnType<T>, which blocks its inference at the call site (falls back to the constraint).
-    // The stored config field keeps the Bivariant PulseTransformFn for cross-state assignability.
+    // Plain function type, not PulseTransformFn: the Bivariant wrapper blocks TTransformed
+    // inference at the call site.
     fn: (
       rows: InferModelFromColumns<TTable['_']['columns']>[],
     ) => Promise<TTransformed[]> | TTransformed[],

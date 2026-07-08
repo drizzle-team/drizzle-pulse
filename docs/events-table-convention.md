@@ -12,7 +12,7 @@ It is the interface contract two other consumers rely on:
 
 The normative implementation is
 [`packages/drizzle-pulse/src/server/events-table-resolver.ts`](../packages/drizzle-pulse/src/server/events-table-resolver.ts)
-(`resolveEventsTable`, `getEventsTableName`, `DEFAULT_EVENTS_SCHEMA`) — a pure function:
+(`buildEventsTable`, `getEventsTableName`, `DEFAULT_EVENTS_SCHEMA`) — a pure function:
 no database connection, no I/O.
 
 ## 1. Name derivation
@@ -28,11 +28,12 @@ The events table name is:
   `public`.
 - `sourceTable` is the source table's SQL name (not its JS export name).
 - **Escaping:** each component has every `_` doubled to `__` before the two are joined
-  with a single `_`. Because a `_` inside a component always appears as `__`, the single
-  joining `_` is the only place a lone underscore occurs — so the split back into
-  `(schema, table)` is unambiguous. Distinct `(schema, table)` pairs always derive
-  distinct names (e.g. schema `tenant_a` table `orders` → `tenant__a_orders`, while
-  schema `tenant` table `a_orders` → `tenant_a__orders` — no collision).
+  with a single `_`. This keeps names readable, but the join is **not injective**:
+  distinct `(schema, table)` pairs can derive the same name (e.g. schema `a_` table `b`
+  and schema `a` table `_b` both derive `a___b`). Such collisions are **rejected at
+  registration** — `expose()` throws when two distinct source tables derive the same
+  events-table name, naming both source tables and the derived name. There is no silent
+  shadowing, so the pretty (un-injective) encoding stays safe in practice.
 
 The events table itself lives in a dedicated **events schema** — never in the source
 table's own schema, and independent of the project's migrations schema. It defaults to
@@ -113,7 +114,7 @@ byte-level acceptance spec for this section:
 
 Note: the snippet below shows the *source* table with its normal JS export keys (which
 may be camelCase), but the *events* table's JS object keys are always the source
-column's **SQL name** — `resolveEventsTable` builds its `columns` record keyed by
+column's **SQL name** — `buildEventsTable` builds its `columns` record keyed by
 `sourceColumn.name`, never by the source table's JS property name. This differs from a
 normal `pgTable()` call, where the JS key and SQL name commonly diverge.
 
@@ -154,7 +155,7 @@ rejected outright rather than silently overwritten by object-spread ordering:
 
 - The three metadata names (`$snapshot`, `$op`, `$timestamp`, section 3) are reserved —
   a source column literally named `$snapshot`, `$op`, or `$timestamp` throws at
-  `resolveEventsTable()` time.
+  `buildEventsTable()` time.
 - Any source column name starting with the `$old_` prefix is reserved (it is the
   derivation scheme's own prefix for old-value twins, section 2.3) and likewise throws.
 
@@ -176,15 +177,22 @@ These three are built with plain column builders (not config-clones of any sourc
 column) — they are constant across every events table regardless of the source
 table's shape.
 
+`$snapshot`'s identity is created with an **explicit sequence name**
+`<eventsTableName>_snapshot_seq` (all other sequence options left at their integer
+defaults: `INCREMENT BY 1`, `MINVALUE 1`, `START 1`, `MAXVALUE 2147483647`, `NO CYCLE`,
+`CACHE 1`). Pinning the name is what makes a *live* `buildEventsTable` column serialize
+byte-identically to drizzle-kit's generated DDL — Drizzle otherwise defaults the sequence
+name to `<eventsTableName>_$snapshot_seq` (with the `$`), which kit does not use.
+
 ## 4. Identifier length guard (error contract)
 
 Postgres silently truncates identifiers over 63 bytes, which would let the resolver
 and a DDL statement disagree on the real table/column name without either side
 noticing (a `CREATE TABLE` targeting one truncated name while the runtime queries a
 different truncated name — a silent zero-events failure). To avoid this, the resolver
-checks every identifier it derives — the events table name and every `$old_<name>`
-twin — and **throws immediately** if it exceeds 63 bytes (UTF-8), rather than letting
-Postgres truncate it:
+checks every identifier it derives — the events table name, every `$old_<name>` twin,
+and the `$snapshot` sequence name `<eventsTableName>_snapshot_seq` — and **throws
+immediately** if it exceeds 63 bytes (UTF-8), rather than letting Postgres truncate it:
 
 ```
 Derived identifier "<identifier>" is <N> bytes, exceeding Postgres's 63-byte identifier limit
@@ -192,8 +200,9 @@ Derived identifier "<identifier>" is <N> bytes, exceeding Postgres's 63-byte ide
 
 New-value column names are not re-checked, because they reuse the source column's SQL
 name verbatim — if it fit in the source table, it fits here too. Only names the
-resolver actually *derives* (the table name and the `$old_` prefix) can newly exceed
-the limit.
+resolver actually *derives* (the table name, the `$old_` prefix, and the `_snapshot_seq`
+sequence name) can newly exceed the limit — and the sequence name is the longest of the
+three, so it can overflow even when the events table name itself fits.
 
 **This is a hard failure, not a warning.** There is no deterministic truncation or
 shortening scheme yet — an events table (or column) whose derived name
@@ -205,7 +214,7 @@ rejects would reintroduce the exact drift this guard exists to prevent.
 ## 5. Reference implementation
 
 - [`events-table-resolver.ts`](../packages/drizzle-pulse/src/server/events-table-resolver.ts)
-  is normative for every rule in sections 1–4. `resolveEventsTable(sourceTable, options?)`
+  is normative for every rule in sections 1–4. `buildEventsTable(sourceTable, options?)`
   returns a genuine Drizzle `PgTable` — the runtime inserts events into it directly
   (`db.insert(eventsTable).values(...)` in `realtime-store.ts`), so codec-faithful
   column reconstruction (reusing each source column's own `mapToDriverValue`/
@@ -213,14 +222,16 @@ rejects would reintroduce the exact drift this guard exists to prevent.
 - Production events-table DDL is **drizzle-kit's** job. Kit generates the `CREATE TABLE`
   from the same source table, pinned by kit's own golden test. The runtime only *reads*
   the events table (`db.insert(eventsTable).values(...)`) — it never emits or diffs DDL
-  text — so kit is free to render, for example, `$snapshot`'s identity clause in its own
-  house style (`GENERATED ALWAYS AS IDENTITY (sequence name "…")`) as long as the column
-  *set, order, SQL types, nullability, and names* match this document. The cross-repo
+  text — so kit is free to render the DDL in its own house style as long as the column
+  *set, order, SQL types, nullability, and names* match this document. Note that
+  `buildEventsTable` now pins `$snapshot`'s sequence name explicitly (section 3), so a
+  live column and kit's generated identity serialize to the same sequence name and integer
+  bounds rather than merely being compatible. The cross-repo
   conformance test (which applies kit's generated SQL to real Postgres and boots the
   runtime resolver against it) is the authority that the two interoperate.
 - A test-only `emitEventsTableDdl` helper lives in the integration-tests package
   (`packages/integration-tests/src/helpers/events-table-ddl.ts`); it derives DDL strictly
-  from `resolveEventsTable`'s output and exists solely so the test harness can create
+  from `buildEventsTable`'s output and exists solely so the test harness can create
   events tables in test databases without hand-mirrored SQL. It is not published and is
   not a normative reference.
 - Unit tests over the full edge-case type matrix live in

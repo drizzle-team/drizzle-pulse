@@ -19,8 +19,10 @@ function assertIdentifierLength(identifier: string): void {
   }
 }
 
-// `_` -> `__` per component so `<schema>_<table>` is injective; drizzle-kit derives the
-// same name byte-for-byte.
+// `_` -> `__` per component before joining the two with a single `_`. Keeps names readable
+// but is NOT injective: ("a_","b") and ("a","_b") both derive "a___b". Distinct source
+// tables that collide on the derived name are rejected at registration (see expose.ts).
+// drizzle-kit derives the same name byte-for-byte.
 function escapeComponent(component: string): string {
   return component.replaceAll('_', '__');
 }
@@ -61,13 +63,24 @@ function relaxSerial(column: PgColumn) {
   }
 }
 
-export function resolveEventsTable(
+/**
+ * Builds the events-table {@link PgTable} for a pulsed source table by convention: name
+ * `<escapedSchema>_<escapedTable>` in {@link DEFAULT_EVENTS_SCHEMA}, an `$old_` twin per
+ * source column, and `$snapshot`/`$op`/`$timestamp` metadata columns. Pure; no I/O.
+ * drizzle-kit derives the same shape — see docs/events-table-convention.md.
+ */
+export function buildEventsTable(
   sourceTable: PgTable,
   options?: { eventsSchema?: string },
 ): PgTable {
   const eventsSchema = options?.eventsSchema ?? DEFAULT_EVENTS_SCHEMA;
   const tableName = getEventsTableName(sourceTable);
   const pkColumnName = getPulsePkColumn(sourceTable).name;
+
+  // Kit hardcodes this sequence name; keeping it explicit makes a live column serialize
+  // byte-identically. It can newly overflow 63 bytes even when tableName fit.
+  const snapshotSequenceName = `${tableName}_snapshot_seq`;
+  assertIdentifierLength(snapshotSequenceName);
 
   const columns: Record<string, AnyPgColumnBuilder> = {};
 
@@ -83,7 +96,7 @@ export function resolveEventsTable(
   }
 
   Object.assign(columns, {
-    $snapshot: integer().generatedAlwaysAsIdentity(),
+    $snapshot: integer().generatedAlwaysAsIdentity({ name: snapshotSequenceName }),
     $op: text().notNull(),
     $timestamp: timestamp({ withTimezone: true }).notNull().defaultNow(),
   });

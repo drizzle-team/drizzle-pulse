@@ -5,7 +5,7 @@
 Type-safe realtime SDK shared by server, client, React, and embedded layers.
 
 - root side: `pulse`, `PulseTable`, `isPulseTable`, `getPulseTableConfig` — the collection entity, exported once per table from schema files
-- server side: `PulseBuilder` (seeded via `PulseTable.query(fn?)`), `createPulseRegistry`, `expose`, events-table convention resolver (`resolveEventsTable`, `emitEventsTableDdl`)
+- server side: `PulseBuilder` (seeded via `PulseTable.query(fn?)`), `createPulseRegistry`, `expose`, events-table convention resolver (`buildEventsTable`, `emitEventsTableDdl`)
 - client side: `createPulseClient`, `PulseQuery`
 - React side: `usePulseQuery`
 - embedded side: `createPulseClient` (in-process, runtime-backed), `PulseCollection`
@@ -59,7 +59,7 @@ Server (derive queries outside the schema file):
 
   expose(registry, config)
     → RealtimeRuntime resolves each source table's events table via
-      resolveEventsTable(sourceTable, { eventsSchema }) — no hand-declared
+      buildEventsTable(sourceTable, { eventsSchema }) — no hand-declared
       events tables, no registry-stored eventsTable field
     → runtime.start() runs the aggregating startup guard (publication
       exists, membership, events tables exist, REPLICA IDENTITY FULL,
@@ -89,7 +89,7 @@ React:
 
 ```ts
 // drizzle-pulse (root)
-pulse, PulseTable, isPulseTable, getPulseTableConfig
+pulse, PulseTable, isPulseTable, getPulseTableConfig, buildEventsTable
 QueryDescriptor
 type ColumnOperators, ResolvedPulseQuery, WhereClause, WhereCondition
 type RealtimeEvent, RealtimeInsertEvent, RealtimeUpdateEvent, RealtimeDeleteEvent
@@ -116,7 +116,7 @@ RealtimeRuntime
 RealtimeService
 SubscriptionManager
 buildSelectQuery
-resolveEventsTable, getEventsTableName, DEFAULT_EVENTS_SCHEMA, emitEventsTableDdl
+buildEventsTable, getEventsTableName, DEFAULT_EVENTS_SCHEMA, emitEventsTableDdl
 type ExposeConfig, WalListenerConfig
 
 // drizzle-pulse/client/embedded
