@@ -15,11 +15,25 @@ type FetchCall = {
   body: unknown;
 };
 
+type PullEntry = {
+  key: string;
+  queryName: string;
+  args: { status?: string };
+};
+
+// A queued item is either a ready Response or a factory that builds one from the parsed
+// request body — the latter lets /pull responses be keyed by the client-chosen queryKey,
+// which is random and unknown to the test up front.
+type QueuedResponse = Response | ((body: { subscriptions: PullEntry[] }) => Response);
+
 function serialize(value: unknown): string {
   return SuperJSON.stringify(value);
 }
 
-function createQueuedFetch(responses: Response[]): { fetchImpl: typeof fetch; calls: FetchCall[] } {
+function createQueuedFetch(responses: QueuedResponse[]): {
+  fetchImpl: typeof fetch;
+  calls: FetchCall[];
+} {
   const queue = [...responses];
   const calls: FetchCall[] = [];
 
@@ -34,7 +48,7 @@ function createQueuedFetch(responses: Response[]): { fetchImpl: typeof fetch; ca
       const bodyText = typeof init?.body === 'string' ? init.body : '';
       const body = bodyText.length > 0 ? JSON.parse(bodyText) : null;
       calls.push({ url, body });
-      return next;
+      return typeof next === 'function' ? next(body) : next;
     },
     { preconnect() {} },
   ) satisfies typeof fetch;
@@ -51,22 +65,31 @@ function createTestClient(fetchImpl: typeof fetch) {
   });
 }
 
-function makePullResponse(results: Record<string, PullResponse<TestRow, unknown>>): Response {
-  return new Response(serialize({ results }), { status: 200 });
+// Build a batched /pull response by mapping each self-describing entry to a result, keyed by
+// the entry's client-side queryKey.
+function pullResponder(
+  resultFor: (entry: PullEntry) => PullResponse<TestRow, unknown>,
+): (body: { subscriptions: PullEntry[] }) => Response {
+  return (body) => {
+    const results: Record<string, PullResponse<TestRow, unknown>> = {};
+    for (const entry of body.subscriptions) {
+      results[entry.key] = resultFor(entry);
+    }
+    return new Response(serialize({ results }), { status: 200 });
+  };
 }
 
 describe('PulseQuery runtime characterization', () => {
-  test('subscribe initializes runtime state', async () => {
+  test('subscribe initializes runtime state and sends only {queryName, args}', async () => {
     const subscribeResponse = new Response(
       serialize({
-        subscriptionId: 'sub-1',
         rows: [
           { $pk: 1, label: 'a' },
           { $pk: 2, label: 'b' },
         ],
         rangeStart: 1,
         rangeEnd: 2,
-        snapshot: 4,
+        snapshot: 'e:4',
         order: 'asc',
         limit: 2,
         hasMore: true,
@@ -88,20 +111,60 @@ describe('PulseQuery runtime characterization', () => {
       { $pk: 2, label: 'b' },
     ]);
     expect(calls[0]?.body).toEqual({
-      clientId: expect.any(String),
       queryName: 'ordersByStatus',
       args: { status: 'requested' },
     });
   });
 
+  test('an error pull result sets error state, keeps the cursor, and recovers on the next poll', async () => {
+    const subscribeResponse = new Response(
+      serialize({
+        rows: [{ $pk: 1, label: 'a' }],
+        rangeStart: 1,
+        rangeEnd: 1,
+        snapshot: 'e:5',
+        order: 'asc',
+        limit: null,
+        hasMore: false,
+      }),
+      { status: 200 },
+    );
+    const pullError = (body: { subscriptions: PullEntry[] }) => {
+      const results: Record<string, unknown> = {};
+      for (const entry of body.subscriptions) results[entry.key] = { error: 'query_resolution_failed' };
+      return new Response(serialize({ results }), { status: 200 });
+    };
+    const pullOk = pullResponder(() => ({
+      events: [{ op: 'insert', row: { $pk: 2, label: 'b' }, pk: 2 }],
+      rangeStart: 1,
+      rangeEnd: 2,
+      snapshot: 'e:6',
+    }));
+
+    const { fetchImpl } = createQueuedFetch([subscribeResponse, pullError, pullOk]);
+    const core = new PulseQuery(createTestClient(fetchImpl).ordersByStatus({}));
+
+    await core.subscribe();
+    await core.poll();
+
+    expect(core.getState().error?.message).toBe('query_resolution_failed');
+    expect(core.getState().data).toEqual([{ $pk: 1, label: 'a' }]);
+
+    await core.poll();
+
+    expect(core.getState().data).toEqual([
+      { $pk: 1, label: 'a' },
+      { $pk: 2, label: 'b' },
+    ]);
+  });
+
   test('applyEvents follows insert/update/delete merge intent', async () => {
     const subscribeResponse = new Response(
       serialize({
-        subscriptionId: 'sub-2',
         rows: [{ $pk: 2, label: 'b' }],
         rangeStart: 2,
         rangeEnd: 2,
-        snapshot: 5,
+        snapshot: 'e:5',
         order: 'asc',
         limit: 10,
       }),
@@ -151,17 +214,16 @@ describe('PulseQuery runtime characterization', () => {
     expect(core.getState().data).toEqual([{ $pk: 1, label: 'a2' }]);
   });
 
-  test('loadMore appends unseen rows and dedupes existing rows', async () => {
+  test('loadMore appends unseen rows, dedupes, and sends the stateless window', async () => {
     const subscribeResponse = new Response(
       serialize({
-        subscriptionId: 'sub-3',
         rows: [
           { $pk: 1, label: 'a' },
           { $pk: 2, label: 'b' },
         ],
         rangeStart: 1,
         rangeEnd: 2,
-        snapshot: 8,
+        snapshot: 'e:8',
         order: 'asc',
         limit: 2,
       }),
@@ -189,8 +251,10 @@ describe('PulseQuery runtime characterization', () => {
 
     expect(calls[1]?.url).toBe('/api/realtime/load-more');
     expect(calls[1]?.body).toEqual({
-      clientId: expect.any(String),
-      subscriptionId: 'sub-3',
+      queryName: 'ordersByStatus',
+      args: {},
+      rangeStart: 1,
+      rangeEnd: 2,
       cursor: 2,
     });
     expect(core.getState().data).toEqual([
@@ -201,35 +265,32 @@ describe('PulseQuery runtime characterization', () => {
     expect(core.getState().hasMore).toBe(false);
   });
 
-  test('poll handles reset from batched pull response', async () => {
+  test('poll handles reset from batched pull response and echoes the cursor token', async () => {
     const subscribeResponse = new Response(
       serialize({
-        subscriptionId: 'sub-4',
-        clientId: 'client-1',
         rows: [{ $pk: 10, label: 'x' }],
         rangeStart: 10,
         rangeEnd: 10,
-        snapshot: 1,
+        snapshot: 'e:1',
         order: 'asc',
         limit: null,
+        hasMore: false,
       }),
       { status: 200 },
     );
 
-    const pullReset = makePullResponse({
-      'sub-4': {
-        events: [],
-        rows: [{ $pk: 11, label: 'y' }],
-        rangeStart: 11,
-        rangeEnd: 11,
-        snapshot: 3,
-        reset: true,
-        reason: 'snapshot',
-        order: 'asc',
-        limit: null,
-        hasMore: false,
-      },
-    });
+    const pullReset = pullResponder(() => ({
+      events: [],
+      rows: [{ $pk: 11, label: 'y' }],
+      rangeStart: 11,
+      rangeEnd: 11,
+      snapshot: 'e:3',
+      reset: true,
+      reason: 'snapshot',
+      order: 'asc',
+      limit: null,
+      hasMore: false,
+    }));
 
     const { fetchImpl, calls } = createQueuedFetch([subscribeResponse, pullReset]);
     const core = new PulseQuery(createTestClient(fetchImpl).ordersByStatus({}));
@@ -242,55 +303,63 @@ describe('PulseQuery runtime characterization', () => {
       '/api/realtime/pull',
     ]);
     expect(calls[1]?.body).toEqual({
-      clientId: expect.any(String),
-      subscriptions: [{ subscriptionId: 'sub-4', snapshot: 1 }],
+      subscriptions: [
+        {
+          key: expect.any(String),
+          queryName: 'ordersByStatus',
+          args: {},
+          rangeStart: 10,
+          rangeEnd: 10,
+          hasMore: false,
+          snapshot: 'e:1',
+        },
+      ],
     });
     expect(core.getState().data).toEqual([{ $pk: 11, label: 'y' }]);
   });
 
-  test('two active queries share one pull request', async () => {
+  test('two active queries share one pull request, keyed by queryKey', async () => {
     const subscribeOne = new Response(
       serialize({
-        subscriptionId: 'sub-a',
-        clientId: 'client-1',
         rows: [{ $pk: 1, label: 'a' }],
         rangeStart: 1,
         rangeEnd: 1,
-        snapshot: 1,
+        snapshot: 'e:1',
         order: 'asc',
         limit: null,
+        hasMore: false,
       }),
       { status: 200 },
     );
 
     const subscribeTwo = new Response(
       serialize({
-        subscriptionId: 'sub-b',
-        clientId: 'client-1',
         rows: [{ $pk: 2, label: 'b' }],
         rangeStart: 2,
         rangeEnd: 2,
-        snapshot: 4,
+        snapshot: 'e:4',
         order: 'asc',
         limit: null,
+        hasMore: false,
       }),
       { status: 200 },
     );
 
-    const pullResponse = makePullResponse({
-      'sub-a': {
-        events: [{ op: 'insert', row: { $pk: 3, label: 'a2' }, pk: 3 }],
-        rangeStart: 1,
-        rangeEnd: 3,
-        snapshot: 2,
-      },
-      'sub-b': {
-        events: [{ op: 'insert', row: { $pk: 5, label: 'b2' }, pk: 5 }],
-        rangeStart: 2,
-        rangeEnd: 5,
-        snapshot: 5,
-      },
-    });
+    const pullResponse = pullResponder((entry) =>
+      entry.args.status === 'requested'
+        ? {
+            events: [{ op: 'insert', row: { $pk: 3, label: 'a2' }, pk: 3 }],
+            rangeStart: 1,
+            rangeEnd: 3,
+            snapshot: 'e:2',
+          }
+        : {
+            events: [{ op: 'insert', row: { $pk: 5, label: 'b2' }, pk: 5 }],
+            rangeStart: 2,
+            rangeEnd: 5,
+            snapshot: 'e:5',
+          },
+    );
 
     const { fetchImpl, calls } = createQueuedFetch([subscribeOne, subscribeTwo, pullResponse]);
     const client = createTestClient(fetchImpl);
@@ -306,13 +375,11 @@ describe('PulseQuery runtime characterization', () => {
       '/api/realtime/subscribe',
       '/api/realtime/pull',
     ]);
-    expect(calls[2]?.body).toEqual({
-      clientId: expect.any(String),
-      subscriptions: expect.arrayContaining([
-        { subscriptionId: 'sub-a', snapshot: 1 },
-        { subscriptionId: 'sub-b', snapshot: 4 },
-      ]),
-    });
+    const pullBody = calls[2]?.body as { subscriptions: PullEntry[] };
+    expect(pullBody.subscriptions).toHaveLength(2);
+    expect(pullBody.subscriptions.map((s) => s.args)).toEqual(
+      expect.arrayContaining([{ status: 'requested' }, { status: 'accepted' }]),
+    );
     expect(first.getState().data).toEqual([
       { $pk: 1, label: 'a' },
       { $pk: 3, label: 'a2' },
@@ -326,11 +393,10 @@ describe('PulseQuery runtime characterization', () => {
   test('reset restores initial state', async () => {
     const subscribeResponse = new Response(
       serialize({
-        subscriptionId: 'sub-5',
         rows: [{ $pk: 1, label: 'a' }],
         rangeStart: 1,
         rangeEnd: 1,
-        snapshot: 1,
+        snapshot: 'e:1',
         order: 'asc',
         limit: null,
       }),
@@ -359,12 +425,10 @@ describe('PulseQuery runtime characterization', () => {
     });
     const subscribeResponse = new Response(
       serialize({
-        subscriptionId: 'sub-destroy',
-        clientId: 'client-1',
         rows: [{ $pk: 1, label: 'a' }],
         rangeStart: 1,
         rangeEnd: 1,
-        snapshot: 1,
+        snapshot: 'e:1',
       }),
       { status: 200 },
     );
@@ -389,38 +453,6 @@ describe('PulseQuery runtime characterization', () => {
       isLoadingMore: false,
       hasMore: false,
       error: null,
-    });
-  });
-
-  test('destroy() notifies the server to release the subscription', async () => {
-    const subscribeResponse = new Response(
-      serialize({
-        subscriptionId: 'sub-destroy-notify',
-        rows: [{ $pk: 1, label: 'a' }],
-        rangeStart: 1,
-        rangeEnd: 1,
-        snapshot: 1,
-        order: 'asc',
-        limit: null,
-      }),
-      { status: 200 },
-    );
-    const unsubscribeResponse = new Response(serialize({ ok: true }), { status: 200 });
-
-    const { fetchImpl, calls } = createQueuedFetch([subscribeResponse, unsubscribeResponse]);
-    const core = new PulseQuery(createTestClient(fetchImpl).ordersByStatus({}));
-
-    await core.subscribe();
-    core.destroy();
-
-    // notifyUnsubscribe() is fire-and-forget; flush the microtask queue.
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(calls[1]?.url).toBe('/api/realtime/unsubscribe');
-    expect(calls[1]?.body).toEqual({
-      clientId: expect.any(String),
-      subscriptionId: 'sub-destroy-notify',
     });
   });
 });

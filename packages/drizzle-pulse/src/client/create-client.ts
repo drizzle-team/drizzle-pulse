@@ -1,10 +1,10 @@
+import type { PullSubscriptionRequest } from '../shared/protocol-types.js';
 import { QueryDescriptor } from '../types.js';
-import { deserializeResponse } from './superjson.js';
+import { createHttpTransport, type PulseQueryTransport } from './transport.js';
 
-type PullSubscription = {
-  subscriptionId: string;
-  snapshot: number;
-};
+// The self-describing per-query pull state; `key` is injected by the PullClient from the
+// registration key, so a handle only supplies the query identity + its current window.
+type PullSubscription = Omit<PullSubscriptionRequest, 'key'>;
 
 type PullSubscriberHandle = {
   getSubscriptionState: () => PullSubscription | null;
@@ -12,31 +12,17 @@ type PullSubscriberHandle = {
   onPullError: (error: Error) => void;
 };
 
-type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
-
-function createClientId() {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-
-  return `pulse-client-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
+// Batches the live queries registered against one client into a single /pull over an
+// interval. The network hop itself lives in the transport; this only coordinates batching.
 export class PullClient {
-  readonly clientId = createClientId();
-
   private readonly handles = new Map<string, PullSubscriberHandle>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private inFlight: Promise<void> | null = null;
-  readonly fetch: Fetch;
 
   constructor(
-    private readonly endpoint: string,
-    fetchImpl = fetch,
+    private readonly transport: PulseQueryTransport,
     private readonly pollIntervalMs = 1000,
-  ) {
-    this.fetch = (input, init) => fetchImpl(input, init);
-  }
+  ) {}
 
   register(key: string, handle: PullSubscriberHandle) {
     this.handles.set(key, handle);
@@ -53,16 +39,16 @@ export class PullClient {
       return this.inFlight;
     }
 
-    const subscriptions: PullSubscription[] = [];
-    const handleBySubscriptionId = new Map<string, PullSubscriberHandle>();
-    for (const handle of this.handles.values()) {
+    // Each entry is keyed by the client-side registration key; the batched /pull response is
+    // keyed by that same key so results route back without any server subscription id.
+    const subscriptions: PullSubscriptionRequest[] = [];
+    for (const [key, handle] of this.handles) {
       const state = handle.getSubscriptionState();
       if (!state) {
         continue;
       }
 
-      subscriptions.push(state);
-      handleBySubscriptionId.set(state.subscriptionId, handle);
+      subscriptions.push({ key, ...state });
     }
 
     if (subscriptions.length === 0) {
@@ -71,34 +57,20 @@ export class PullClient {
 
     this.inFlight = (async () => {
       try {
-        const response = await this.fetch(`${this.endpoint}/pull`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            clientId: this.clientId,
-            subscriptions,
-          } satisfies {
-            clientId: string;
-            subscriptions: PullSubscription[];
-          }),
-          credentials: 'include',
-        });
-
-        if (!response.ok) {
-          throw new Error(`Pull failed: ${response.status}`);
-        }
-
-        const result = deserializeResponse<{
-          results: Record<string, unknown>;
-        }>(await response.text());
+        const results = await this.transport.pull(subscriptions);
         for (const subscription of subscriptions) {
-          const handle = handleBySubscriptionId.get(subscription.subscriptionId);
-          const pullResult = result.results[subscription.subscriptionId];
+          const handle = this.handles.get(subscription.key);
+          const pullResult = results[subscription.key];
           if (!handle || pullResult === undefined) {
             continue;
           }
 
-          handle.applyPullResult(pullResult);
+          try {
+            handle.applyPullResult(pullResult);
+          } catch (error) {
+            // Per-handle isolation: one query's apply failure must not error siblings.
+            handle.onPullError(error instanceof Error ? error : new Error(String(error)));
+          }
         }
       } catch (error) {
         const normalizedError = error instanceof Error ? error : new Error(String(error));
@@ -143,14 +115,15 @@ export function createPulseClient<TClient>(config: {
   pollIntervalMs?: number;
 }): TClient {
   const fetchImpl = config.fetchImpl ?? fetch;
-  const pullClient = new PullClient(config.url, fetchImpl, config.pollIntervalMs);
+  const transport = createHttpTransport(config.url, fetchImpl);
+  const pullClient = new PullClient(transport, config.pollIntervalMs);
 
   return new Proxy(
     {},
     {
       get(_target, prop: string) {
         return (args?: Record<string, unknown>) =>
-          new QueryDescriptor(prop, args ?? {}, config.url, pullClient);
+          new QueryDescriptor(prop, args ?? {}, config.url, transport, pullClient);
       },
     },
   ) as TClient;

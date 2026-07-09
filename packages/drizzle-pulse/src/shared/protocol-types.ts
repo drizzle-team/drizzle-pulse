@@ -1,34 +1,42 @@
 export type SubscribeRequest = {
-  clientId?: string;
   queryName: string;
   args: unknown;
-  subscriptionId?: string;
 };
 
 export type SubscribeResponse<T> = {
-  clientId: string;
-  subscriptionId: string;
   rows: T[];
   rangeStart: unknown | null;
   rangeEnd: unknown | null;
-  snapshot: number;
+  // Opaque epoch:snapshot cursor token — echo it back verbatim on the next pull.
+  snapshot: string;
   order: 'asc' | 'desc';
   limit: number | null;
   hasMore: boolean;
 };
 
+// Self-describing pull entry: the server holds no per-subscription state, so every pull
+// carries the query identity + the client's current window. `key` is the client-chosen
+// queryKey the response is keyed by; order/limit are NOT sent (server re-derives them from
+// resolve()); rangeStart/rangeEnd only narrow the window; snapshot is the cursor token.
 export type PullSubscriptionRequest = {
-  subscriptionId?: string;
-  snapshot?: number;
+  key: string;
+  queryName: string;
+  args: unknown;
+  rangeStart?: unknown | null;
+  rangeEnd?: unknown | null;
+  hasMore?: boolean;
+  snapshot?: string;
 };
 export type PullRequest = {
-  clientId?: string;
   subscriptions?: PullSubscriptionRequest[];
 };
 
+// `cursor` is a PK pagination cursor — deliberately distinct from pull's epoch:snapshot token.
 export type LoadMoreRequest = {
-  clientId?: string;
-  subscriptionId?: string;
+  queryName: string;
+  args: unknown;
+  rangeStart?: unknown | null;
+  rangeEnd?: unknown | null;
   cursor?: unknown;
 };
 
@@ -39,21 +47,12 @@ export type LoadMoreResponse<T> = {
   hasMore: boolean;
 };
 
-export type UnsubscribeRequest = {
-  clientId?: string;
-  subscriptionId?: string;
-};
-
-export type UnsubscribeResponse = {
-  ok: true;
-};
-
 export type PullIncrementalResponse<TEvent> = {
   reset?: false;
   events: TEvent[];
   rangeStart: unknown | null;
   rangeEnd: unknown | null;
-  snapshot: number;
+  snapshot: string;
 };
 
 export type PullResetResponse<TRow, TEvent> = {
@@ -63,7 +62,7 @@ export type PullResetResponse<TRow, TEvent> = {
   rows: TRow[];
   rangeStart: unknown | null;
   rangeEnd: unknown | null;
-  snapshot: number;
+  snapshot: string;
   order: 'asc' | 'desc';
   limit: number | null;
   hasMore: boolean;

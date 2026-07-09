@@ -1,10 +1,6 @@
 import { getColumns } from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
-import {
-  buildEventsTable,
-  DEFAULT_EVENTS_SCHEMA,
-  getEventsTableName,
-} from 'drizzle-pulse/server';
+import { buildEventsTable, DEFAULT_EVENTS_SCHEMA, getEventsTableName } from './events-table-resolver.js';
 
 function quoteIdentifier(identifier: string): string {
   return `"${identifier.replace(/"/g, '""')}"`;
@@ -51,9 +47,11 @@ function renderColumnDdl(column: PgColumn): string {
 }
 
 /**
- * Test-only utility: renders `CREATE SCHEMA`/`CREATE TABLE` for an events table strictly
- * from `buildEventsTable`'s output. Production events-table DDL is drizzle-kit's job; this
- * exists so the integration harness can create events tables without hand-mirrored SQL.
+ * Renders the recreate script for a source table's events table strictly from
+ * {@link buildEventsTable}'s output: `CREATE SCHEMA IF NOT EXISTS`, `DROP TABLE IF EXISTS`,
+ * then `CREATE TABLE`. The runtime executes these at boot ({@link RealtimeRuntime.provision}
+ * / `start`) and hashes their joined text to detect events-table shape divergence — the
+ * string IS the canonical form, so drizzle-kit derives byte-identical DDL.
  */
 export function emitEventsTableDdl(
   sourceTable: PgTable,
@@ -64,12 +62,14 @@ export function emitEventsTableDdl(
   const eventsTable = buildEventsTable(sourceTable, options);
   const columns = Object.values(getColumns(eventsTable));
 
+  const qualifiedName = `${quoteIdentifier(eventsSchema)}.${quoteIdentifier(tableName)}`;
   const createSchema = `CREATE SCHEMA IF NOT EXISTS ${quoteIdentifier(eventsSchema)}`;
+  const dropTable = `DROP TABLE IF EXISTS ${qualifiedName}`;
   const createTable = [
-    `CREATE TABLE ${quoteIdentifier(eventsSchema)}.${quoteIdentifier(tableName)} (`,
+    `CREATE TABLE ${qualifiedName} (`,
     columns.map((column) => `\t${renderColumnDdl(column)}`).join(',\n'),
     ')',
   ].join('\n');
 
-  return [createSchema, createTable];
+  return [createSchema, dropTable, createTable];
 }

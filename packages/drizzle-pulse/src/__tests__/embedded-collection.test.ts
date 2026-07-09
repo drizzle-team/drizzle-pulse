@@ -1,98 +1,57 @@
 import { describe, expect, test } from 'bun:test';
-import { createPulseClient, PulseCollection } from '../client/embedded/index.js';
-import type { PulseSourceDb } from '../server/pulse-sql.js';
+import { createPulseClient } from '../client/embedded/index.js';
 import { WalEventEmitter } from '../server/wal-event-emitter.js';
-import { makeMockSourceDb, makeRegistryStub, makeResolvedQuery } from './mock-runtime.js';
+import { makeRegistryStub, makeResolvedQuery } from './mock-runtime.js';
 
 // ---------------------------------------------------------------------------
-// Minimal inline fixtures — no DB required. Real WAL/rebaseline scenarios are
-// covered by the integration suite and resilience.test.ts; this file covers the
-// user-facing error paths of the embedded client only.
+// No DB required: these cover the embedded client's user-facing error paths.
+// The initial load and live pulls run against a mock SDK handler; real WAL push
+// behavior is covered by the integration suite.
 // ---------------------------------------------------------------------------
 
-const mockSourceDb = makeMockSourceDb();
+type HandlerResult = { status: number; body: unknown };
 
-// Baseline SELECT blocks until release() so a dispose can race the in-flight handshake.
-function makeBlockingSourceDb(rows: Record<string, unknown>[] = []): {
-  db: PulseSourceDb;
-  release: () => void;
-} {
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const resultP = gate.then(() => rows);
-  const dynamicQuery: any = {
-    $dynamic() {
-      return dynamicQuery;
-    },
-    orderBy() {
-      return resultP;
-    },
-    limit() {
-      return resultP;
-    },
-  };
-  const db = {
-    select() {
-      return {
-        from() {
-          return {
-            where() {
-              return {
-                $dynamic() {
-                  return dynamicQuery;
-                },
-              };
-            },
-          };
-        },
-      };
-    },
-  } as unknown as PulseSourceDb;
-  return { db, release };
-}
-
-function makeMockSourceDbThatThrows(error: Error): PulseSourceDb {
-  const dynamicQuery: any = {
-    $dynamic() {
-      return dynamicQuery;
-    },
-    orderBy() {
-      return Promise.reject(error);
-    },
-    limit() {
-      return Promise.reject(error);
-    },
-  };
+function okSubscribeBody(rows: Record<string, unknown>[] = []) {
   return {
-    select() {
-      return {
-        from() {
-          return {
-            where() {
-              return {
-                $dynamic() {
-                  return dynamicQuery;
-                },
-              };
-            },
-          };
-        },
-      };
-    },
-  } as unknown as PulseSourceDb;
+    rows,
+    rangeStart: null,
+    rangeEnd: null,
+    snapshot: 'e:0',
+    order: 'asc' as const,
+    limit: null,
+    hasMore: false,
+  };
 }
 
-function makeMockRuntime(opts: { isRunning?: boolean; hasTransform?: boolean } = {}) {
+function makeMockHandlers(
+  overrides: {
+    subscribe?: (req: unknown, auth: unknown) => Promise<HandlerResult> | HandlerResult;
+  } = {},
+) {
+  return {
+    subscribe: overrides.subscribe ?? (async () => ({ status: 200, body: okSubscribeBody() })),
+    pull: async () => ({ status: 200, body: { results: {} } }),
+    loadMore: async () => ({
+      status: 200,
+      body: { rows: [], rangeStart: null, rangeEnd: null, hasMore: false },
+    }),
+  };
+}
+
+function makeMockRuntime(
+  opts: {
+    isRunning?: boolean;
+    hasTransform?: boolean;
+    handlers?: ReturnType<typeof makeMockHandlers>;
+  } = {},
+) {
   const walEventEmitter = new WalEventEmitter();
   const registryStub = makeRegistryStub({ hasTransform: opts.hasTransform ?? false });
   const resolved = makeResolvedQuery();
   return {
     isRunning: opts.isRunning ?? true,
     walEventEmitter,
-    lastPersistedSnapshot: 0,
-    sourceDb: mockSourceDb,
+    handlers: opts.handlers ?? makeMockHandlers(),
     registry: {
       getPulseQuery: () => registryStub,
       resolve: () => resolved,
@@ -123,9 +82,12 @@ describe('embedded client — user-facing error paths', () => {
     await expect((client as any).nope()).rejects.toThrow('Unknown query: "nope"');
   });
 
-  test('startHandshake() rejects when the baseline SELECT fails and the tap listener is detached', async () => {
-    const runtime = makeMockRuntime();
-    runtime.sourceDb = makeMockSourceDbThatThrows(new Error('DB connection failed'));
+  test('the factory rejects when the initial load fails and the change signal is detached', async () => {
+    const runtime = makeMockRuntime({
+      handlers: makeMockHandlers({
+        subscribe: async () => ({ status: 500, body: { error: 'DB connection failed' } }),
+      }),
+    });
 
     let unsubCount = 0;
     const realSubscribe = runtime.walEventEmitter.subscribe.bind(runtime.walEventEmitter);
@@ -137,39 +99,37 @@ describe('embedded client — user-facing error paths', () => {
       };
     };
 
-    const collection = new PulseCollection(runtime as any, makeResolvedQuery());
-
-    await expect(collection.startHandshake()).rejects.toThrow('DB connection failed');
-    // Tap detached so the buffer can't grow unbounded, and a later dispose() is safe.
-    expect(unsubCount).toBe(1);
-    expect(() => collection.dispose()).not.toThrow();
-    expect(unsubCount).toBe(1);
-  });
-
-  test('the factory promise rejects when the baseline SELECT fails', async () => {
-    const runtime = makeMockRuntime();
-    runtime.sourceDb = makeMockSourceDbThatThrows(new Error('DB connection failed'));
     const client = createPulseClient(runtime as any);
-
     await expect((client as any).orders()).rejects.toThrow('DB connection failed');
+    // dispose() ran on the failed load, detaching the WAL signal.
+    expect(unsubCount).toBe(1);
   });
 
-  test('the factory promise rejects when the runtime stops mid-handshake', async () => {
-    const { db, release } = makeBlockingSourceDb();
+  test('the factory rejects when the runtime stops mid-load', async () => {
+    let releaseSubscribe!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseSubscribe = resolve;
+    });
     const stopListeners: Array<() => void> = [];
-    const runtime = makeMockRuntime();
-    runtime.sourceDb = db;
+
+    const runtime = makeMockRuntime({
+      handlers: makeMockHandlers({
+        subscribe: async () => {
+          await gate;
+          return { status: 200, body: okSubscribeBody() };
+        },
+      }),
+    });
     runtime.onStop = (listener: () => void) => {
       stopListeners.push(listener);
       return () => {};
     };
-    const client = createPulseClient(runtime as any);
 
+    const client = createPulseClient(runtime as any);
     const pending = (client as any).orders();
-    // Simulate runtime.stop() broadcasting while the baseline SELECT is in flight:
-    // PulseClient.disposeAll() disposes the not-yet-ready collection.
+    // Simulate runtime.stop() broadcasting while the initial load is in flight.
     for (const listener of stopListeners) listener();
-    release();
+    releaseSubscribe();
 
     await expect(pending).rejects.toThrow(/disposed before the initial sync completed/);
   });

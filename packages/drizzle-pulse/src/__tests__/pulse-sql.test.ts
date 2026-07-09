@@ -26,11 +26,9 @@ function compileWhere(where: WhereClause): { sql: string; params: unknown[] } {
   return { sql: compiled.sql, params: compiled.params };
 }
 
-// The full where-operator equivalence matrix (embedded vs HTTP, across the
-// full operator set) is proven against live PostgreSQL in
-// packages/integration-tests/src/consistency-oracle.test.ts. The exact-SQL-string
-// cases below are kept only as a smoke check for the compiler, not as the
-// source of truth for operator semantics.
+// Embedded and HTTP now share one pull pipeline, so operator semantics have a
+// single implementation; the exact-SQL-string cases below are a smoke check for
+// the compiler, not the source of truth for operator semantics.
 describe('pulse-sql equivalence-sensitive behavior', () => {
   test('selected-column allowlist rejects filters on excluded columns', () => {
     const selectedColumnNames = new Set(['id', 'status']);

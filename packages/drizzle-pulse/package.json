@@ -52,6 +52,10 @@
       "types": "./dist/server/index.d.ts",
       "default": "./dist/server/index.js"
     },
+    "./server/router": {
+      "types": "./dist/server/router.d.ts",
+      "default": "./dist/server/router.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -69,10 +73,14 @@
   },
   "peerDependencies": {
     "drizzle-orm": "^1.0.0-rc.4",
+    "hono": "^4.6.0",
     "react": ">=18.0.0",
     "zod": "^4.0.0"
   },
   "peerDependenciesMeta": {
+    "hono": {
+      "optional": true
+    },
     "react": {
       "optional": true
     }

@@ -16,9 +16,6 @@
     "superjson": "^2.2.6",
     "zod": "^4.3.6"
   },
-  "optionalDependencies": {
-    "drizzle-kit": "file:../../../drizzle-orm/drizzle-kit/package.tgz"
-  },
   "devDependencies": {
     "@types/node": "^20.11.30",
     "@types/pg": "^8.11.0",

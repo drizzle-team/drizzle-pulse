@@ -17,8 +17,22 @@ import {
   teardownTestSuiteForFixture,
 } from './helpers/test-harness.js';
 
+// Push-driven updates flow through query.poll() (async), so state converges a scheduling
+// beat after processDbOperations resolves — poll for it rather than assert synchronously.
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 2000,
+  pollIntervalMs = 20,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(`waitFor timed out after ${timeoutMs}ms`);
+    await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
+  }
+}
+
 // ---------------------------------------------------------------------------
-// SC3 + SC4: main suite
+// Main suite — facade behavior over the direct transport.
 // ---------------------------------------------------------------------------
 
 describe('Embedded Collection', () => {
@@ -34,7 +48,12 @@ describe('Embedded Collection', () => {
     .args(fixture.schemas.ordersByStatusArgs)
     .order('asc')
     .query((ctx) => ctx.query({ status: ctx.args.status }));
-  const registry = createPulseRegistry({ ordersByStatus });
+  const ordersByStatusLimited = pulse(orders)
+    .args(fixture.schemas.ordersByStatusArgs)
+    .order('asc')
+    .limit(2)
+    .query((ctx) => ctx.query({ status: ctx.args.status }));
+  const registry = createPulseRegistry({ ordersByStatus, ordersByStatusLimited });
 
   beforeAll(async () => {
     const setup = await setupTestSuiteForFixture(fixture, registry);
@@ -53,94 +72,55 @@ describe('Embedded Collection', () => {
     await insertTestUser(db, `driver_${randomUUID().slice(0, 8)}`);
   });
 
-  // SC3 — A row committed after the tap-first baseline snapshot read appears exactly
-  // once in list() — never lost, never double-applied.
-  //
-  // Both operations use processDbOperations so we wait for each WAL event to
-  // be written to the events table before proceeding. That guarantees:
-  //   • sinceSnapshot for the concurrent insert is correctly set to the
-  //     pre-insert's snapshot, so processDbOperations waits specifically for
-  //     the concurrent row's WAL event (not the pre-insert's).
-  //   • By the time processDbOperations resolves, applyTapPayload has already
-  //     run (buffer mode if baseline is still in flight, live mode if baseline
-  //     already completed). The $pk backstop prevents any double-counting in
-  //     the buffer case.
-  test('mid-baseline insert appears exactly once in list()', async () => {
-    // Pre-insert Row A via processDbOperations so its WAL event is fully
-    // processed (snapshot = 1) before we create the collection.
+  // A row committed while the collection is being created appears exactly once — the
+  // baseline SELECT and the catch-up/live pull dedupe by $pk.
+  test('a concurrently-inserted row appears exactly once in list()', async () => {
     await processDbOperations([
-      db.insert(orders).values({
-        driverId: 1,
-        pickup: 'SC3 Pre Pickup',
-        dropoff: 'SC3 Pre Dropoff',
-        price: 10,
-        status: 'accepted',
-      }),
+      db
+        .insert(orders)
+        .values({ driverId: 1, pickup: 'Pre', dropoff: 'Pre', price: 10, status: 'accepted' }),
     ]);
 
     const client = createPulseClient(runtime);
-    // baseline snapshot = lastPersistedSnapshot = 1 (Row A's event processed)
-    // Tap listener registered synchronously by the factory call; baseline SELECT is now
-    // in flight — the promise is deliberately NOT awaited until after the racing insert.
     const collectionPromise = client.ordersByStatus({ status: 'accepted' });
 
-    // Insert Row B concurrently. processDbOperations now starts with
-    // sinceSnapshot = 1 and waits for snapshot >= 2, which is Row B's event.
-    // By the time it resolves, the tap has dispatched Row B: either buffered
-    // (baseline still running) or applied live (baseline already done).
     const { results } = await processDbOperations([
       db
         .insert(orders)
-        .values({
-          driverId: 1,
-          pickup: 'SC3 Race Pickup',
-          dropoff: 'SC3 Race Dropoff',
-          price: 20,
-          status: 'accepted',
-        })
+        .values({ driverId: 1, pickup: 'Race', dropoff: 'Race', price: 20, status: 'accepted' })
         .returning(),
     ]);
     const [raceInserted] = results[0] as Array<{ id: number }>;
 
     const collection = await collectionPromise;
+    await waitFor(() => collection.list().length === 2);
 
-    const rows = collection.list();
-    const ids = rows.map((r) => r.id as number);
-    expect(ids).toHaveLength(2);
+    const ids = collection.list().map((r) => r.id as number);
     expect(new Set(ids).size).toBe(2); // no duplicate of the race-inserted row
     expect(ids).toContain(raceInserted!.id);
 
     collection.dispose();
   });
 
-  // SC4 — Post-baseline WAL changes reach onChange synchronously, once per
-  // applied WAL change, in WAL order, with state === list() (same reference).
-  test('post-baseline INSERT/UPDATE/DELETE reach onChange synchronously in WAL order', async () => {
+  // Insert into the source table → onChange fires (through the WAL signal → poll), with no
+  // polling interval anywhere. Covers insert/update/delete op shapes and state === list().
+  test('push-shaped INSERT/UPDATE/DELETE reach onChange without any interval', async () => {
     const client = createPulseClient(runtime);
     const collection = await client.ordersByStatus({ status: 'accepted' });
 
-    // processDbOperations waits for the events-table row, which is written
-    // before walEventEmitter.emit() dispatches synchronously — so onChange
-    // has already fired by the time processDbOperations resolves.
     const changes: Array<{ events: readonly any[]; state: readonly any[]; snapshot: number }> = [];
     collection.onChange((c) => changes.push(c));
 
-    // INSERT ── one onChange, op='insert', state === list()
+    // INSERT
     const { results: r1 } = await processDbOperations([
       db
         .insert(orders)
-        .values({
-          driverId: 1,
-          pickup: 'SC4 Insert Pickup',
-          dropoff: 'SC4 Insert Dropoff',
-          price: 30,
-          status: 'accepted',
-        })
+        .values({ driverId: 1, pickup: 'Ins', dropoff: 'Ins', price: 30, status: 'accepted' })
         .returning(),
     ]);
     const [inserted] = r1[0] as Array<{ id: number }>;
 
-    expect(changes).toHaveLength(1);
+    await waitFor(() => changes.length === 1);
     expect(changes[0]!.events[0]!.op).toBe('insert');
     expect(changes[0]!.state).toBe(collection.list());
     expect(collection.list()).toHaveLength(1);
@@ -150,7 +130,7 @@ describe('Embedded Collection', () => {
       db.update(orders).set({ status: 'completed' }).where(eq(orders.id, inserted!.id)),
     ]);
 
-    expect(changes).toHaveLength(2);
+    await waitFor(() => changes.length === 2);
     const updateEvt = changes[1]!.events[0];
     expect(updateEvt.op).toBe('update');
     expect(updateEvt.matchesOld).toBe(true);
@@ -158,41 +138,80 @@ describe('Embedded Collection', () => {
     expect(collection.list()).toHaveLength(0);
     expect(changes[1]!.state).toBe(collection.list());
 
-    // INSERT a second accepted row to set up the DELETE
+    // INSERT a second accepted row, then DELETE it
     const { results: r2 } = await processDbOperations([
       db
         .insert(orders)
-        .values({
-          driverId: 1,
-          pickup: 'SC4 Delete Pickup',
-          dropoff: 'SC4 Delete Dropoff',
-          price: 40,
-          status: 'accepted',
-        })
+        .values({ driverId: 1, pickup: 'Del', dropoff: 'Del', price: 40, status: 'accepted' })
         .returning(),
     ]);
     const [toDelete] = r2[0] as Array<{ id: number }>;
 
-    expect(changes).toHaveLength(3);
+    await waitFor(() => changes.length === 3);
     expect(changes[2]!.events[0]!.op).toBe('insert');
     expect(collection.list()).toHaveLength(1);
 
-    // DELETE ── one onChange, op='delete', list empty afterwards
     await processDbOperations([db.delete(orders).where(eq(orders.id, toDelete!.id))]);
 
-    expect(changes).toHaveLength(4);
+    await waitFor(() => changes.length === 4);
     expect(changes[3]!.events[0]!.op).toBe('delete');
     expect(collection.list()).toHaveLength(0);
     expect(changes[3]!.state).toBe(collection.list());
 
     collection.dispose();
   });
+
+  // getState() surfaces the underlying query state (data + flags).
+  test('getState() exposes data and loading flags', async () => {
+    const client = createPulseClient(runtime);
+    const collection = await client.ordersByStatus({ status: 'accepted' });
+
+    const state = collection.getState();
+    expect(state.isLoading).toBe(false);
+    expect(state.error).toBeNull();
+    expect(state.data).toBe(collection.list());
+
+    await processDbOperations([
+      db
+        .insert(orders)
+        .values({ driverId: 1, pickup: 'S', dropoff: 'S', price: 10, status: 'accepted' }),
+    ]);
+    await waitFor(() => collection.getState().data.length === 1);
+
+    collection.dispose();
+  });
+
+  // loadMore() extends a .limit() collection through the direct transport.
+  test('loadMore() fetches the next page of a limited collection', async () => {
+    await processDbOperations([
+      db
+        .insert(orders)
+        .values({ driverId: 1, pickup: 'A', dropoff: 'A', price: 10, status: 'accepted' }),
+      db
+        .insert(orders)
+        .values({ driverId: 1, pickup: 'B', dropoff: 'B', price: 20, status: 'accepted' }),
+      db
+        .insert(orders)
+        .values({ driverId: 1, pickup: 'C', dropoff: 'C', price: 30, status: 'accepted' }),
+    ]);
+
+    const client = createPulseClient(runtime);
+    const collection = await client.ordersByStatusLimited({ status: 'accepted' });
+
+    expect(collection.list()).toHaveLength(2);
+    expect(collection.getState().hasMore).toBe(true);
+
+    await collection.loadMore();
+
+    expect(collection.list()).toHaveLength(3);
+    expect(collection.getState().hasMore).toBe(false);
+
+    collection.dispose();
+  });
 });
 
 // ---------------------------------------------------------------------------
-// Lifecycle suite — separate fixture variantName so its runtime can be stopped
-// without touching the SC3/SC4 context (teardownTestSuiteForFixture uses
-// fixture.variantName as the key prefix).
+// Lifecycle suite — separate variantName so its runtime can be stopped in-test.
 // ---------------------------------------------------------------------------
 
 describe('Embedded Collection lifecycle', () => {
@@ -217,9 +236,6 @@ describe('Embedded Collection lifecycle', () => {
   });
 
   afterAll(async () => {
-    // Decrements activeSuiteUsers for the lifecycle context only (scoped to this exact
-    // fixture+registry context key); stop() is idempotent so calling it again
-    // after the test's runtime.stop() is safe.
     await teardownTestSuiteForFixture(lifecycleFixture, lcRegistry);
   });
 
@@ -237,28 +253,27 @@ describe('Embedded Collection lifecycle', () => {
       firedAfterStop = true;
     });
 
-    // runtime.stop() iterates _liveCollections and calls dispose() on each,
-    // which synchronously unsubscribes the tap listener.
+    // runtime.stop() broadcasts onStop; each collection wires it to dispose(), which
+    // synchronously detaches its WAL signal and destroys the query.
     await lcRuntime.stop();
 
     // dispose() must be idempotent — no throw on repeated calls
     expect(() => collection.dispose()).not.toThrow();
     expect(() => collection.dispose()).not.toThrow();
 
-    // The tap listener was detached by dispose(); no onChange fired during stop
+    // The signal was detached by dispose(); no onChange fired during stop
     expect(firedAfterStop).toBe(false);
   });
 });
 
 // ---------------------------------------------------------------------------
-// Exotic-type coverage: the embedded WAL tap must deliver every pg data type in
-// the same normalized JS shape a baseline SELECT produces. The raw pgoutput WAL
-// arrives as text; the server normalizes it with Drizzle's codecs before emit
-// (see server/wal-normalization.ts). This locks that path — the HTTP-client
-// pg-data-types tests never exercise it (their values arrive pre-typed).
+// Exotic-type coverage: the WAL → events-table → pull path must deliver every pg
+// data type in the same normalized JS shape a baseline SELECT produces. The raw
+// pgoutput WAL arrives as text; the server normalizes it with Drizzle's codecs
+// (see server/wal-normalization.ts) before persisting the event this pull reads.
 // ---------------------------------------------------------------------------
 
-describe('Embedded Collection — PG Data Types (WAL tap normalization)', () => {
+describe('Embedded Collection — PG Data Types (WAL normalization)', () => {
   let pool: Pool;
   let db: PostgresJsDatabase;
   let runtime!: RuntimeOf<typeof registry>;
@@ -286,17 +301,14 @@ describe('Embedded Collection — PG Data Types (WAL tap normalization)', () => 
     await cleanupBetweenTestsForFixture(fixture, pool);
   });
 
-  test('WAL-tap delta rows carry every pg data type in its normalized JS shape', async () => {
+  test('push delta rows carry every pg data type in its normalized JS shape', async () => {
     const client = createPulseClient(runtime);
     const collection = await client.allPgDataTypes();
     expect(collection.list()).toEqual([]);
 
     await processDbOperations([db.insert(pgDataTypes).values(pgDataTypeInsertValues)]);
 
-    // The tap applies on WAL emit; absorb the scheduling beat before asserting.
-    for (let attempt = 0; attempt < 20 && collection.list().length === 0; attempt++) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 50));
-    }
+    await waitFor(() => collection.list().length === 1);
 
     expect(collection.list()).toEqual([expect.objectContaining({ ...pgDataTypeInsertValues })]);
 

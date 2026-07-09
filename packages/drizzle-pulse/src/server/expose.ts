@@ -1,12 +1,14 @@
+import { createHash } from 'node:crypto';
 import { desc, getTableUniqueName, sql } from 'drizzle-orm';
 import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
 import { type ClientConfig, Pool, type PoolConfig, types } from 'pg';
 import { LogicalReplicationService, type Pgoutput, PgoutputPlugin } from 'pg-logical-replication';
+import { emitEventsTableDdl } from './events-table-ddl.js';
 import { buildEventsTable, DEFAULT_EVENTS_SCHEMA } from './events-table-resolver.js';
-import { RealtimeRequestHandler } from './handlers.js';
+import { DEFAULT_PULL_EVENT_LIMIT, RealtimeRequestHandler } from './sdk.js';
 import type { AnyPulseBuilders, PulseRegistry } from './pulse-registry.js';
 import type { PulseSourceDb } from './pulse-sql.js';
-import { RealtimeService, SubscriptionManager } from './realtime-store.js';
+import { RealtimeService } from './realtime-store.js';
 import { WalEventEmitter } from './wal-event-emitter.js';
 import { createWalRowNormalizer } from './wal-normalization.js';
 
@@ -74,14 +76,6 @@ export type LogLevel = 'debug' | 'info' | 'error' | 'silent';
 
 const LOG_LEVEL_RANK: Record<LogLevel, number> = { silent: 0, error: 1, info: 2, debug: 3 };
 
-export type SubscriptionTtlConfig = {
-  // How long a subscription may go without a pull() before the sweep evicts it:
-  // subscriptions otherwise live forever, since nothing else ever calls
-  // SubscriptionManager.delete() for a client that disconnects without unsubscribing.
-  idleMs?: number;
-  sweepIntervalMs?: number;
-};
-
 export type ExposeConfig = {
   databaseUrl: string;
   /**
@@ -93,7 +87,11 @@ export type ExposeConfig = {
   sourceDb: PulseSourceDb;
   eventsSchema?: string;
   wal?: ExposeWalConfig;
-  subscriptionTtl?: SubscriptionTtlConfig;
+  /**
+   * Max events a single pull may replay before it falls back to a full reset instead of
+   * streaming an unbounded batch. Defaults to {@link DEFAULT_PULL_EVENT_LIMIT} (1000).
+   */
+  pullEventLimit?: number;
   logLevel?: LogLevel;
 };
 
@@ -120,11 +118,6 @@ const DEFAULT_RECONNECT = {
 
 const DEFAULT_WAL_NAME = 'drizzle_pulse';
 
-const DEFAULT_SUBSCRIPTION_TTL: Required<SubscriptionTtlConfig> = {
-  idleMs: 24 * 60 * 60 * 1000, // 24h — comfortably longer than any realistic client-side pull cadence
-  sweepIntervalMs: 5 * 60 * 1000, // 5m
-};
-
 function withQuietPgOptions<T extends ClientConfig | PoolConfig>(config: T): T {
   return {
     ...config,
@@ -134,17 +127,17 @@ function withQuietPgOptions<T extends ClientConfig | PoolConfig>(config: T): T {
 
 export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
   private readonly sourceTableMetadata: Map<string, SourceTableMetadata>;
-  private readonly subscriptionManager = new SubscriptionManager();
   private readonly requestHandler: RealtimeRequestHandler;
   private readonly pgConfig: ClientConfig & { replication: 'database' };
   private readonly pgPoolConfig: PoolConfig;
   private readonly reconnectConfig: Required<NonNullable<ExposeWalConfig['reconnect']>>;
   private readonly logLevel: LogLevel;
-  private readonly subscriptionTtlConfig: Required<SubscriptionTtlConfig>;
-  private subscriptionSweepTimer: ReturnType<typeof setInterval> | null = null;
   readonly publicationName: string;
   readonly slotName: string;
   private readonly eventsSchema: string;
+  // Populated by reconcile(): events-table name -> current epoch (uuid, rotated on every DDL
+  // recreate). Handlers read it via getEpochForQuery to mint/validate cursor tokens.
+  private eventsEpochs = new Map<string, string>();
 
   private pool: Pool | null = null;
   private realtimeService: RealtimeService | null = null;
@@ -231,17 +224,14 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     this.pgPoolConfig = { ...withQuietPgOptions(pg), types: rawTextTypes };
     this.reconnectConfig = { ...DEFAULT_RECONNECT, ...wal.reconnect };
     this.logLevel = this.config.logLevel ?? 'info';
-    this.subscriptionTtlConfig = {
-      ...DEFAULT_SUBSCRIPTION_TTL,
-      ...this.config.subscriptionTtl,
-    };
 
     this.requestHandler = new RealtimeRequestHandler(
       this.registry,
       this.config.sourceDb,
-      this.subscriptionManager,
       () => this.getRealtimeService(),
       (queryName: string) => this.getEventsTableForQuery(queryName),
+      (queryName: string) => this.getEpochForQuery(queryName),
+      this.config.pullEventLimit ?? DEFAULT_PULL_EVENT_LIMIT,
     );
   }
 
@@ -263,6 +253,16 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     }
 
     return metadata.eventsTable;
+  }
+
+  /**
+   * Current epoch for a query's events table, or `undefined` before {@link start} /
+   * {@link provision} has reconciled it. The epoch rotates on every events-table recreate;
+   * cursor tokens embed it so a token minted against a since-dropped table is detectable.
+   */
+  getEpochForQuery(queryName: string): string | undefined {
+    const eventsTable = this.getEventsTableForQuery(queryName);
+    return this.eventsEpochs.get(getTableConfig(eventsTable).name);
   }
 
   async ensureBaselines(): Promise<void> {
@@ -297,7 +297,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     this.initializeDatabaseServices();
 
     try {
-      await this.runStartupGuard();
+      await this.reconcile();
 
       this.isRunning = true;
       await this.ensureBaselines();
@@ -311,7 +311,6 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       this.lastPersistedSnapshot = maxSnapshot;
 
       await this.connectReplication();
-      this.startSubscriptionSweep();
     } catch (error) {
       this.isRunning = false;
       await this.teardownFailedStart();
@@ -326,7 +325,6 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
 
     this.isRunning = false;
     this.clearReconnectTimer();
-    this.stopSubscriptionSweep();
 
     const replicationService = this.replicationService;
     this.replicationService = null;
@@ -345,6 +343,23 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     this.logInfo('[WAL Listener] Stopped');
   }
 
+  /**
+   * Reconciles this runtime's events tables and their bookkeeping against the live database
+   * without opening a replication stream: runs the same schema path as {@link start} —
+   * create/recreate diverged events tables, sweep orphans, rotate epochs — over a short-lived
+   * admin connection, then closes it. Call from a deploy/migration step to provision
+   * infrastructure ahead of booting the listener. Fail-closed: rejects (rolling back) on any
+   * unmet precondition.
+   */
+  async provision(): Promise<void> {
+    this.initializeDatabaseServices();
+    try {
+      await this.reconcile();
+    } finally {
+      await this.teardownFailedStart();
+    }
+  }
+
   private initializeDatabaseServices(): void {
     if (this.pool && this.realtimeService) {
       return;
@@ -358,8 +373,6 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
   // Mirrors stop()'s pool/service teardown so a failed guard doesn't leak connections —
   // callers await start() rejections and then discard the runtime.
   private async teardownFailedStart(): Promise<void> {
-    this.stopSubscriptionSweep();
-
     const pool = this.pool;
     this.pool = null;
     this.realtimeService = null;
@@ -369,84 +382,201 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     }
   }
 
-  // Fail-closed startup guard: aggregates every unmet precondition into a
-  // single thrown Error instead of silently starting a runtime that will emit zero events.
-  private async runStartupGuard(): Promise<void> {
+  // Fail-closed boot reconciliation, wrapped in one transaction under a schema-scoped advisory
+  // lock. wal_level is the only precondition the runtime can't fix, so it stays an assert;
+  // everything else pulse self-provisions: REPLICA IDENTITY FULL on each source, then the
+  // publication (create it owning exactly the sources, or — unless it's FOR ALL TABLES — diff
+  // its membership, adding registered sources and un-pulsing members that no longer are). Then
+  // it brings the events tables and their pulse_meta bookkeeping in line with the sources
+  // (create/recreate on DDL-hash divergence, drop orphans), rotating an epoch on every recreate.
+  // Any throw rolls the whole transaction back, so a database it can't fully provision is left
+  // untouched. Runtime-owned events-table DDL: the app no longer migrates these tables.
+  private async reconcile(): Promise<void> {
     const adminDb = this.getRealtimeService().getDb();
-    const failures: string[] = [];
+    const eventsSchema = this.eventsSchema;
+    const schema = sql.identifier(eventsSchema);
+    const metaTable = sql`${schema}.${sql.identifier('pulse_meta')}`;
 
-    // Publication exists, and (unless it's FOR ALL TABLES) every source table is a member.
-    const publicationResult = await adminDb.execute<{ puballtables: boolean }>(
-      sql`SELECT puballtables FROM pg_publication WHERE pubname = ${this.publicationName}`,
-    );
-    const publicationRow = publicationResult.rows[0];
-
-    if (!publicationRow) {
-      failures.push(
-        `publication "${this.publicationName}" does not exist — create it (e.g. CREATE PUBLICATION ${this.publicationName} FOR ALL TABLES) before starting`,
-      );
-    } else if (!publicationRow.puballtables) {
-      const membershipResult = await adminDb.execute<{ schemaname: string; tablename: string }>(
-        sql`SELECT schemaname, tablename FROM pg_publication_tables WHERE pubname = ${this.publicationName}`,
-      );
-      const members = new Set(
-        membershipResult.rows.map((row) => `${row.schemaname}.${row.tablename}`),
+    const epochs = await adminDb.transaction(async (tx) => {
+      // Serializes concurrent boots targeting the same events schema so two runtimes can't
+      // race the same DROP+CREATE. Auto-released at transaction end.
+      // ponytail: one lock per events schema; fine for a boot-time step.
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtext(${'drizzle_pulse'}), hashtext(${eventsSchema}))`,
       );
 
-      for (const meta of this.sourceTableMetadata.values()) {
-        const sourceConfig = getTableConfig(meta.sourceTable);
-        const qualifiedName = `${sourceConfig.schema ?? 'public'}.${sourceConfig.name}`;
-        if (!members.has(qualifiedName)) {
-          failures.push(
-            `table "${qualifiedName}" is not a member of publication "${this.publicationName}"`,
+      // Postgres identifier quoting for the DDL statements below (sql`` params are values, not
+      // identifiers). Matches sql.identifier's behavior; kept as strings so a failure can name
+      // the exact statement.
+      const quoteIdent = (name: string) => `"${name.replaceAll('"', '""')}"`;
+
+      // Runs a self-provisioning DDL statement, rethrowing on failure with the exact statement
+      // and the grant it most likely needs — the error a misconfigured deploy actually hits.
+      const execDdl = async (statement: string, missingGrant: string): Promise<void> => {
+        try {
+          await tx.execute(sql.raw(statement));
+        } catch (cause) {
+          throw new Error(
+            `pulse could not self-provision replication: \`${statement}\` failed — the connection likely lacks ${missingGrant} (${(cause as Error).message})`,
+            { cause },
+          );
+        }
+      };
+
+      // wal_level=logical is server-wide (postgresql.conf + restart); the runtime can't fix it,
+      // so it stays a fail-closed assert.
+      const walLevelResult = await tx.execute<{ wal_level: string }>(
+        sql`SELECT current_setting('wal_level') AS wal_level`,
+      );
+      const walLevel = walLevelResult.rows[0]?.wal_level;
+      if (walLevel !== 'logical') {
+        throw new Error(
+          `wal_level is "${walLevel ?? 'unknown'}", but must be "logical" — set wal_level=logical in postgresql.conf and restart Postgres`,
+        );
+      }
+
+      const registeredSources = [...this.sourceTableMetadata.values()].map((meta) => {
+        const config = getTableConfig(meta.sourceTable);
+        const schemaName = config.schema ?? 'public';
+        return {
+          name: `${schemaName}.${config.name}`,
+          quoted: `${quoteIdent(schemaName)}.${quoteIdent(config.name)}`,
+          schemaName,
+          tableName: config.name,
+        };
+      });
+
+      // REPLICA IDENTITY FULL on every source BEFORE any publication ADD below, so the first
+      // published change already carries complete old-row data.
+      for (const source of registeredSources) {
+        const replicaIdentityResult = await tx.execute<{ relreplident: string }>(
+          sql`SELECT c.relreplident FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ${source.schemaName} AND c.relname = ${source.tableName}`,
+        );
+        if (replicaIdentityResult.rows[0]?.relreplident !== 'f') {
+          await execDdl(
+            `ALTER TABLE ${source.quoted} REPLICA IDENTITY FULL`,
+            `ownership of ${source.name}`,
           );
         }
       }
-    }
 
-    // Each source table's events table has been created (migrations/codegen ran).
-    for (const meta of this.sourceTableMetadata.values()) {
-      const eventsConfig = getTableConfig(meta.eventsTable);
-      const eventsSchemaName = eventsConfig.schema ?? this.eventsSchema;
-      const existsResult = await adminDb.execute<{ relname: string }>(
-        sql`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ${eventsSchemaName} AND c.relname = ${eventsConfig.name} AND c.relkind IN ('r', 'p')`,
+      // Publication: create it owning exactly the sources, or (unless it's FOR ALL TABLES) diff
+      // its membership against them.
+      const pubIdent = quoteIdent(this.publicationName);
+      const publicationResult = await tx.execute<{ puballtables: boolean }>(
+        sql`SELECT puballtables FROM pg_publication WHERE pubname = ${this.publicationName}`,
       );
-      if (existsResult.rows.length === 0) {
-        failures.push(
-          `events table "${eventsSchemaName}.${eventsConfig.name}" does not exist — run migrations/codegen to create it`,
+      const publicationRow = publicationResult.rows[0];
+      if (!publicationRow) {
+        const forTables =
+          registeredSources.length > 0
+            ? ` FOR TABLE ${registeredSources.map((source) => source.quoted).join(', ')}`
+            : '';
+        await execDdl(
+          `CREATE PUBLICATION ${pubIdent}${forTables} WITH (publish = 'insert, update, delete')`,
+          'the database CREATE privilege and ownership of the published tables',
+        );
+      } else if (!publicationRow.puballtables) {
+        const membershipResult = await tx.execute<{ schemaname: string; tablename: string }>(
+          sql`SELECT schemaname, tablename FROM pg_publication_tables WHERE pubname = ${this.publicationName}`,
+        );
+        const members = membershipResult.rows.map((row) => ({
+          name: `${row.schemaname}.${row.tablename}`,
+          quoted: `${quoteIdent(row.schemaname)}.${quoteIdent(row.tablename)}`,
+        }));
+        const memberNames = new Set(members.map((member) => member.name));
+        const registeredNames = new Set(registeredSources.map((source) => source.name));
+
+        for (const source of registeredSources) {
+          if (!memberNames.has(source.name)) {
+            await execDdl(
+              `ALTER PUBLICATION ${pubIdent} ADD TABLE ${source.quoted}`,
+              `ownership of the publication and of ${source.name}`,
+            );
+          }
+        }
+
+        // Un-pulse members no longer registered: DROP from the publication, THEN reset REPLICA
+        // IDENTITY (a member row implies the table still exists — pg_publication_tables joins
+        // pg_class, so a dropped table has already left membership on its own).
+        for (const member of members) {
+          if (registeredNames.has(member.name)) continue;
+          await execDdl(
+            `ALTER PUBLICATION ${pubIdent} DROP TABLE ${member.quoted}`,
+            'ownership of the publication',
+          );
+          await execDdl(
+            `ALTER TABLE ${member.quoted} REPLICA IDENTITY DEFAULT`,
+            `ownership of ${member.name}`,
+          );
+        }
+      }
+
+      await tx.execute(sql`CREATE SCHEMA IF NOT EXISTS ${schema}`);
+      await tx.execute(
+        sql`CREATE TABLE IF NOT EXISTS ${metaTable} (table_name text PRIMARY KEY, ddl_hash text NOT NULL, epoch uuid NOT NULL)`,
+      );
+
+      const metaResult = await tx.execute<{
+        table_name: string;
+        ddl_hash: string;
+        epoch: string;
+      }>(sql`SELECT table_name, ddl_hash, epoch FROM ${metaTable}`);
+      const metaByName = new Map(metaResult.rows.map((row) => [row.table_name, row] as const));
+
+      const physicalResult = await tx.execute<{ relname: string }>(
+        sql`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ${eventsSchema} AND c.relkind IN ('r', 'p')`,
+      );
+      const physical = new Set(physicalResult.rows.map((row) => row.relname));
+
+      const desired = new Set<string>();
+      const epochByName = new Map<string, string>();
+
+      for (const meta of this.sourceTableMetadata.values()) {
+        const eventsName = getTableConfig(meta.eventsTable).name;
+        desired.add(eventsName);
+
+        const statements = emitEventsTableDdl(meta.sourceTable, { eventsSchema });
+        const ddlHash = createHash('sha256').update(statements.join('\n')).digest('hex');
+
+        const existing = metaByName.get(eventsName);
+        if (existing && existing.ddl_hash === ddlHash && physical.has(eventsName)) {
+          epochByName.set(eventsName, existing.epoch);
+          continue;
+        }
+
+        for (const statement of statements) {
+          await tx.execute(sql.raw(statement));
+        }
+        const upsert = await tx.execute<{ epoch: string }>(
+          sql`INSERT INTO ${metaTable} (table_name, ddl_hash, epoch) VALUES (${eventsName}, ${ddlHash}, gen_random_uuid()) ON CONFLICT (table_name) DO UPDATE SET ddl_hash = excluded.ddl_hash, epoch = gen_random_uuid() RETURNING epoch`,
+        );
+        const epoch = upsert.rows[0]?.epoch;
+        if (!epoch) {
+          throw new Error(`pulse_meta upsert for "${eventsName}" returned no epoch`);
+        }
+        epochByName.set(eventsName, epoch);
+      }
+
+      // Orphans: a meta row with no registered source drops its table + row; a physical table
+      // with neither a meta row nor a registered source is left alone (warn only — it may be
+      // an unrelated table hand-created in the events schema).
+      for (const row of metaByName.values()) {
+        if (desired.has(row.table_name)) continue;
+        await tx.execute(sql`DROP TABLE IF EXISTS ${schema}.${sql.identifier(row.table_name)}`);
+        await tx.execute(sql`DELETE FROM ${metaTable} WHERE table_name = ${row.table_name}`);
+      }
+      for (const relname of physical) {
+        if (relname === 'pulse_meta' || desired.has(relname) || metaByName.has(relname)) continue;
+        this.logWarn(
+          `[reconcile] table "${eventsSchema}.${relname}" shares the events schema but has no pulse_meta row; leaving it untouched`,
         );
       }
-    }
 
-    // Each source table has REPLICA IDENTITY FULL (so old-row data reaches the WAL).
-    for (const meta of this.sourceTableMetadata.values()) {
-      const sourceConfig = getTableConfig(meta.sourceTable);
-      const sourceSchemaName = sourceConfig.schema ?? 'public';
-      const replicaIdentityResult = await adminDb.execute<{ relreplident: string }>(
-        sql`SELECT c.relreplident FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ${sourceSchemaName} AND c.relname = ${sourceConfig.name}`,
-      );
-      const replicaIdentityRow = replicaIdentityResult.rows[0];
-      if (!replicaIdentityRow || replicaIdentityRow.relreplident !== 'f') {
-        failures.push(
-          `table "${sourceSchemaName}.${sourceConfig.name}" does not have REPLICA IDENTITY FULL — run ALTER TABLE ${sourceSchemaName}.${sourceConfig.name} REPLICA IDENTITY FULL`,
-        );
-      }
-    }
+      return epochByName;
+    });
 
-    // wal_level=logical (logical replication is enabled server-wide).
-    const walLevelResult = await adminDb.execute<{ wal_level: string }>(
-      sql`SELECT current_setting('wal_level') AS wal_level`,
-    );
-    const walLevel = walLevelResult.rows[0]?.wal_level;
-    if (walLevel !== 'logical') {
-      failures.push(`wal_level is "${walLevel ?? 'unknown'}", but must be "logical"`);
-    }
-
-    if (failures.length > 0) {
-      throw new Error(
-        ['expose() startup guard failed:', ...failures.map((failure) => `- ${failure}`)].join('\n'),
-      );
-    }
+    this.eventsEpochs = epochs;
   }
 
   private onReplicationStart(): void {
@@ -605,29 +735,6 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     this.reconnectTimer = null;
   }
 
-  // Without this sweep, SubscriptionManager.delete() is only ever reached via the
-  // explicit unsubscribe() handler — a client that disconnects without calling it (closed
-  // tab, crashed process, ...) would otherwise leak its subscription forever.
-  private startSubscriptionSweep(): void {
-    if (this.subscriptionSweepTimer) {
-      return;
-    }
-
-    this.subscriptionSweepTimer = setInterval(() => {
-      this.subscriptionManager.sweepIdle(this.subscriptionTtlConfig.idleMs);
-    }, this.subscriptionTtlConfig.sweepIntervalMs);
-    this.subscriptionSweepTimer.unref?.();
-  }
-
-  private stopSubscriptionSweep(): void {
-    if (!this.subscriptionSweepTimer) {
-      return;
-    }
-
-    clearInterval(this.subscriptionSweepTimer);
-    this.subscriptionSweepTimer = null;
-  }
-
   private async handleMessage(lsn: string, log: Pgoutput.Message): Promise<void> {
     if (log.tag !== 'insert' && log.tag !== 'update' && log.tag !== 'delete') {
       return;
@@ -778,6 +885,10 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
 
   private logError(message: string, ...args: unknown[]): void {
     if (LOG_LEVEL_RANK[this.logLevel] >= LOG_LEVEL_RANK.error) console.error(message, ...args);
+  }
+
+  private logWarn(message: string, ...args: unknown[]): void {
+    if (LOG_LEVEL_RANK[this.logLevel] >= LOG_LEVEL_RANK.info) console.warn(message, ...args);
   }
 
   private logDebug(message: string, ...args: unknown[]): void {

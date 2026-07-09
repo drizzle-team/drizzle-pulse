@@ -7,23 +7,18 @@ import { createPulseClient, PulseQuery } from 'drizzle-pulse/client';
 import {
   type AnyQueries,
   expose,
-  type LoadMoreRequest,
-  type PullRequest,
   type PulseAuthContext,
   type PulseRegistry,
   type RealtimeRuntime,
-  type SubscribeRequest,
-  serializeResponse,
 } from 'drizzle-pulse/server';
+import { createRealtimeRouter as createServerRouter } from 'drizzle-pulse/server/router';
 import type { Hono } from 'hono';
-import { Hono as HonoRouter } from 'hono';
 import { Pool } from 'pg';
 import postgres from 'postgres';
 import SuperJSON from 'superjson';
 import { z } from 'zod';
 import type { ProcessDbOperationsOptions } from './db-helpers.js';
 import { insertTestUser, processDbOperations } from './db-helpers.js';
-import { emitEventsTableDdl } from './events-table-ddl.js';
 
 // Re-export shared helpers so downstream tests can import from one place
 export { processDbOperations, insertTestUser };
@@ -112,8 +107,6 @@ export type HarnessInitTestQuery = <T extends PulseRow>(
 const plainRecordSchema = z.record(z.string(), z.unknown());
 
 const subscribeResponseSchema = z.object({
-  clientId: z.string(),
-  subscriptionId: z.string(),
   rows: z.array(plainRecordSchema),
   rangeStart: z
     .number()
@@ -125,7 +118,8 @@ const subscribeResponseSchema = z.object({
     .nullable()
     .optional()
     .transform((value) => value ?? null),
-  snapshot: z.number(),
+  // epoch:snapshot cursor token.
+  snapshot: z.string(),
 });
 
 const pullEventSchema = z.object({
@@ -149,8 +143,9 @@ const pullResponseSchema = z.object({
     .nullable()
     .optional()
     .transform((value) => value ?? null),
+  // epoch:snapshot cursor token (both incremental and reset responses carry it).
   snapshot: z
-    .number()
+    .string()
     .nullable()
     .optional()
     .transform((value) => value ?? null),
@@ -257,22 +252,6 @@ async function applyFixtureMigrations(databaseUrl: string, migrationsPath: strin
   }
 }
 
-/**
- * The harness never hand-mirrors events-table SQL — every fixture's events tables
- * are created by executing the DDL emitter's output against the pulsed source tables.
- */
-async function createFixtureEventsTables(
-  pool: Pool,
-  fixture: IntegrationTestFixture,
-): Promise<void> {
-  for (const pulsedTable of fixture.pulsedTables) {
-    const statements = emitEventsTableDdl(pulsedTable);
-    for (const statement of statements) {
-      await pool.query(statement);
-    }
-  }
-}
-
 async function waitForWalStartup(
   adminPool: Pool,
   slotName: string,
@@ -330,33 +309,7 @@ function createRealtimeRouter(
   runtime: RealtimeRuntime<any>,
   auth: PulseAuthContext = { userId: null },
 ): Hono {
-  const router = new HonoRouter();
-
-  const toResponse = (data: unknown, status = 200) =>
-    new Response(serializeResponse(data), {
-      status,
-      headers: { 'Content-Type': 'application/json' },
-    });
-
-  router.post('/subscribe', async (c) => {
-    const request = (await c.req.json()) as SubscribeRequest;
-    const result = await runtime.handlers.subscribe(request, auth);
-    return toResponse(result.body, result.status);
-  });
-
-  router.post('/pull', async (c) => {
-    const request = (await c.req.json()) as PullRequest;
-    const result = await runtime.handlers.pull(request, auth);
-    return toResponse(result.body, result.status);
-  });
-
-  router.post('/load-more', async (c) => {
-    const request = (await c.req.json()) as LoadMoreRequest;
-    const result = await runtime.handlers.loadMore(request, auth);
-    return toResponse(result.body, result.status);
-  });
-
-  return router;
+  return createServerRouter(runtime.handlers, auth);
 }
 
 export function createRealtimeRouterWithAuth(
@@ -464,8 +417,10 @@ export async function setupTestSuiteForFixture<
   const databaseUrl = buildDatabaseUrl(base, databaseName);
   const testPool = createQuietPool(databaseUrl);
 
+  // Events tables (and their pulse_meta bookkeeping) are runtime-owned: the migrations set up
+  // the source table + publication + replica identity, and runtime.start() below reconciles
+  // the events tables at boot.
   await applyFixtureMigrations(databaseUrl, fixture.migrationsPath);
-  await createFixtureEventsTables(testPool, fixture);
 
   const runtime = createTestRuntime(databaseUrl, fixture, registry);
 
@@ -650,22 +605,37 @@ export function createRouterFetchAdapter(router: Hono): typeof fetch {
   return fetchImpl as typeof fetch;
 }
 
+// The stateless per-request pull identity: query + client window + cursor token. A subscribe
+// or pull result is itself a valid cursor, so it can be fed straight back into pullClient().
+export type PullCursor = {
+  queryName: string;
+  args: PlainRecord;
+  rangeStart: number | null;
+  rangeEnd: number | null;
+  token: string;
+};
+
+// The token is `epoch:snapshot`; epoch is a uuid (no colon), snapshot is digits.
+function parseSnapshotToken(token: string): number {
+  const separator = token.indexOf(':');
+  return separator >= 0 ? Number(token.slice(separator + 1)) : 0;
+}
+
 export async function subscribeClient(
   router: Hono,
   queryName: string,
   args: PlainRecord,
-): Promise<{
-  clientId: string;
-  subscriptionId: string;
-  rows: PlainRecord[];
-  rangeStart: number | null;
-  rangeEnd: number | null;
-  snapshot: number;
-}> {
+): Promise<
+  PullCursor & {
+    rows: PlainRecord[];
+    // Parsed snapshot number, for assertions and waitForEventsForFixture.
+    snapshot: number;
+  }
+> {
   const response = await router.request('/subscribe', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ queryName, args, clientId: randomUUID() }),
+    body: JSON.stringify({ queryName, args }),
   });
 
   if (!response.ok) {
@@ -676,12 +646,13 @@ export async function subscribeClient(
   const body = subscribeResponseSchema.parse(parseSuperJsonResponse(raw));
 
   return {
-    clientId: z.string().parse((body as PlainRecord).clientId),
-    subscriptionId: body.subscriptionId,
+    queryName,
+    args,
     rows: body.rows,
     rangeStart: body.rangeStart,
     rangeEnd: body.rangeEnd,
-    snapshot: body.snapshot,
+    token: body.snapshot,
+    snapshot: parseSnapshotToken(body.snapshot),
   };
 }
 
@@ -698,28 +669,38 @@ function parsePullEvents(value: unknown): Array<{
 
 export async function pullClient(
   router: Hono,
-  clientId: string,
-  subscriptionId: string,
-  snapshot: number,
-): Promise<{
-  events: Array<{
-    op: string;
-    pk: unknown;
-    row?: PlainRecord;
-    old_row?: PlainRecord;
-    matchesNew?: boolean;
-    matchesOld?: boolean;
-  }>;
-  rangeStart: number | null;
-  rangeEnd: number | null;
-  snapshot: number;
-  reset?: boolean;
-  reason?: string;
-}> {
+  cursor: PullCursor,
+): Promise<
+  PullCursor & {
+    events: Array<{
+      op: string;
+      pk: unknown;
+      row?: PlainRecord;
+      old_row?: PlainRecord;
+      matchesNew?: boolean;
+      matchesOld?: boolean;
+    }>;
+    // Parsed snapshot number, for assertions and waitForEventsForFixture.
+    snapshot: number;
+    reset?: boolean;
+    reason?: string;
+  }
+> {
   const response = await router.request('/pull', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ clientId, subscriptions: [{ subscriptionId, snapshot }] }),
+    body: JSON.stringify({
+      subscriptions: [
+        {
+          key: 'k',
+          queryName: cursor.queryName,
+          args: cursor.args,
+          rangeStart: cursor.rangeStart,
+          rangeEnd: cursor.rangeEnd,
+          snapshot: cursor.token,
+        },
+      ],
+    }),
   });
 
   if (!response.ok) {
@@ -729,21 +710,21 @@ export async function pullClient(
   const raw = await response.text();
   const envelope = parseSuperJsonResponse(raw);
   const resultMap = z.record(z.string(), pullResponseSchema).parse(envelope.results ?? {});
-  const body = pullResponseSchema.parse(resultMap[subscriptionId] ?? { events: [] });
+  const body = pullResponseSchema.parse(resultMap.k ?? { events: [] });
 
   const events =
     body.events === undefined && body.reset === true ? [] : parsePullEvents(body.events);
-  const nextSnapshot = body.snapshot ?? (body.reset === true ? snapshot : null);
-
-  if (nextSnapshot === null) {
-    throw new Error('Expected snapshot to be a number');
-  }
+  // Both incremental and reset carry a token; fall back to the incoming one only if absent.
+  const nextToken = body.snapshot ?? cursor.token;
 
   return {
+    queryName: cursor.queryName,
+    args: cursor.args,
     events,
     rangeStart: body.rangeStart,
     rangeEnd: body.rangeEnd,
-    snapshot: nextSnapshot,
+    token: nextToken,
+    snapshot: parseSnapshotToken(nextToken),
     reset: body.reset,
     reason: body.reason,
   };

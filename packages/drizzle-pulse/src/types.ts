@@ -1,5 +1,6 @@
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 import type { PullClient } from './client/create-client.js';
+import type { PulseQueryTransport } from './client/transport.js';
 
 /** Column filter operators */
 export type ColumnOperators<V> = {
@@ -118,7 +119,10 @@ export class QueryDescriptor<TResult> {
     readonly queryName: string,
     readonly args: Record<string, unknown>,
     readonly url: string,
-    readonly pullClient: PullClient,
+    readonly transport: PulseQueryTransport,
+    // Present only for the HTTP path, where it batches this query's polls with its siblings;
+    // the embedded (direct) transport polls one query at a time and leaves it undefined.
+    readonly pullClient?: PullClient,
   ) {}
 }
 

@@ -86,25 +86,23 @@ describe('Router Fetch Adapter', () => {
     const text = await response.text();
     expect(text.length).toBeGreaterThan(0);
     const body = SuperJSON.parse<{
-      subscriptionId: string;
       rows: unknown[];
-      snapshot: number;
+      snapshot: string;
     }>(text);
-    expect(body.subscriptionId).toBeTruthy();
-    expect(typeof body.subscriptionId).toBe('string');
     expect(Array.isArray(body.rows)).toBe(true);
-    expect(typeof body.snapshot).toBe('number');
+    // snapshot is now an epoch:snapshot cursor token, not a bare number.
+    expect(typeof body.snapshot).toBe('string');
+    expect(body.snapshot).toContain(':');
   });
 
   test('Adapter can reach /pull route after insert event', async () => {
     // Create a test user for the order
     const user = await insertTestUser(ctx.db, `user_${Math.random().toString(36).slice(2)}`);
 
-    // First subscribe to get a subscription ID
+    // First subscribe to get a cursor token
     const subscribeResult = await subscribeClient(ctx.router, 'ordersByStatus', {
       status: 'requested',
     });
-    const { clientId, subscriptionId, snapshot: initialSnapshot } = subscribeResult;
 
     // Insert a matching order
     const orderData = {
@@ -139,22 +137,30 @@ describe('Router Fetch Adapter', () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        clientId,
-        subscriptions: [{ subscriptionId, snapshot: initialSnapshot }],
+        subscriptions: [
+          {
+            key: 'k',
+            queryName: subscribeResult.queryName,
+            args: subscribeResult.args,
+            rangeStart: subscribeResult.rangeStart,
+            rangeEnd: subscribeResult.rangeEnd,
+            snapshot: subscribeResult.token,
+          },
+        ],
       }),
     });
 
     expect(pullResponse.ok).toBe(true);
     const text = await pullResponse.text();
     const body = SuperJSON.parse<{
-      results: Record<string, { events?: unknown[]; snapshot?: number }>;
+      results: Record<string, { events?: unknown[]; snapshot?: string }>;
     }>(text);
-    const result = body.results[subscriptionId];
+    const result = body.results.k;
     expect(result).toBeTruthy();
     expect(Array.isArray(result?.events)).toBe(true);
-    expect(typeof result?.snapshot).toBe('number');
-    // After insert and pull, snapshot should have advanced
-    expect(result?.snapshot).toBeGreaterThanOrEqual(initialSnapshot);
+    // The pull echoes a cursor token (epoch:snapshot), not a bare number.
+    expect(typeof result?.snapshot).toBe('string');
+    expect(result?.snapshot).toContain(':');
   });
 
   test('Adapter handles header normalization (case-insensitive)', async () => {

@@ -1,7 +1,4 @@
 import { describe, expect, test } from 'bun:test';
-import { RealtimeRuntime } from '../server/expose.js';
-import { createPulseRegistry } from '../server/pulse-registry.js';
-import type { PulseSourceDb } from '../server/pulse-sql.js';
 import { makePulseRuntime } from './mock-runtime.js';
 
 describe('connection-string handling', () => {
@@ -43,7 +40,7 @@ describe('start() failure rolls back to a restartable state', () => {
       poolEnded++;
     };
 
-    runtime.runStartupGuard = async () => {};
+    runtime.reconcile = async () => {};
     runtime.ensureBaselines = async () => {
       throw new Error('sourceDb briefly unavailable');
     };
@@ -58,7 +55,7 @@ describe('start() failure rolls back to a restartable state', () => {
     // A retry must not hit the "Already running" early return and silently no-op — it
     // must re-attempt the guard and baseline steps.
     let secondAttemptRan = false;
-    runtime.runStartupGuard = async () => {};
+    runtime.reconcile = async () => {};
     runtime.ensureBaselines = async () => {
       secondAttemptRan = true;
     };
@@ -71,57 +68,5 @@ describe('start() failure rolls back to a restartable state', () => {
 
     expect(secondAttemptRan).toBe(true);
     expect(runtime.isRunning).toBe(true);
-  });
-});
-
-describe('subscription idle sweep lifecycle', () => {
-  test('subscriptionTtl config falls back to defaults and honors overrides', () => {
-    const defaultRuntime = makePulseRuntime({
-      databaseUrl: 'postgresql://user:pass@localhost/test',
-    }) as any;
-    expect(defaultRuntime.subscriptionTtlConfig).toEqual({
-      idleMs: 24 * 60 * 60 * 1000,
-      sweepIntervalMs: 5 * 60 * 1000,
-    });
-
-    const emptyRegistry = createPulseRegistry({});
-    const overridden = new RealtimeRuntime(emptyRegistry as any, {
-      databaseUrl: 'postgresql://user:pass@localhost/test',
-      sourceDb: {} as PulseSourceDb,
-      subscriptionTtl: { idleMs: 1_000, sweepIntervalMs: 500 },
-    }) as any;
-    expect(overridden.subscriptionTtlConfig).toEqual({ idleMs: 1_000, sweepIntervalMs: 500 });
-  });
-
-  test('start() begins the sweep timer and stop() clears it', async () => {
-    const runtime = makePulseRuntime({
-      databaseUrl: 'postgresql://user:pass@localhost/test',
-    }) as any;
-
-    runtime.runStartupGuard = async () => {};
-    runtime.ensureBaselines = async () => {};
-    runtime.getRealtimeService = () => ({ getLatestSnapshot: async () => 0 });
-    runtime.connectReplication = async () => {};
-
-    expect(runtime.subscriptionSweepTimer).toBeNull();
-    await runtime.start();
-    expect(runtime.subscriptionSweepTimer).not.toBeNull();
-
-    await runtime.stop();
-    expect(runtime.subscriptionSweepTimer).toBeNull();
-  });
-
-  test('a failed start() never leaves a dangling sweep timer', async () => {
-    const runtime = makePulseRuntime({
-      databaseUrl: 'postgresql://user:pass@localhost/test',
-    }) as any;
-
-    runtime.runStartupGuard = async () => {};
-    runtime.ensureBaselines = async () => {
-      throw new Error('boom');
-    };
-
-    await expect(runtime.start()).rejects.toThrow('boom');
-    expect(runtime.subscriptionSweepTimer).toBeNull();
   });
 });

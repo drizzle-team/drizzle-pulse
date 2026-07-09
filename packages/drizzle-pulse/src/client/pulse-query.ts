@@ -2,13 +2,15 @@ import { comparePkValues, isPkComparable } from '../shared/pk-utils.js';
 import type {
   LoadMoreResponse as ProtocolLoadMoreResponse,
   PullResponse as ProtocolPullResponse,
+  PullResponseErrorResult,
   SubscribeResponse as ProtocolSubscribeResponse,
+  PullSubscriptionRequest,
 } from '../shared/protocol-types.js';
 import type { PulseEvent } from '../shared/pulse-events.js';
 import { PulseMergeCore } from '../shared/pulse-merge-core.js';
 import type { QueryDescriptor } from '../types.js';
 import type { PullClient } from './create-client.js';
-import { deserializeResponse } from './superjson.js';
+import type { PulseQueryTransport } from './transport.js';
 
 export type {
   PulseDeleteEvent,
@@ -27,11 +29,21 @@ export interface PulseQueryState<TResult> {
 
 export type CreatePulseQueryOptions<TResult extends Record<string, unknown> & { $pk: unknown }> = {
   onStateChange?: (state: PulseQueryState<TResult>) => void;
+  // Fired after a pull applies events (with the response events) and after a reset (with []).
+  // The embedded facade drives its onChange fan-out from this; the HTTP client ignores it.
+  onEvents?: (
+    events: readonly PulseEvent<TResult>[],
+    state: readonly TResult[],
+    snapshotToken: string,
+  ) => void;
 };
 
 export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown }> {
   private readonly onStateChange?: (state: PulseQueryState<TResult>) => void;
-  private readonly pullClient: PullClient;
+  private readonly onEvents?: CreatePulseQueryOptions<TResult>['onEvents'];
+  private readonly transport: PulseQueryTransport;
+  // Present only on the HTTP path; when absent, poll() drives a single-query direct pull.
+  private readonly pullClient?: PullClient;
   private readonly queryKey: string;
 
   private state: PulseQueryState<TResult> = {
@@ -43,15 +55,23 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
   };
 
   private readonly core: PulseMergeCore<TResult>;
-  private subscriptionId: string | null = null;
-  private snapshot = 0;
+  // Cursor token from the server; also the "subscribed" signal — empty until subscribe()
+  // resolves, reset to empty on reset(). Echoed back verbatim on each pull.
+  private snapshot = '';
   private destroyed = false;
+
+  // Direct-poll coalescing: a nudge arriving while a pull is in flight sets `pollAgain` so
+  // exactly one follow-up pull runs — no WAL event is dropped between polls.
+  private directPollInFlight: Promise<void> | null = null;
+  private directPollAgain = false;
 
   constructor(
     private readonly descriptor: QueryDescriptor<TResult>,
     options?: CreatePulseQueryOptions<TResult>,
   ) {
     this.onStateChange = options?.onStateChange;
+    this.onEvents = options?.onEvents;
+    this.transport = descriptor.transport;
     this.pullClient = descriptor.pullClient;
     this.queryKey = `${descriptor.queryName}:${JSON.stringify(descriptor.args)}:${Math.random().toString(36).slice(2, 10)}`;
     this.core = new PulseMergeCore({ order: 'asc', limit: null, rangeStart: null, rangeEnd: null });
@@ -63,33 +83,10 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
 
   async subscribe() {
     try {
-      const body: {
-        clientId: string;
-        queryName: string;
-        args: Record<string, unknown>;
-        subscriptionId?: string;
-      } = {
-        clientId: this.pullClient.clientId,
+      const result = (await this.transport.subscribe({
         queryName: this.descriptor.queryName,
         args: this.descriptor.args,
-      };
-
-      if (this.subscriptionId) {
-        body.subscriptionId = this.subscriptionId;
-      }
-
-      const response = await this.pullClient.fetch(`${this.descriptor.url}/subscribe`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        credentials: 'include',
-      });
-
-      if (!response.ok) {
-        throw new Error(`Subscribe failed: ${response.status}`);
-      }
-
-      const result = deserializeResponse<ProtocolSubscribeResponse<TResult>>(await response.text());
+      })) as ProtocolSubscribeResponse<TResult>;
       if (this.destroyed) {
         return;
       }
@@ -97,11 +94,12 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
       this.core.order = result.order;
       this.core.limit = result.limit;
       this.core.rebuildFromRows(result.rows);
-      this.subscriptionId = result.subscriptionId;
-      this.registerWithPullClient();
       this.core.rangeStart = isPkComparable(result.rangeStart) ? result.rangeStart : null;
       this.core.rangeEnd = isPkComparable(result.rangeEnd) ? result.rangeEnd : null;
       this.snapshot = result.snapshot;
+      if (this.pullClient) {
+        this.registerWithPullClient(this.pullClient);
+      }
 
       this.setState({
         data: this.core.data,
@@ -119,20 +117,28 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
   }
 
   async poll() {
-    if (!this.subscriptionId) {
+    if (!this.snapshot) {
       return;
     }
 
-    await this.pullClient.pollNow();
+    if (this.pullClient) {
+      await this.pullClient.pollNow();
+      return;
+    }
+
+    await this.directPoll();
   }
 
   applyEvents(events: PulseEvent<TResult>[]) {
     const changed = this.core.applyEvents(events);
-    if (changed) this.setState({ data: this.core.data });
+    if (changed) {
+      this.setState({ data: this.core.data });
+      this.onEvents?.(events, this.core.data, this.snapshot);
+    }
   }
 
   async loadMore() {
-    if (this.state.isLoadingMore || !this.subscriptionId) {
+    if (this.state.isLoadingMore || !this.snapshot) {
       return;
     }
 
@@ -153,22 +159,13 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
     this.setState({ isLoadingMore: true });
 
     try {
-      const response = await this.pullClient.fetch(`${this.descriptor.url}/load-more`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          clientId: this.pullClient.clientId,
-          subscriptionId: this.subscriptionId,
-          cursor,
-        }),
-        credentials: 'include',
-      });
-
-      if (!response.ok) {
-        throw new Error(`Load more failed: ${response.status}`);
-      }
-
-      const result = deserializeResponse<ProtocolLoadMoreResponse<TResult>>(await response.text());
+      const result = (await this.transport.loadMore({
+        queryName: this.descriptor.queryName,
+        args: this.descriptor.args,
+        rangeStart: this.core.rangeStart,
+        rangeEnd: this.core.rangeEnd,
+        cursor,
+      })) as ProtocolLoadMoreResponse<TResult>;
       if (this.destroyed) {
         return;
       }
@@ -191,9 +188,8 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
 
   reset() {
     this.unregisterFromPullClient();
-    this.subscriptionId = null;
     this.core.clear();
-    this.snapshot = 0;
+    this.snapshot = '';
     this.setState({
       data: [],
       isLoading: true,
@@ -205,7 +201,6 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
 
   destroy() {
     this.unregisterFromPullClient();
-    this.notifyUnsubscribe();
     this.destroyed = true;
   }
 
@@ -218,7 +213,53 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
     this.onStateChange?.(this.state);
   }
 
-  private applyPullResult(result: ProtocolPullResponse<TResult, PulseEvent<TResult>>) {
+  // Single-query pull for the direct (embedded) path, coalesced so overlapping nudges collapse
+  // into one follow-up pull without dropping any.
+  private async directPoll(): Promise<void> {
+    if (this.directPollInFlight) {
+      this.directPollAgain = true;
+      return this.directPollInFlight;
+    }
+
+    this.directPollInFlight = (async () => {
+      try {
+        do {
+          this.directPollAgain = false;
+          const state = this.buildPullEntry();
+          if (!state) {
+            return;
+          }
+          const results = await this.transport.pull([{ key: this.queryKey, ...state }]);
+          if (this.destroyed) {
+            return;
+          }
+          const result = results[this.queryKey];
+          if (result !== undefined) {
+            this.applyPullResult(result as ProtocolPullResponse<TResult, PulseEvent<TResult>> | PullResponseErrorResult);
+          }
+        } while (this.directPollAgain);
+      } catch (error) {
+        // Surface as query error state (setState no-ops once destroyed), never an unhandled
+        // rejection — background nudges fire poll() fire-and-forget.
+        this.setState({ error: error instanceof Error ? error : new Error(String(error)) });
+      } finally {
+        this.directPollInFlight = null;
+      }
+    })();
+
+    return this.directPollInFlight;
+  }
+
+  private applyPullResult(
+    result: ProtocolPullResponse<TResult, PulseEvent<TResult>> | PullResponseErrorResult,
+  ) {
+    // Error results (e.g. query_resolution_failed after an auth revoke) must not touch the
+    // cursor — the next nudge/poll retries with the same token, so access restored later
+    // resumes delivery instead of freezing the query.
+    if ('error' in result) {
+      this.setState({ error: new Error(result.error) });
+      return;
+    }
     if (result.reset === true) {
       this.core.order = result.order;
       this.core.limit = result.limit;
@@ -232,6 +273,7 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
         isLoading: false,
         error: null,
       });
+      this.onEvents?.([], this.core.data, this.snapshot);
       return;
     }
 
@@ -241,48 +283,36 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
     }
     this.core.rangeStart = isPkComparable(result.rangeStart) ? result.rangeStart : null;
     this.core.rangeEnd = isPkComparable(result.rangeEnd) ? result.rangeEnd : null;
+    if (this.state.error !== null) {
+      this.setState({ error: null });
+    }
+  }
+
+  // The self-describing pull entry (sans `key`): query identity + the client's current window.
+  // order/limit are omitted — the server re-derives them from resolve().
+  private buildPullEntry(): Omit<PullSubscriptionRequest, 'key'> | null {
+    if (!this.snapshot) {
+      return null;
+    }
+    return {
+      queryName: this.descriptor.queryName,
+      args: this.descriptor.args,
+      rangeStart: this.core.rangeStart,
+      rangeEnd: this.core.rangeEnd,
+      hasMore: this.state.hasMore,
+      snapshot: this.snapshot,
+    };
   }
 
   private unregisterFromPullClient() {
-    this.pullClient.unregister(this.queryKey);
+    this.pullClient?.unregister(this.queryKey);
   }
 
-  // Best-effort teardown call: frees the subscription server-side immediately
-  // instead of relying solely on the idle sweep. Fire-and-forget — destroy() is
-  // synchronous, and a network failure here just means the sweep (or a later reused
-  // subscriptionId) cleans it up instead.
-  private notifyUnsubscribe() {
-    if (!this.subscriptionId) {
-      return;
-    }
-
-    void this.pullClient
-      .fetch(`${this.descriptor.url}/unsubscribe`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          clientId: this.pullClient.clientId,
-          subscriptionId: this.subscriptionId,
-        }),
-        credentials: 'include',
-      })
-      .catch(() => {});
-  }
-
-  private registerWithPullClient() {
-    this.pullClient.register(this.queryKey, {
-      getSubscriptionState: () => {
-        if (!this.subscriptionId) {
-          return null;
-        }
-
-        return {
-          subscriptionId: this.subscriptionId,
-          snapshot: this.snapshot,
-        };
-      },
+  private registerWithPullClient(pullClient: PullClient) {
+    pullClient.register(this.queryKey, {
+      getSubscriptionState: () => this.buildPullEntry(),
       applyPullResult: (result) => {
-        this.applyPullResult(result as ProtocolPullResponse<TResult, PulseEvent<TResult>>);
+        this.applyPullResult(result as ProtocolPullResponse<TResult, PulseEvent<TResult>> | PullResponseErrorResult);
       },
       onPullError: (error) => {
         this.setState({ error });

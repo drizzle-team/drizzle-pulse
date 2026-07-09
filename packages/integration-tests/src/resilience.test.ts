@@ -35,6 +35,9 @@ async function waitFor(
 // ---------------------------------------------------------------------------
 // Resilience suite — isolated variantName so its runtime/database is
 // independent of the embedded-collection and lifecycle suites.
+//
+// The bespoke rebaseline/debounce engine is gone: reconnect now just nudges the
+// collection's PulseQuery to poll, catching up through the one pull pipeline.
 // ---------------------------------------------------------------------------
 
 describe('Resilience', () => {
@@ -69,15 +72,12 @@ describe('Resilience', () => {
     await insertTestUser(db, `driver_${randomUUID().slice(0, 8)}`);
   });
 
-  // SC1 — reconnect drives a re-baseline of all live collections.
-  //
-  // The re-baseline edge fires onChange with empty events (list() ref changed)
-  // and the collection must stay ready — the handshake is not re-run from scratch.
-  test('reconnect re-baselines the bound collection through the handshake', async () => {
+  // A reconnect edge triggers a catch-up poll, and the live collection keeps
+  // reflecting DB state before and after the edge — through the single pipeline.
+  test('reconnect edge triggers a catch-up poll and the collection stays consistent', async () => {
     const client = createPulseClient(runtime);
     const collection = await client.ordersByStatus({ status: 'accepted' });
 
-    // Establish live state: 2 rows via the WAL tap path.
     await processDbOperations([
       db
         .insert(orders)
@@ -87,78 +87,21 @@ describe('Resilience', () => {
         .values({ driverId: 1, pickup: 'P2', dropoff: 'D2', price: 20, status: 'accepted' }),
     ]);
 
-    // Third row — DB now has 3 accepted rows; collection has them via WAL tap.
+    await waitFor(() => collection.list().length === 2, 2000);
+
+    // Simulate a WAL reconnect: the runtime broadcasts the reconnect edge, which the
+    // collection wires to query.poll(). State must stay consistent (no loss, no dup).
+    (runtime as any).onReplicationStart();
+    await waitFor(() => collection.list().length === 2, 2000);
+    expect(new Set(collection.list().map((r) => r.id)).size).toBe(2);
+
+    // The pipeline keeps delivering after the reconnect edge.
     await processDbOperations([
       db
         .insert(orders)
         .values({ driverId: 1, pickup: 'P3', dropoff: 'D3', price: 30, status: 'accepted' }),
     ]);
-
-    expect(collection.list()).toHaveLength(3);
-
-    // Register onChange AFTER setup so the counter only captures rebaseline edges.
-    let changeCount = 0;
-    collection.onChange(() => {
-      changeCount++;
-    });
-
-    // Simulate a WAL reconnect: the runtime broadcasts the reconnect edge and the
-    // embedded client debounces it (50 ms) and re-baselines its live collections.
-    (runtime as any).onReplicationStart();
-
-    // Wait for the single re-baseline edge onChange to fire.
-    await waitFor(() => changeCount > 0, 500);
-
-    expect(changeCount).toBeGreaterThanOrEqual(1);
-    // Re-baseline must reflect the full current DB state.
-    expect(collection.list()).toHaveLength(3);
-    // The collection must stay ready — re-baseline never re-runs the handshake.
-    expect(collection.isReady).toBe(true);
-
-    collection.dispose();
-  });
-
-  // SC2 — rapid re-baseline triggers coalesce to a single re-baseline pass.
-  //
-  // N synchronous calls in the same tick all land inside the 50 ms debounce
-  // window → one _runRebaselines invocation → one rebaseline() call →
-  // one _fireOnChange([], snapshot) → exactly one edge onChange.
-  // (Concurrent re-baselines being capped at 3 is proven in the unit test;
-  // this integration test proves real-pipeline coalescing on a live WAL stack.)
-  test('rapid re-baseline triggers coalesce to a single re-baseline edge onChange', async () => {
-    const client = createPulseClient(runtime);
-    const collection = await client.ordersByStatus({ status: 'accepted' });
-
-    // Seed real baseline state so the SELECT returns rows.
-    await processDbOperations([
-      db
-        .insert(orders)
-        .values({ driverId: 1, pickup: 'PA', dropoff: 'DA', price: 11, status: 'accepted' }),
-      db
-        .insert(orders)
-        .values({ driverId: 1, pickup: 'PB', dropoff: 'DB', price: 22, status: 'accepted' }),
-    ]);
-
-    expect(collection.list()).toHaveLength(2);
-
-    let edgeCount = 0;
-    collection.onChange(() => {
-      edgeCount++;
-    });
-
-    // 5 synchronous reconnect edges — all within the same JS tick, all before the
-    // client's 50 ms debounce fires. The debounce collapses them to one run.
-    const N = 5;
-    for (let i = 0; i < N; i++) {
-      (runtime as any).onReplicationStart();
-    }
-
-    await waitFor(() => edgeCount > 0, 50 + 400);
-
-    // Exactly ONE edge onChange — proving coalescing with no fan-out.
-    expect(edgeCount).toBe(1);
-    // Post-coalesce list() still equals DB state.
-    expect(collection.list()).toHaveLength(2);
+    await waitFor(() => collection.list().length === 3, 2000);
 
     collection.dispose();
   });

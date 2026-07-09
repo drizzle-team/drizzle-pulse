@@ -8,7 +8,6 @@ function getDescriptorKey(descriptor: QueryDescriptor<unknown>) {
     queryName: descriptor.queryName,
     args: descriptor.args,
     url: descriptor.url,
-    clientId: descriptor.pullClient.clientId,
   });
 }
 

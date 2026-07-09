@@ -17,15 +17,11 @@ const ENTRY_POINTS = [
   join(SRC_ROOT, 'index.ts'),
 ];
 
-// The schema-definition / kit-recognition surface: reached only from the root entrypoint and
-// consumed server-side or by drizzle-kit (Node) — never browser bundles — so these modules
-// alone may value-import drizzle-orm/pg-core. events-table-resolver.ts is the events-table
-// builder the root re-exports for kit's dynamic-import guard. Every other banned specifier
-// still applies, and client/react/embedded reach none of these modules.
-const PG_CORE_ALLOWED = new Set([
-  join(SRC_ROOT, 'pulse-table.ts'),
-  join(SRC_ROOT, 'server/events-table-resolver.ts'),
-]);
+// The schema-definition surface: reached only from the root entrypoint and consumed
+// server-side — never browser bundles — so this module alone may value-import
+// drizzle-orm/pg-core (pulse-table.ts needs getTableConfig). Every other banned specifier
+// still applies, and client/react/embedded reach none of it.
+const PG_CORE_ALLOWED = new Set([join(SRC_ROOT, 'pulse-table.ts')]);
 
 // Covers every bare (non-`node:`-prefixed) builtin specifier, including subpaths
 // like `fs/promises`; `node:`-prefixed specifiers are caught separately below.
@@ -197,15 +193,16 @@ describe('platform-agnostic entrypoint import purity', () => {
 
     // Sanity check: the traversal must actually walk a real subgraph, not just the
     // four entry files, or this test would pass vacuously. Assert one known-reachable
-    // module per layer (client, react, shared, and — via embedded — server) so a
-    // partially broken traversal can't hide behind a raw count.
+    // module per layer (client, react, shared) so a partially broken traversal can't
+    // hide behind a raw count. The embedded client reaches the server only through
+    // `import type` edges (the runtime is passed in, never imported), so no server
+    // module is value-reachable — exactly the purity this test guards.
     expect(visited.length).toBeGreaterThan(10);
     const KNOWN_REACHABLE = [
       join(SRC_ROOT, 'client/pulse-query.ts'),
       join(SRC_ROOT, 'client/react/use-pulse-query.ts'),
       join(SRC_ROOT, 'shared/pulse-merge-core.ts'),
       join(SRC_ROOT, 'shared/superjson.ts'),
-      join(SRC_ROOT, 'server/pulse-sql.ts'),
     ];
     for (const file of KNOWN_REACHABLE) {
       expect(visited).toContain(file);

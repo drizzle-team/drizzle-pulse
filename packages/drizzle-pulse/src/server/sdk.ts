@@ -1,4 +1,3 @@
-import * as crypto from 'node:crypto';
 import { and, eq, getColumns, gt, or, sql } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { extractRow } from '../shared/event-normalization.js';
@@ -13,18 +12,21 @@ import type {
   PullResponseErrorResult,
   SubscribeRequest,
   SubscribeResponse,
-  UnsubscribeRequest,
-  UnsubscribeResponse,
 } from '../shared/protocol-types.js';
 
 import type { PulseAuthContext, RealtimeEvent, ResolvedPulseQuery, WhereClause } from '../types.js';
+import { formatCursor, parseCursor } from './cursor.js';
 import { buildWhereClausePredicate } from './drizzle-utils.js';
 import type { AnyPulseBuilders, PulseRegistry } from './pulse-registry.js';
 import { applyResponsePipeline } from './pulse-registry.js';
 import type { PulseSourceDb } from './pulse-sql.js';
 import { buildSelectQuery } from './pulse-sql.js';
 import { getQueryColumnKey } from './pulse-types.js';
-import type { RealtimeService, Subscription, SubscriptionManager } from './realtime-store.js';
+import type { RealtimeService } from './realtime-store.js';
+
+// Hard cap on events a single pull may replay; overflow falls back to a full reset instead
+// of streaming an unbounded batch. Overridable via ExposeConfig.pullEventLimit.
+export const DEFAULT_PULL_EVENT_LIMIT = 1000;
 
 export type SubscribeHandlerResponseBody =
   | SubscribeResponse<Record<string, unknown>>
@@ -32,7 +34,6 @@ export type SubscribeHandlerResponseBody =
 export type LoadMoreHandlerResponseBody =
   | LoadMoreResponse<Record<string, unknown>>
   | { error: string };
-export type UnsubscribeHandlerResponseBody = UnsubscribeResponse | { error: string };
 export type PullHandlerResponseBody =
   | {
       results: Record<
@@ -45,6 +46,18 @@ export type PullHandlerResponseBody =
 export type RealtimeHandlerResult<TBody> = {
   status: number;
   body: TBody;
+};
+
+// The per-request replacement for the old server-held Subscription: reconstructed on every
+// request from the (auth-re-resolved) query plus the client's current window. order/limit
+// come from `query` (server-derived, never trusted from the client); rangeStart/rangeEnd and
+// hasMore are client-supplied and only narrow/annotate the window.
+type Subscription = {
+  queryName: string;
+  query: ResolvedPulseQuery;
+  rangeStart: unknown | null;
+  rangeEnd: unknown | null;
+  hasMore: boolean;
 };
 
 type NormalizedEvent = {
@@ -61,9 +74,10 @@ export class RealtimeRequestHandler {
   constructor(
     private readonly registry: PulseRegistry<AnyPulseBuilders>,
     private readonly sourceDb: PulseSourceDb,
-    private readonly subscriptionManager: SubscriptionManager,
     private readonly getRealtimeService: () => Pick<RealtimeService, 'getDb' | 'getLatestSnapshot'>,
     private readonly getEventsTable: (queryName: string) => PgTable,
+    private readonly getEpoch: (queryName: string) => string | undefined,
+    private readonly pullEventLimit: number = DEFAULT_PULL_EVENT_LIMIT,
   ) {}
 
   async subscribe(
@@ -71,8 +85,7 @@ export class RealtimeRequestHandler {
     auth: PulseAuthContext,
   ): Promise<RealtimeHandlerResult<SubscribeHandlerResponseBody>> {
     try {
-      const { clientId: rawClientId, queryName, args, subscriptionId } = request;
-      const clientId = this.getClientId(rawClientId);
+      const { queryName, args } = request;
 
       let resolvedQuery: ResolvedPulseQuery;
       let sourceTable: PgTable;
@@ -116,47 +129,13 @@ export class RealtimeRequestHandler {
         [rangeStart, rangeEnd] = [rangeEnd, rangeStart];
       }
 
-      let subscription =
-        subscriptionId && clientId ? this.subscriptionManager.get(clientId, subscriptionId) : null;
-      // Trust boundary: a subscriptionId owned by a different user is neither updated nor
-      // reused for creation (create() would overwrite the victim's entry) — fall through
-      // to the final branch, which mints a fresh id.
-      const ownershipMismatch = subscription !== null && subscription.auth.userId !== auth.userId;
-      if (ownershipMismatch) {
-        subscription = null;
-      }
-      if (subscription) {
-        this.subscriptionManager.update(clientId, subscription.id, {
-          query: resolvedQuery,
-          queryName,
-          auth,
-        });
-      } else if (subscriptionId && !ownershipMismatch) {
-        subscription = this.subscriptionManager.create(
-          clientId,
-          queryName,
-          resolvedQuery,
-          auth,
-          subscriptionId,
-        );
-      } else {
-        subscription = this.subscriptionManager.create(clientId, queryName, resolvedQuery, auth);
-      }
-
-      this.subscriptionManager.update(clientId, subscription.id, {
-        rangeStart,
-        rangeEnd,
-        hasMore,
-      });
       const pipelinedRows = await applyResponsePipeline(rows, resolvedQuery);
 
       const response: SubscribeResponse<Record<string, unknown>> = {
-        clientId,
-        subscriptionId: subscription.id,
         rows: pipelinedRows,
         rangeStart,
         rangeEnd,
-        snapshot,
+        snapshot: this.token(queryName, snapshot),
         order: resolvedQuery.order,
         limit: resolvedQuery.limit,
         hasMore,
@@ -174,21 +153,32 @@ export class RealtimeRequestHandler {
     auth: PulseAuthContext,
   ): Promise<RealtimeHandlerResult<LoadMoreHandlerResponseBody>> {
     try {
-      const { clientId, subscriptionId, cursor } = request;
-      if (!clientId) return { status: 400, body: { error: 'missing_client_id' } };
-      if (!subscriptionId) return { status: 400, body: { error: 'missing_subscription_id' } };
+      const { queryName, args, cursor } = request;
 
-      const subscription = this.subscriptionManager.get(clientId, subscriptionId);
-      if (!subscription) return { status: 404, body: { error: 'subscription_not_found' } };
-      if (subscription.auth.userId !== auth.userId) {
-        return { status: 404, body: { error: 'subscription_not_found' } };
+      let resolvedQuery: ResolvedPulseQuery;
+      try {
+        resolvedQuery = this.registry.resolve(queryName, args, auth);
+        if (!this.registry.getSourceTable(queryName)) {
+          throw new Error(`Unknown query: "${queryName}"`);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Validation failed';
+        return { status: 400, body: { error: message } };
       }
+
       if (cursor === undefined || cursor === null) {
         return { status: 400, body: { error: 'missing_cursor' } };
       }
       if (!isPkComparable(cursor)) {
         return { status: 400, body: { error: 'invalid_cursor' } };
       }
+
+      const subscription = this.reconstructSubscription(
+        queryName,
+        resolvedQuery,
+        request.rangeStart,
+        request.rangeEnd,
+      );
 
       // WhereClause keys are matched against query.columns (JS property names), not SQL
       // names — use the PK's JS query key here, not pkColumn.name.
@@ -246,12 +236,6 @@ export class RealtimeRequestHandler {
             : newRangeEnd
           : subscription.rangeEnd;
 
-      this.subscriptionManager.update(clientId, subscriptionId, {
-        rangeStart: updatedRangeStart,
-        rangeEnd: updatedRangeEnd,
-        hasMore,
-      });
-
       const pipelinedRows = await applyResponsePipeline(fetchedRows, subscription.query);
       const response: LoadMoreResponse<Record<string, unknown>> = {
         rows: pipelinedRows,
@@ -266,46 +250,14 @@ export class RealtimeRequestHandler {
     }
   }
 
-  // Lets a cleanly-unmounted client free its slot instead of waiting for the idle sweep.
-  async unsubscribe(
-    request: UnsubscribeRequest,
-    auth: PulseAuthContext,
-  ): Promise<RealtimeHandlerResult<UnsubscribeHandlerResponseBody>> {
-    try {
-      const { clientId, subscriptionId } = request;
-      if (!clientId) return { status: 400, body: { error: 'missing_client_id' } };
-      if (!subscriptionId) return { status: 400, body: { error: 'missing_subscription_id' } };
-
-      const subscription = this.subscriptionManager.get(clientId, subscriptionId);
-      if (!subscription || subscription.auth.userId !== auth.userId) {
-        // Same trust boundary as loadMore/pull: don't reveal whether a subscription
-        // exists under a different owner, and don't let a caller delete it either.
-        return { status: 404, body: { error: 'subscription_not_found' } };
-      }
-
-      this.subscriptionManager.delete(clientId, subscriptionId);
-      return { status: 200, body: { ok: true } };
-    } catch {
-      return { status: 500, body: { error: 'server_error' } };
-    }
-  }
-
   async pull(
     request: PullRequest,
     auth: PulseAuthContext,
   ): Promise<RealtimeHandlerResult<PullHandlerResponseBody>> {
     try {
-      const { clientId, subscriptions } = request;
-      if (!clientId) {
-        return { status: 400, body: { error: 'missing_client_id' } };
-      }
+      const { subscriptions } = request;
       if (!Array.isArray(subscriptions)) {
         return { status: 400, body: { error: 'missing_subscriptions' } };
-      }
-
-      const client = this.subscriptionManager.getClient(clientId);
-      if (!client) {
-        return { status: 200, body: { results: {} } };
       }
 
       const realtimeService = this.getRealtimeService();
@@ -314,62 +266,62 @@ export class RealtimeRequestHandler {
         PullResponse<Record<string, unknown>, RealtimeEvent> | PullResponseErrorResult
       > = {};
 
-      for (const subscriptionRequest of subscriptions) {
-        const { subscriptionId } = subscriptionRequest;
-        if (!subscriptionId) {
+      for (const entry of subscriptions) {
+        // Guard before destructuring: a null entry must not escape per-entry isolation
+        // and 500 the whole batch.
+        if (entry === null || typeof entry !== 'object') {
+          continue;
+        }
+        const { key, queryName, args } = entry;
+        if (typeof key !== 'string' || key.length === 0) {
           continue;
         }
 
-        const subscription = this.subscriptionManager.get(clientId, subscriptionId);
-        if (!subscription || subscription.auth.userId !== auth.userId) {
-          results[subscriptionId] = {
-            error: 'subscription_not_found',
-            reset: true,
-            reason: 'subscription_not_found',
-          };
+        // Re-resolve per pull so auth changes (a revoked queryFn filter) take effect on the
+        // next pull without any server-held subscription to invalidate.
+        let resolvedQuery: ResolvedPulseQuery;
+        try {
+          resolvedQuery = this.registry.resolve(queryName, args, auth);
+          if (!this.registry.getSourceTable(queryName)) {
+            throw new Error(`Unknown query: "${queryName}"`);
+          }
+        } catch {
+          results[key] = { error: 'query_resolution_failed' };
           continue;
         }
 
-        // A subscription only stays alive as long as its client keeps pulling — this is
-        // the sole activity signal the idle sweep (SubscriptionManager.sweepIdle) uses
-        // to evict abandoned subscriptions.
-        this.subscriptionManager.touch(clientId, subscriptionId);
+        const subscription = this.reconstructSubscription(
+          queryName,
+          resolvedQuery,
+          entry.rangeStart,
+          entry.rangeEnd,
+          entry.hasMore ?? false,
+        );
 
-        const sinceSnapshot =
-          typeof subscriptionRequest.snapshot === 'number' ? subscriptionRequest.snapshot : 0;
+        // Validate the epoch token BEFORE any snapshot comparison: a stale token (minted
+        // against a since-recreated events table) or an unparseable one resets immediately.
+        const currentEpoch = this.getEpoch(queryName);
+        const parsed = typeof entry.snapshot === 'string' ? parseCursor(entry.snapshot) : null;
+        if (parsed === null || currentEpoch === undefined || parsed.epoch !== currentEpoch) {
+          results[key] = await this.resetOrError(subscription, realtimeService, 'epoch');
+          continue;
+        }
+
         const incremental = await this.buildIncrementalResponse(
           subscription,
-          sinceSnapshot,
+          parsed.snapshot,
           realtimeService,
         );
         if ('error' in incremental) {
-          results[subscriptionId] = { error: incremental.error };
+          results[key] = { error: incremental.error };
           continue;
         }
         if ('reset' in incremental && incremental.reset === true) {
-          const latestSnapshot = await realtimeService.getLatestSnapshot(
-            this.getEventsTable(subscription.queryName),
-          );
-          const rerun = await this.buildResetResponse(subscription, latestSnapshot);
-          if ('error' in rerun) {
-            results[subscriptionId] = { error: 'reset_failed' };
-            continue;
-          }
-
-          this.subscriptionManager.update(clientId, subscriptionId, {
-            rangeStart: rerun.rangeStart,
-            rangeEnd: rerun.rangeEnd,
-            hasMore: rerun.hasMore,
-          });
-          results[subscriptionId] = rerun;
+          results[key] = await this.resetOrError(subscription, realtimeService, incremental.reason);
           continue;
         }
 
-        this.subscriptionManager.update(clientId, subscriptionId, {
-          rangeStart: incremental.rangeStart,
-          rangeEnd: incremental.rangeEnd,
-        });
-        results[subscriptionId] = incremental;
+        results[key] = incremental;
       }
 
       return { status: 200, body: { results } };
@@ -379,8 +331,44 @@ export class RealtimeRequestHandler {
     }
   }
 
-  private getClientId(rawClientId: string | undefined): string {
-    return rawClientId && rawClientId.length > 0 ? rawClientId : crypto.randomUUID();
+  private async resetOrError(
+    subscription: Subscription,
+    realtimeService: Pick<RealtimeService, 'getDb' | 'getLatestSnapshot'>,
+    reason: string,
+  ): Promise<PullResetResponse<Record<string, unknown>, RealtimeEvent> | PullResponseErrorResult> {
+    const latestSnapshot = await realtimeService.getLatestSnapshot(
+      this.getEventsTable(subscription.queryName),
+    );
+    const rerun = await this.buildResetResponse(subscription, latestSnapshot, reason);
+    if ('error' in rerun) {
+      return { error: 'reset_failed' };
+    }
+    return rerun;
+  }
+
+  private reconstructSubscription(
+    queryName: string,
+    query: ResolvedPulseQuery,
+    rawRangeStart: unknown,
+    rawRangeEnd: unknown,
+    hasMore = false,
+  ): Subscription {
+    return {
+      queryName,
+      query,
+      rangeStart: isPkComparable(rawRangeStart) ? rawRangeStart : null,
+      rangeEnd: isPkComparable(rawRangeEnd) ? rawRangeEnd : null,
+      hasMore,
+    };
+  }
+
+  private token(queryName: string, snapshot: number): string {
+    const epoch = this.getEpoch(queryName);
+    if (epoch === undefined) {
+      // Only reachable before reconcile() has populated epochs; a running runtime always has one.
+      throw new Error(`No epoch reconciled for query "${queryName}"`);
+    }
+    return formatCursor(epoch, snapshot);
   }
 
   // PK's JS property key (query.columns), which diverges from its SQL name for e.g.
@@ -494,6 +482,7 @@ export class RealtimeRequestHandler {
   private async buildResetResponse(
     subscription: Subscription,
     latestSnapshot: number,
+    reason = 'snapshot',
   ): Promise<PullResetResponse<Record<string, unknown>, RealtimeEvent> | PullResponseError> {
     const sourceTable = this.registry.getSourceTable(subscription.queryName);
     if (!sourceTable) {
@@ -525,9 +514,9 @@ export class RealtimeRequestHandler {
       rows: pipelinedRows,
       rangeStart,
       rangeEnd,
-      snapshot: latestSnapshot,
+      snapshot: this.token(subscription.queryName, latestSnapshot),
       reset: true,
-      reason: 'snapshot',
+      reason,
       order: subscription.query.order,
       limit: subscription.query.limit,
       hasMore: subscription.hasMore,
@@ -551,7 +540,7 @@ export class RealtimeRequestHandler {
         events: [],
         rangeStart: subscription.rangeStart,
         rangeEnd: subscription.rangeEnd,
-        snapshot: sinceSnapshot,
+        snapshot: this.token(subscription.queryName, sinceSnapshot),
       };
     }
 
@@ -626,7 +615,12 @@ export class RealtimeRequestHandler {
           ),
         ),
       )
-      .orderBy(snapshotColumn);
+      .orderBy(snapshotColumn)
+      // +1 so an exactly-at-cap batch is distinguishable from an over-cap one.
+      .limit(this.pullEventLimit + 1);
+    if (rawEvents.length > this.pullEventLimit) {
+      return { reset: true, reason: 'cap' };
+    }
     const normalizedEvents = rawEvents.map((rawEvent) =>
       this.normalizeEvent(rawEvent, subscription.query),
     );
@@ -700,7 +694,7 @@ export class RealtimeRequestHandler {
       events,
       rangeStart: nextRange.rangeStart,
       rangeEnd: nextRange.rangeEnd,
-      snapshot: nextSnapshot,
+      snapshot: this.token(subscription.queryName, nextSnapshot),
     };
   }
 }

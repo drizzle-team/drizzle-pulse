@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { eq, sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createPulseRegistry } from 'drizzle-pulse/server';
@@ -107,12 +107,7 @@ describe('Runtime Contracts', () => {
       }),
     ]);
 
-    const pullResponse = await pullClient(
-      router,
-      subscription.clientId,
-      subscription.subscriptionId,
-      subscription.snapshot,
-    );
+    const pullResponse = await pullClient(router, subscription);
 
     expect(pullResponse.events).toHaveLength(1);
     expect(pullResponse.events[0]).toEqual(
@@ -155,12 +150,7 @@ describe('Runtime Contracts', () => {
       db.update(orders).set({ status: 'accepted' }).where(eq(orders.id, seededId)),
     ]);
 
-    const updatePull = await pullClient(
-      router,
-      subscription.clientId,
-      subscription.subscriptionId,
-      subscription.snapshot,
-    );
+    const updatePull = await pullClient(router, subscription);
 
     expect(updatePull.events).toHaveLength(1);
     expect(updatePull.events[0]).toEqual(
@@ -195,12 +185,7 @@ describe('Runtime Contracts', () => {
       db.update(orders).set({ status: 'requested' }).where(eq(orders.id, seededId)),
     ]);
 
-    const updatePull = await pullClient(
-      router,
-      subscription.clientId,
-      subscription.subscriptionId,
-      subscription.snapshot,
-    );
+    const updatePull = await pullClient(router, subscription);
 
     expect(updatePull.events).toHaveLength(1);
     expect(updatePull.events[0]).toEqual(
@@ -212,11 +197,11 @@ describe('Runtime Contracts', () => {
     );
   });
 
-  test('stale snapshot gets exact reset response after snapshot baseline reset', async () => {
-    const subscription = await subscribeClient(router, 'ordersByStatus', { status: 'requested' });
-    const staleSnapshot = subscription.snapshot;
-    const staleSubscriptionId = subscription.subscriptionId;
+  test('a token minted against a since-recreated events table resets on epoch mismatch', async () => {
+    const stale = await subscribeClient(router, 'ordersByStatus', { status: 'requested' });
 
+    // Bounce the runtime: teardown drops the DB, setup reconciles a fresh events table and
+    // rotates its epoch — so `stale.token`'s epoch no longer matches.
     await teardownTestSuiteForFixture(fixture, registry);
     const restarted = await setupTestSuiteForFixture(fixture, registry);
     router = restarted.router;
@@ -226,33 +211,9 @@ describe('Runtime Contracts', () => {
     runtime = restarted.runtime;
     await insertTestUser(db, `driver_${randomUUID().slice(0, 8)}`);
 
-    await router.request('/subscribe', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        clientId: subscription.clientId,
-        queryName: 'ordersByStatus',
-        args: { status: 'requested' },
-        subscriptionId: staleSubscriptionId,
-      }),
-    });
-
-    await db.execute(sql`TRUNCATE TABLE drizzle_pulse.public_orders RESTART IDENTITY`);
-    await db.execute(
-      sql`INSERT INTO drizzle_pulse.public_orders (id, "$op") OVERRIDING SYSTEM VALUE VALUES (1, 'snapshot')`,
-    );
-    await db.execute(
-      sql`SELECT setval(pg_get_serial_sequence('drizzle_pulse.public_orders', '$snapshot'), 1, true)`,
-    );
-
-    const pullResponse = await pullClient(
-      router,
-      subscription.clientId,
-      subscription.subscriptionId,
-      staleSnapshot,
-    );
+    const pullResponse = await pullClient(router, stale);
     expect(pullResponse.reset).toBe(true);
-    expect(pullResponse.reason).toBe('snapshot');
+    expect(pullResponse.reason).toBe('epoch');
     expect(pullResponse.events).toEqual([]);
   });
 
@@ -279,18 +240,8 @@ describe('Runtime Contracts', () => {
 
     await waitForEventsForFixture(fixture, pool, requestedSubscription.snapshot, 1);
 
-    const requestedPhaseOne = await pullClient(
-      router,
-      requestedSubscription.clientId,
-      requestedSubscription.subscriptionId,
-      requestedSubscription.snapshot,
-    );
-    const acceptedPhaseOne = await pullClient(
-      router,
-      acceptedSubscription.clientId,
-      acceptedSubscription.subscriptionId,
-      acceptedSubscription.snapshot,
-    );
+    const requestedPhaseOne = await pullClient(router, requestedSubscription);
+    const acceptedPhaseOne = await pullClient(router, acceptedSubscription);
 
     expect(requestedPhaseOne.events).toHaveLength(1);
     expect(requestedPhaseOne.events[0]).toEqual(
@@ -317,18 +268,8 @@ describe('Runtime Contracts', () => {
 
     await waitForEventsForFixture(fixture, pool, requestedPhaseOne.snapshot, 1);
 
-    const requestedPhaseTwo = await pullClient(
-      router,
-      requestedSubscription.clientId,
-      requestedSubscription.subscriptionId,
-      requestedPhaseOne.snapshot,
-    );
-    const acceptedPhaseTwo = await pullClient(
-      router,
-      acceptedSubscription.clientId,
-      acceptedSubscription.subscriptionId,
-      acceptedPhaseOne.snapshot,
-    );
+    const requestedPhaseTwo = await pullClient(router, requestedPhaseOne);
+    const acceptedPhaseTwo = await pullClient(router, acceptedPhaseOne);
 
     expect(requestedPhaseTwo.events).toEqual([]);
     expect(acceptedPhaseTwo.events).toHaveLength(1);
@@ -341,36 +282,9 @@ describe('Runtime Contracts', () => {
     );
   });
 
-  test('single batched pull returns results for multiple subscriptions under one client', async () => {
-    const clientId = randomUUID();
-    const requestedSubscribe = await router.request('/subscribe', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        clientId,
-        queryName: 'ordersByStatus',
-        args: { status: 'requested' },
-      }),
-    });
-    const acceptedSubscribe = await router.request('/subscribe', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        clientId,
-        queryName: 'ordersByStatus',
-        args: { status: 'accepted' },
-      }),
-    });
-    const requestedSubscription = SuperJSON.parse(await requestedSubscribe.text()) as {
-      clientId: string;
-      subscriptionId: string;
-      snapshot: number;
-    };
-    const acceptedSubscription = SuperJSON.parse(await acceptedSubscribe.text()) as {
-      clientId: string;
-      subscriptionId: string;
-      snapshot: number;
-    };
+  test('single batched pull returns results for multiple self-describing entries', async () => {
+    const requested = await subscribeClient(router, 'ordersByStatus', { status: 'requested' });
+    const accepted = await subscribeClient(router, 'ordersByStatus', { status: 'accepted' });
 
     await processDbOperations([
       db.insert(orders).values({
@@ -393,15 +307,22 @@ describe('Runtime Contracts', () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        clientId,
         subscriptions: [
           {
-            subscriptionId: requestedSubscription.subscriptionId,
-            snapshot: requestedSubscription.snapshot,
+            key: 'req',
+            queryName: requested.queryName,
+            args: requested.args,
+            rangeStart: requested.rangeStart,
+            rangeEnd: requested.rangeEnd,
+            snapshot: requested.token,
           },
           {
-            subscriptionId: acceptedSubscription.subscriptionId,
-            snapshot: acceptedSubscription.snapshot,
+            key: 'acc',
+            queryName: accepted.queryName,
+            args: accepted.args,
+            rangeStart: accepted.rangeStart,
+            rangeEnd: accepted.rangeEnd,
+            snapshot: accepted.token,
           },
         ],
       }),
@@ -411,11 +332,9 @@ describe('Runtime Contracts', () => {
     };
 
     expect(response.status).toBe(200);
-    expect(Object.keys(parsed.results).sort()).toEqual(
-      [requestedSubscription.subscriptionId, acceptedSubscription.subscriptionId].sort(),
-    );
-    expect(parsed.results[requestedSubscription.subscriptionId]?.events).toHaveLength(1);
-    expect(parsed.results[acceptedSubscription.subscriptionId]?.events).toHaveLength(1);
+    expect(Object.keys(parsed.results).sort()).toEqual(['acc', 'req']);
+    expect(parsed.results.req?.events).toHaveLength(1);
+    expect(parsed.results.acc?.events).toHaveLength(1);
   });
 
   test('auth-scoped subscriptions keep subscribe, pull, and load-more tied to the same user', async () => {
@@ -477,18 +396,8 @@ describe('Runtime Contracts', () => {
       }),
     ]);
 
-    const driverOnePull = await pullClient(
-      driverOneRouter,
-      driverOneSubscription.clientId,
-      driverOneSubscription.subscriptionId,
-      driverOneSubscription.snapshot,
-    );
-    const driverTwoPull = await pullClient(
-      driverTwoRouter,
-      driverTwoSubscription.clientId,
-      driverTwoSubscription.subscriptionId,
-      driverTwoSubscription.snapshot,
-    );
+    const driverOnePull = await pullClient(driverOneRouter, driverOneSubscription);
+    const driverTwoPull = await pullClient(driverTwoRouter, driverTwoSubscription);
 
     expect(driverOnePull.events).toHaveLength(1);
     expect(driverOnePull.events[0]).toEqual(
@@ -499,23 +408,26 @@ describe('Runtime Contracts', () => {
     );
     expect(driverTwoPull.events).toEqual([]);
 
-    const crossUserPull = await pullClient(
-      driverTwoRouter,
-      driverOneSubscription.clientId,
-      driverOneSubscription.subscriptionId,
-      driverOneSubscription.snapshot,
-    );
-    expect(crossUserPull.reset).toBe(true);
-    expect(crossUserPull.reason).toBe('subscription_not_found');
+    // Stateless auth re-resolution: a pull's auth comes from the router, never the cursor.
+    // Replaying driverOne's cursor through driverTwo's router resolves the query under
+    // driverTwo's auth, so driverOne's private new order (204) is filtered out — no leak.
+    const crossUserPull = await pullClient(driverTwoRouter, driverOneSubscription);
+    expect(
+      crossUserPull.events.map((event) => (event.row as { price?: number } | undefined)?.price),
+    ).not.toContain(204);
+
+    const loadMoreBody = {
+      queryName: 'authScopedByStatus',
+      args: { status: 'requested' },
+      rangeStart: driverOnePull.rangeStart,
+      rangeEnd: driverOnePull.rangeEnd,
+      cursor: 201,
+    };
 
     const driverOneLoadMore = await driverOneRouter.request('/load-more', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        clientId: driverOneSubscription.clientId,
-        subscriptionId: driverOneSubscription.subscriptionId,
-        cursor: 201,
-      }),
+      body: JSON.stringify(loadMoreBody),
     });
     expect(driverOneLoadMore.status).toBe(200);
     const driverOneLoadMoreBody = (await driverOneLoadMore.json()) as {
@@ -523,19 +435,17 @@ describe('Runtime Contracts', () => {
     };
     expect(driverOneLoadMoreBody.json.rows.map((row) => row.price)).toEqual([204, 203]);
 
+    // Same window, driverTwo's router: re-resolved under driverTwo's auth, so driverOne's
+    // private orders never surface.
     const crossUserLoadMore = await driverTwoRouter.request('/load-more', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        clientId: driverOneSubscription.clientId,
-        subscriptionId: driverOneSubscription.subscriptionId,
-        cursor: 201,
-      }),
+      body: JSON.stringify(loadMoreBody),
     });
-    expect(crossUserLoadMore.status).toBe(404);
+    expect(crossUserLoadMore.status).toBe(200);
     const crossUserLoadMoreBody = (await crossUserLoadMore.json()) as {
-      json: { error: string };
+      json: { rows: Array<{ price: number }> };
     };
-    expect(crossUserLoadMoreBody.json.error).toBe('subscription_not_found');
+    expect(crossUserLoadMoreBody.json.rows.map((row) => row.price)).not.toContain(204);
   });
 });

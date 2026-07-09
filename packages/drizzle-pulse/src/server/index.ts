@@ -15,8 +15,6 @@ export type {
   PullRequest,
   SubscribeRequest,
   SubscribeResponse,
-  UnsubscribeRequest,
-  UnsubscribeResponse,
 } from '../shared/protocol-types.js';
 export type { PulseAuthContext } from '../types.js';
 // Events-table convention
@@ -49,6 +47,5 @@ export type {
   WithPk,
 } from './pulse-types.js';
 export { applyColumnFilter } from './pulse-types.js';
-export type { Subscription } from './realtime-store.js';
-export { RealtimeService, SubscriptionManager } from './realtime-store.js';
+export { RealtimeService } from './realtime-store.js';
 export { serializeResponse } from './superjson-utils.js';

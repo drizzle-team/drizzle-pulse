@@ -56,10 +56,11 @@ const runtime = expose(registry, {
   sourceDb,
 });
 
-await runtime.start(); // rejects loudly if the publication, events tables, or
-// REPLICA IDENTITY FULL aren't in place — see "Events tables" below
+await runtime.start(); // self-provisions its infrastructure (publication, events tables,
+// REPLICA IDENTITY FULL) inside one transaction on first boot — see "Events tables" below
 
-// wire runtime.handlers.subscribe / .pull / .loadMore / .unsubscribe into your HTTP router
+// wire runtime.handlers.subscribe / .pull / .loadMore into your HTTP router, or mount the
+// optional first-party Hono router — see "drizzle-pulse/server/router" below
 ```
 
 **Client** — poll the server over HTTP with `createPulseClient`:
@@ -80,11 +81,10 @@ const query = client.activeOrders();
 
 ## `drizzle-pulse`
 
-The root entrypoint owns the collection: `pulse(table)` wraps a Drizzle table into a `PulseTable`, exported once from your schema file (the cross-package contract drizzle-kit recognizes for codegen).
+The root entrypoint owns the collection: `pulse(table)` wraps a Drizzle table into a `PulseTable`, exported once from your schema file.
 
 - `pulse(table)` — returns a `PulseTable` wrapping `table`; construct unconditionally, at schema-definition time
 - `PulseTable` — the collection; call `.query(fn?)` to derive a query (`.query()` for match-all, `.query(fn)` to seed a where-clause)
-- `isPulseTable(value)` / `getPulseTableConfig(entity)` — recognition + payload accessors (used by drizzle-kit; rarely needed directly)
 
 ## `drizzle-pulse/server`
 
@@ -94,8 +94,9 @@ Derive queries from collections outside the schema file, register them, and expo
 - Queries that read `ctx.args` in their `queryFn` MUST chain `.args(zodSchema)` first. Without a schema, `ctx.args` is always `{}` at runtime (the registry never forwards unvalidated client input as args) — reading `ctx.args` on a schemaless query silently sees no fields rather than attacker-controlled data.
 - `.columns()` must be called before `.transform()` in the chain — calling it after throws, rather than silently discarding the transform.
 - `createPulseRegistry(queries)` — collects builders into a `PulseRegistry`; rejects a bare `PulseTable` (queries must be derived via `.query()` first)
-- `expose(registry, config)` — returns a `RealtimeRuntime`; call `.start()` to connect WAL, `runtime.handlers.{subscribe,pull,loadMore,unsubscribe}` to serve requests
-- `RealtimeRuntime` — WAL listener + request handlers; `.start()` / `.stop()`. Subscriptions not explicitly released via `unsubscribe` are evicted by an idle sweep after `subscriptionTtl.idleMs` (default 24h, checked every `subscriptionTtl.sweepIntervalMs`, default 5m) of no `pull()` activity — both configurable via `expose(registry, { subscriptionTtl: { idleMs, sweepIntervalMs } })`.
+- `expose(registry, config)` — returns a `RealtimeRuntime`; call `.start()` to self-provision infrastructure and connect WAL, `runtime.handlers.{subscribe,pull,loadMore}` to serve requests
+- `RealtimeRuntime` — WAL listener + request handlers; `.start()` / `.stop()`. The server is stateless: each pull re-resolves auth and validates its own opaque cursor token, so there's no per-subscription server state, no TTL, and no `unsubscribe` — a client simply stops pulling.
+- `RealtimeRuntime.provision()` — runs the same infrastructure reconciliation as `.start()` without opening the WAL stream, for split-role deploys (see "Provisioning & privileges" below)
 
 ```ts
 import { pulse } from 'drizzle-pulse';
@@ -114,17 +115,47 @@ await runtime.start();
 
 ### Events tables
 
-Every pulsed source table needs a matching **events table** — WAL changes are persisted there and replayed to clients. Events tables are generated infrastructure, resolved entirely by convention (no hand-declared Drizzle table, no `.$eventsTable()` linkage):
+Every pulsed source table gets a matching **events table** — WAL changes are persisted there and replayed to clients. Events tables are runtime-owned infrastructure, resolved entirely by convention (no hand-declared Drizzle table, no `.$eventsTable()` linkage, no drizzle-kit migration):
 
-- **Location:** `<eventsSchema>.<sourceSchema>_<sourceTable>`, with each component's `_` doubled to `__` before joining — `eventsSchema` defaults to `'drizzle_pulse'` (override via `expose()`'s `eventsSchema` option, matching your drizzle.config `migrations.schema`)
-- **Creation:** drizzle-kit generates the `CREATE SCHEMA`/`CREATE TABLE` migration from your `pulse()` schema exports
-- **Startup guard:** `runtime.start()` asserts — in one aggregated, loudly-thrown error listing every unmet precondition — that the publication exists, every pulsed table is a member of it (or the publication is `FOR ALL TABLES`), every events table exists, every pulsed table has `REPLICA IDENTITY FULL`, and `wal_level = logical`
+- **Location:** `<eventsSchema>.<sourceSchema>_<sourceTable>`, with each component's `_` doubled to `__` before joining — `eventsSchema` defaults to `'drizzle_pulse'` (override via `expose()`'s `eventsSchema` option)
+- **Self-provisioning:** `runtime.start()` reconciles everything itself inside one advisory-locked transaction — creates the events schema, the events tables and their `pulse_meta` bookkeeping, the publication (plus membership diff), and `REPLICA IDENTITY FULL` on each source. An events table is recreated when the sha256 of its rendered DDL diverges (a source-column change), which rotates a per-table epoch so stale client cursors reset. `wal_level = logical` is the one precondition the runtime can't fix — it stays a fail-fast assert.
 
-See [`docs/events-table-convention.md`](../../docs/events-table-convention.md) for the full name-derivation and column-mapping contract.
+See [`docs/events-table-convention.md`](../../docs/events-table-convention.md) for the full name-derivation, column-mapping, and reconcile contract.
+
+### `drizzle.config` — exclude the pulse schema
+
+drizzle-kit does not manage the pulse events schema, so keep it out of your `push`/`pull`. kit's `schemaFilter` is an allowlist of schemas it manages (default `['public']`): make sure your pulse events schema — `'drizzle_pulse'` by default, or your configured `eventsSchema` — is not in it, so kit never tries to drop pulse-owned tables.
+
+```ts
+// drizzle.config.ts
+export default defineConfig({
+  // ...
+  schemaFilter: ['public'], // omits 'drizzle_pulse' — pulse owns that schema
+});
+```
+
+### Provisioning & privileges
+
+By default the app's own role owns its tables and can `CREATE`, so `runtime.start()` self-provisions everything on first boot and no-ops on later boots. A failed self-provisioning statement throws with the exact statement and the grant it most likely needs (e.g. *ownership of `public.orders`*, *the database `CREATE` privilege*).
+
+For split-role deploys where the app role is deliberately unprivileged, call `runtime.provision()` once from a migration/deploy step under an elevated role — it runs the same reconciliation without opening the WAL stream, and the app's later `start()` then no-ops the DDL. The reconcile role needs ownership of each pulsed source table, the database `CREATE` privilege, and (once it exists) ownership of the publication; the WAL streaming connection additionally needs the `REPLICATION` attribute.
+
+## `drizzle-pulse/server/router`
+
+`runtime.handlers` is a transport-agnostic SDK — plug its `subscribe`/`pull`/`loadMore` methods into any HTTP framework. For Hono, the optional first-party router wraps them (superjson-encoded responses over three POST routes: `/subscribe`, `/pull`, `/load-more`):
+
+```ts
+import { createRealtimeRouter } from 'drizzle-pulse/server/router';
+
+const router = createRealtimeRouter(runtime.handlers, { userId: null }); // Hono instance
+app.route('/pulse', router);
+```
+
+`hono` is an optional peer dependency — only installed if you mount this router.
 
 ## `drizzle-pulse/client`
 
-The framework-agnostic HTTP polling client. `createPulseClient` returns a typed proxy of query-descriptor factories; wrap a descriptor in `PulseQuery` to subscribe and poll (~1s by default).
+The framework-agnostic HTTP polling client. `createPulseClient` returns a typed proxy of query-descriptor factories; wrap a descriptor in `PulseQuery` to subscribe and poll (~1s by default, configurable via `pollIntervalMs`).
 
 ```ts
 import { createPulseClient, PulseQuery } from 'drizzle-pulse/client';
@@ -176,13 +207,18 @@ const client = createPulseClient(runtime); // same RealtimeRuntime from drizzle-
 
 const collection = await client.ordersByStatus({ status: 'active' });
 
-collection.list(); // synchronous full filtered set
+collection.list(); // synchronous current filtered set
+collection.getState(); // { data, isLoading, isLoadingMore, hasMore, error }
 collection.onChange(({ events, state }) => {
   console.log('changed:', events, 'now:', state);
 });
 
+await collection.loadMore(); // next page of a `.limit()` query — extends list() in place
+
 collection.dispose(); // stop the collection when done
 ```
+
+Updates are push-shaped: the collection re-pulls when the runtime's WAL tap signals a change on its source table (or on reconnect), with no polling interval.
 
 `drizzle-pulse/client` and `drizzle-pulse/client/embedded` are two import-path-selected flavors of the same `createPulseClient` concept: pick `/client` for remote/browser consumers over HTTP, or `/client/embedded` for in-process server-side consumers with synchronous live data.
 
@@ -193,10 +229,11 @@ collection.dispose(); // stop the collection when done
 | `drizzle-orm` | `^1.0.0-rc.4` | Tested against `1.0.0-rc.4` |
 | `zod` | `^4.0.0` | |
 | `react` | `>=18.0.0` | Optional — only required for `drizzle-pulse/client/react` |
+| `hono` | `^4.6.0` | Optional — only required for `drizzle-pulse/server/router` |
 | `node` | `>=20` | |
 | PostgreSQL | `16` | Requires `wal_level=logical` |
 
 ## Transport & guardrails
 
 - **Transport:** HTTP polling only (`drizzle-pulse/client`, `drizzle-pulse/client/react`) — no SSE or WebSocket transport.
-- **Embedded collections** (`drizzle-pulse/client/embedded`) are in-process only: no `limit`/pagination (the full filtered set is materialized), no `.transform()` (transforms stay HTTP-only), and no dedupe (each call creates an independent collection — create once, hold, `dispose()`).
+- **Embedded collections** (`drizzle-pulse/client/embedded`) are in-process only: no `.transform()` (transforms stay HTTP-only), and no dedupe (each call creates an independent collection — create once, hold, `dispose()`). `.limit()` queries are supported and paginate via `loadMore()`.
