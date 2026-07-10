@@ -14,7 +14,7 @@ import type {
   SubscribeResponse,
 } from '../shared/protocol-types.js';
 
-import type { PulseAuthContext, RealtimeEvent, ResolvedPulseQuery, WhereClause } from '../types.js';
+import type { PulseAuthContext, PulseWireEvent, ResolvedPulseQuery, WhereClause } from '../types.js';
 import { formatCursor, parseCursor } from './cursor.js';
 import { buildWhereClausePredicate } from './drizzle-utils.js';
 import type { AnyPulseBuilders, PulseRegistry } from './pulse-registry.js';
@@ -22,7 +22,7 @@ import { applyResponsePipeline } from './pulse-registry.js';
 import type { PulseSourceDb } from './pulse-sql.js';
 import { buildSelectQuery } from './pulse-sql.js';
 import { getQueryColumnKey } from './pulse-types.js';
-import type { RealtimeService } from './realtime-store.js';
+import type { PulseStore } from './pulse-store.js';
 
 // Hard cap on events a single pull may replay; overflow falls back to a full reset instead
 // of streaming an unbounded batch. Overridable via ExposeConfig.pullEventLimit.
@@ -38,12 +38,12 @@ export type PullHandlerResponseBody =
   | {
       results: Record<
         string,
-        PullResponse<Record<string, unknown>, RealtimeEvent> | PullResponseErrorResult
+        PullResponse<Record<string, unknown>, PulseWireEvent> | PullResponseErrorResult
       >;
     }
   | { error: string };
 
-export type RealtimeHandlerResult<TBody> = {
+export type PulseHandlerResult<TBody> = {
   status: number;
   body: TBody;
 };
@@ -70,11 +70,11 @@ type NormalizedEvent = {
   old_row: Record<string, unknown> | null;
 };
 
-export class RealtimeRequestHandler {
+export class PulseRequestHandler {
   constructor(
     private readonly registry: PulseRegistry<AnyPulseBuilders>,
     private readonly sourceDb: PulseSourceDb,
-    private readonly getRealtimeService: () => Pick<RealtimeService, 'getDb' | 'getLatestSnapshot'>,
+    private readonly getPulseStore: () => Pick<PulseStore, 'getDb' | 'getLatestSnapshot'>,
     private readonly getEventsTable: (queryName: string) => PgTable,
     private readonly getEpoch: (queryName: string) => string | undefined,
     private readonly pullEventLimit: number = DEFAULT_PULL_EVENT_LIMIT,
@@ -83,7 +83,7 @@ export class RealtimeRequestHandler {
   async subscribe(
     request: SubscribeRequest,
     auth: PulseAuthContext,
-  ): Promise<RealtimeHandlerResult<SubscribeHandlerResponseBody>> {
+  ): Promise<PulseHandlerResult<SubscribeHandlerResponseBody>> {
     try {
       const { queryName, args } = request;
 
@@ -104,7 +104,7 @@ export class RealtimeRequestHandler {
       // startHandshake ordering): a write whose event lands between these two reads must
       // still be covered by the cursor returned here, or it would be lost until an
       // unrelated reset. Duplicate replays are already idempotent client-side.
-      const snapshot = await this.getRealtimeService().getLatestSnapshot(
+      const snapshot = await this.getPulseStore().getLatestSnapshot(
         this.getEventsTable(queryName),
       );
 
@@ -151,7 +151,7 @@ export class RealtimeRequestHandler {
   async loadMore(
     request: LoadMoreRequest,
     auth: PulseAuthContext,
-  ): Promise<RealtimeHandlerResult<LoadMoreHandlerResponseBody>> {
+  ): Promise<PulseHandlerResult<LoadMoreHandlerResponseBody>> {
     try {
       const { queryName, args, cursor } = request;
 
@@ -253,17 +253,17 @@ export class RealtimeRequestHandler {
   async pull(
     request: PullRequest,
     auth: PulseAuthContext,
-  ): Promise<RealtimeHandlerResult<PullHandlerResponseBody>> {
+  ): Promise<PulseHandlerResult<PullHandlerResponseBody>> {
     try {
       const { subscriptions } = request;
       if (!Array.isArray(subscriptions)) {
         return { status: 400, body: { error: 'missing_subscriptions' } };
       }
 
-      const realtimeService = this.getRealtimeService();
+      const pulseStore = this.getPulseStore();
       const results: Record<
         string,
-        PullResponse<Record<string, unknown>, RealtimeEvent> | PullResponseErrorResult
+        PullResponse<Record<string, unknown>, PulseWireEvent> | PullResponseErrorResult
       > = {};
 
       for (const entry of subscriptions) {
@@ -303,21 +303,21 @@ export class RealtimeRequestHandler {
         const currentEpoch = this.getEpoch(queryName);
         const parsed = typeof entry.snapshot === 'string' ? parseCursor(entry.snapshot) : null;
         if (parsed === null || currentEpoch === undefined || parsed.epoch !== currentEpoch) {
-          results[key] = await this.resetOrError(subscription, realtimeService, 'epoch');
+          results[key] = await this.resetOrError(subscription, pulseStore, 'epoch');
           continue;
         }
 
         const incremental = await this.buildIncrementalResponse(
           subscription,
           parsed.snapshot,
-          realtimeService,
+          pulseStore,
         );
         if ('error' in incremental) {
           results[key] = { error: incremental.error };
           continue;
         }
         if ('reset' in incremental && incremental.reset === true) {
-          results[key] = await this.resetOrError(subscription, realtimeService, incremental.reason);
+          results[key] = await this.resetOrError(subscription, pulseStore, incremental.reason);
           continue;
         }
 
@@ -333,10 +333,10 @@ export class RealtimeRequestHandler {
 
   private async resetOrError(
     subscription: Subscription,
-    realtimeService: Pick<RealtimeService, 'getDb' | 'getLatestSnapshot'>,
+    pulseStore: Pick<PulseStore, 'getDb' | 'getLatestSnapshot'>,
     reason: string,
-  ): Promise<PullResetResponse<Record<string, unknown>, RealtimeEvent> | PullResponseErrorResult> {
-    const latestSnapshot = await realtimeService.getLatestSnapshot(
+  ): Promise<PullResetResponse<Record<string, unknown>, PulseWireEvent> | PullResponseErrorResult> {
+    const latestSnapshot = await pulseStore.getLatestSnapshot(
       this.getEventsTable(subscription.queryName),
     );
     const rerun = await this.buildResetResponse(subscription, latestSnapshot, reason);
@@ -439,7 +439,7 @@ export class RealtimeRequestHandler {
 
   private computeUpdatedRange(
     subscription: Subscription,
-    events: RealtimeEvent[],
+    events: PulseWireEvent[],
   ): { rangeStart: unknown | null; rangeEnd: unknown | null } {
     let nextRangeStart = subscription.rangeStart;
     let nextRangeEnd = subscription.rangeEnd;
@@ -483,7 +483,7 @@ export class RealtimeRequestHandler {
     subscription: Subscription,
     latestSnapshot: number,
     reason = 'snapshot',
-  ): Promise<PullResetResponse<Record<string, unknown>, RealtimeEvent> | PullResponseError> {
+  ): Promise<PullResetResponse<Record<string, unknown>, PulseWireEvent> | PullResponseError> {
     const sourceTable = this.registry.getSourceTable(subscription.queryName);
     if (!sourceTable) {
       return { error: 'source_table_not_found' };
@@ -526,13 +526,13 @@ export class RealtimeRequestHandler {
   private async buildIncrementalResponse(
     subscription: Subscription,
     sinceSnapshot: number,
-    realtimeService: Pick<RealtimeService, 'getDb' | 'getLatestSnapshot'>,
+    pulseStore: Pick<PulseStore, 'getDb' | 'getLatestSnapshot'>,
   ): Promise<
-    | PullResponse<Record<string, unknown>, RealtimeEvent>
+    | PullResponse<Record<string, unknown>, PulseWireEvent>
     | { reset: true; reason: string }
     | PullResponseError
   > {
-    const latestSnapshot = await realtimeService.getLatestSnapshot(
+    const latestSnapshot = await pulseStore.getLatestSnapshot(
       this.getEventsTable(subscription.queryName),
     );
     if (sinceSnapshot >= latestSnapshot) {
@@ -544,7 +544,7 @@ export class RealtimeRequestHandler {
       };
     }
 
-    const eventsDb = realtimeService.getDb();
+    const eventsDb = pulseStore.getDb();
     // Total for registered queries — the runtime resolves an events table for every
     // source table at construction, so this throws rather than returning null for a
     // genuinely unknown query (subscription lookup upstream already guards that case).
@@ -628,7 +628,7 @@ export class RealtimeRequestHandler {
       return { reset: true, reason: 'snapshot' };
     }
 
-    const events: RealtimeEvent[] = [];
+    const events: PulseWireEvent[] = [];
     let nextSnapshot = sinceSnapshot;
     for (const event of normalizedEvents) {
       nextSnapshot = Math.max(nextSnapshot, event.snapshot);

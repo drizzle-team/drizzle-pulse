@@ -126,13 +126,16 @@ export class QueryDescriptor<TResult> {
   ) {}
 }
 
-export type RealtimeInsertEvent = {
+// Server-side wire events carried in a pull response (raw rows keyed by SQL name). Distinct
+// from the client-facing PulseEvent in shared/pulse-events.ts, which is generic over the
+// query's decoded result shape.
+export type PulseWireInsertEvent = {
   op: 'insert';
   row: Record<string, unknown>;
   pk: unknown;
 };
 
-export type RealtimeUpdateEvent = {
+export type PulseWireUpdateEvent = {
   op: 'update';
   row: Record<string, unknown>;
   old_row: Record<string, unknown>;
@@ -141,11 +144,11 @@ export type RealtimeUpdateEvent = {
   matchesOld: boolean;
 };
 
-export type RealtimeDeleteEvent = {
+export type PulseWireDeleteEvent = {
   op: 'delete';
   old_row: Record<string, unknown>;
   pk: unknown;
   matchesOld: boolean;
 };
 
-export type RealtimeEvent = RealtimeInsertEvent | RealtimeUpdateEvent | RealtimeDeleteEvent;
+export type PulseWireEvent = PulseWireInsertEvent | PulseWireUpdateEvent | PulseWireDeleteEvent;

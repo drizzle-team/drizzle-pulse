@@ -27,7 +27,8 @@ export type { WalListenerConfig } from './expose.js';
 export {
   type ExposeConfig,
   expose,
-  RealtimeRuntime,
+  LogLevel,
+  PulseRuntime,
 } from './expose.js';
 // Builder
 export { PulseBuilder } from './pulse-builder.js';
@@ -47,5 +48,5 @@ export type {
   WithPk,
 } from './pulse-types.js';
 export { applyColumnFilter } from './pulse-types.js';
-export { RealtimeService } from './realtime-store.js';
+export { PulseStore } from './pulse-store.js';
 export { serializeResponse } from './superjson-utils.js';

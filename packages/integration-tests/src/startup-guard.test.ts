@@ -15,7 +15,7 @@
 import { afterAll, describe, expect, test } from 'bun:test';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
-import { createPulseRegistry, expose } from 'drizzle-pulse/server';
+import { createPulseRegistry, expose, LogLevel } from 'drizzle-pulse/server';
 import type { Pool } from 'pg';
 import postgres from 'postgres';
 import { orders } from './fixtures/minimal-orders/schema.js';
@@ -120,7 +120,7 @@ describe('Startup reconcile (self-provisioning)', () => {
         databaseUrl: ctx.databaseUrl,
         sourceDb: drizzle({ client: sourceSql }),
         wal: { publicationName, slotName },
-        logLevel: 'error',
+        logLevel: LogLevel.Error,
       });
 
       await runtime.start();
@@ -151,7 +151,7 @@ describe('Startup reconcile (self-provisioning)', () => {
       const runtime = expose(registry, {
         databaseUrl: ctx.databaseUrl,
         sourceDb: drizzle({ client: sourceSql }),
-        logLevel: 'error',
+        logLevel: LogLevel.Error,
       });
 
       await runtime.provision();
@@ -224,7 +224,7 @@ describe('Startup reconcile (self-provisioning)', () => {
         databaseUrl: ctx.databaseUrl,
         sourceDb: drizzle({ client: sourceSql }),
         wal: { publicationName, slotName },
-        logLevel: 'error',
+        logLevel: LogLevel.Error,
       });
 
       await runtime.start();

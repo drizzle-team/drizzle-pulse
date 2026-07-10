@@ -1,5 +1,5 @@
 import { getColumns } from 'drizzle-orm';
-import type { AnyPgColumnBuilder, PgColumn, PgTable } from 'drizzle-orm/pg-core';
+import type { AnyPgColumnBuilder, PgColumn, PgColumnToBuilderOverrides, PgTable } from 'drizzle-orm/pg-core';
 import { bigint, getTableConfig, integer, pgSchema, text, timestamp } from 'drizzle-orm/pg-core';
 import { getPulsePkColumn } from '../pulse-table.js';
 
@@ -19,10 +19,9 @@ function assertIdentifierLength(identifier: string): void {
   }
 }
 
-// `_` -> `__` per component before joining the two with a single `_`. Keeps names readable
-// but is NOT injective: ("a_","b") and ("a","_b") both derive "a___b". Distinct source
-// tables that collide on the derived name are rejected at registration (see expose.ts).
-// drizzle-kit derives the same name byte-for-byte.
+// `_` -> `__` per component before joining the two with a single `_`. Keeps names readable,
+// but different source tables can still collide: ("a_","b") and ("a","_b") both derive
+// "a___b". Collisions are rejected at registration (see expose.ts).
 function escapeComponent(component: string): string {
   return component.replaceAll('_', '__');
 }
@@ -67,7 +66,7 @@ function relaxSerial(column: PgColumn) {
  * Builds the events-table {@link PgTable} for a pulsed source table by convention: name
  * `<escapedSchema>_<escapedTable>` in {@link DEFAULT_EVENTS_SCHEMA}, an `$old_` twin per
  * source column, and `$snapshot`/`$op`/`$timestamp` metadata columns. Pure; no I/O.
- * drizzle-kit derives the same shape — see docs/events-table-convention.md.
+ * See docs/events-table-convention.md.
  */
 export function buildEventsTable(
   sourceTable: PgTable,
@@ -77,22 +76,36 @@ export function buildEventsTable(
   const tableName = getEventsTableName(sourceTable);
   const pkColumnName = getPulsePkColumn(sourceTable).name;
 
-  // Kit hardcodes this sequence name; keeping it explicit makes a live column serialize
-  // byte-identically. It can newly overflow 63 bytes even when tableName fit.
+  // The explicit sequence name keeps the rendered DDL deterministic for the reconcile
+  // hash. It can newly overflow 63 bytes even when tableName fit.
   const snapshotSequenceName = `${tableName}_snapshot_seq`;
   assertIdentifierLength(snapshotSequenceName);
+
+  // Events columns carry only the source column's type; every value/constraint clause
+  // (pk, notNull, defaults, unique, generated, identity) stays behind.
+  const stripSourceConfig: PgColumnToBuilderOverrides<unknown> = {
+    primaryKey: false,
+    notNull: false,
+    default: undefined,
+    defaultFn: undefined,
+    onUpdateFn: undefined,
+    unique: false,
+    generated: undefined,
+    generatedIdentity: undefined,
+  };
 
   const columns: Record<string, AnyPgColumnBuilder> = {};
 
   for (const column of Object.values(getColumns(sourceTable))) {
     assertNotReservedSourceColumnName(column.name);
 
-    const newValue = relaxSerial(column) ?? column.toBuilder();
+    const newValue = relaxSerial(column) ?? column.toBuilder(stripSourceConfig);
     columns[column.name] = column.name === pkColumnName ? newValue.notNull() : newValue;
 
     const oldName = `$old_${column.name}`;
     assertIdentifierLength(oldName);
-    columns[oldName] = relaxSerial(column) ?? column.toBuilder({ name: oldName });
+    columns[oldName] = relaxSerial(column)
+      ?? column.toBuilder({ ...stripSourceConfig, name: oldName });
   }
 
   Object.assign(columns, {

@@ -14,10 +14,10 @@ export type {
 } from './shared/protocol-types.js';
 export type {
   ColumnOperators,
-  RealtimeDeleteEvent,
-  RealtimeEvent,
-  RealtimeInsertEvent,
-  RealtimeUpdateEvent,
+  PulseWireDeleteEvent,
+  PulseWireEvent,
+  PulseWireInsertEvent,
+  PulseWireUpdateEvent,
   ResolvedPulseQuery,
   WhereClause,
   WhereCondition,

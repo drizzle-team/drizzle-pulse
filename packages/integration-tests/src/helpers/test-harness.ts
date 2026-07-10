@@ -7,11 +7,12 @@ import { createPulseClient, PulseQuery } from 'drizzle-pulse/client';
 import {
   type AnyQueries,
   expose,
+  LogLevel,
   type PulseAuthContext,
   type PulseRegistry,
-  type RealtimeRuntime,
+  type PulseRuntime,
 } from 'drizzle-pulse/server';
-import { createRealtimeRouter as createServerRouter } from 'drizzle-pulse/server/router';
+import { createPulseRouter as createServerRouter } from 'drizzle-pulse/server/router';
 import type { Hono } from 'hono';
 import { Pool } from 'pg';
 import postgres from 'postgres';
@@ -24,7 +25,7 @@ import { insertTestUser, processDbOperations } from './db-helpers.js';
 export { processDbOperations, insertTestUser };
 
 const DEFAULT_DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/postgres';
-const TEST_DATABASE_PREFIX = 'drizzle_realtime_test';
+const TEST_DATABASE_PREFIX = 'drizzle_pulse_test';
 
 type PlainRecord = Record<string, unknown>;
 
@@ -49,14 +50,14 @@ export type IntegrationTestFixture = {
   schemas: FixtureSchemaMap;
 };
 
-type TestRuntime<TQueries extends AnyQueries> = RealtimeRuntime<TQueries> & {
+type TestRuntime<TQueries extends AnyQueries> = PulseRuntime<TQueries> & {
   sourceSql: ReturnType<typeof postgres>;
 };
 
 /** Infer the harness runtime type from a concrete registry, for use in test variable declarations. */
 export type RuntimeOf<TRegistry extends PulseRegistry<AnyQueries>> =
   TRegistry extends PulseRegistry<infer TQueries>
-    ? RealtimeRuntime<TQueries> & { sourceSql: ReturnType<typeof postgres> }
+    ? PulseRuntime<TQueries> & { sourceSql: ReturnType<typeof postgres> }
     : never;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -299,24 +300,24 @@ function createTestRuntime<TQueries extends AnyQueries>(
     databaseUrl,
     sourceDb,
     wal: { publicationName, slotName },
-    logLevel: 'error',
+    logLevel: LogLevel.Error,
   });
 
   return Object.assign(runtime, { sourceSql });
 }
 
-function createRealtimeRouter(
-  runtime: RealtimeRuntime<any>,
+function createPulseRouter(
+  runtime: PulseRuntime<any>,
   auth: PulseAuthContext = { userId: null },
 ): Hono {
   return createServerRouter(runtime.handlers, auth);
 }
 
-export function createRealtimeRouterWithAuth(
-  runtime: RealtimeRuntime<any>,
+export function createPulseRouterWithAuth(
+  runtime: PulseRuntime<any>,
   auth: PulseAuthContext,
 ): Hono {
-  return createRealtimeRouter(runtime, auth);
+  return createPulseRouter(runtime, auth);
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -447,7 +448,7 @@ export async function setupTestSuiteForFixture<
     adminPool,
     testPool,
     runtime,
-    router: createRealtimeRouter(runtime),
+    router: createPulseRouter(runtime),
     db,
     dbSql,
     activeSuiteUsers: 1,

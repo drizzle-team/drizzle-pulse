@@ -11,7 +11,7 @@ import { afterAll, describe, expect, test } from 'bun:test';
 import { integer, pgTable, serial } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
-import { createPulseRegistry, expose } from 'drizzle-pulse/server';
+import { createPulseRegistry, expose, LogLevel } from 'drizzle-pulse/server';
 import type { Pool } from 'pg';
 import postgres from 'postgres';
 import { orders } from './fixtures/minimal-orders/schema.js';
@@ -71,7 +71,7 @@ function makeRuntime(s: Scenario, label: string, tables: 'orders' | 'both') {
     databaseUrl: s.databaseUrl,
     sourceDb: drizzle({ client: s.sourceSql }),
     wal: { publicationName: `pulse_pub_${label}`, slotName: `pulse_slot_${label}` },
-    logLevel: 'error',
+    logLevel: LogLevel.Error,
   });
 }
 

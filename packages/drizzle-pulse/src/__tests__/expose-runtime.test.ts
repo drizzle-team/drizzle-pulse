@@ -49,7 +49,7 @@ describe('start() failure rolls back to a restartable state', () => {
 
     expect(runtime.isRunning).toBe(false);
     expect(runtime.pool).toBeNull();
-    expect(runtime.realtimeService).toBeNull();
+    expect(runtime.pulseStore).toBeNull();
     expect(poolEnded).toBe(1);
 
     // A retry must not hit the "Already running" early return and silently no-op — it
@@ -59,7 +59,7 @@ describe('start() failure rolls back to a restartable state', () => {
     runtime.ensureBaselines = async () => {
       secondAttemptRan = true;
     };
-    runtime.getRealtimeService = () => ({
+    runtime.getPulseStore = () => ({
       getLatestSnapshot: async () => 0,
     });
     runtime.connectReplication = async () => {};

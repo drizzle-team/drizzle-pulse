@@ -49,7 +49,7 @@ function renderColumnDdl(column: PgColumn): string {
 /**
  * Renders the recreate script for a source table's events table strictly from
  * {@link buildEventsTable}'s output: `CREATE SCHEMA IF NOT EXISTS`, `DROP TABLE IF EXISTS`,
- * then `CREATE TABLE`. The runtime executes these at boot ({@link RealtimeRuntime.provision}
+ * then `CREATE TABLE`. The runtime executes these at boot ({@link PulseRuntime.provision}
  * / `start`) and hashes their joined text to detect events-table shape divergence — the
  * string IS the canonical form, so drizzle-kit derives byte-identical DDL.
  */

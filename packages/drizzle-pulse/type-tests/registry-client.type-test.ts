@@ -5,9 +5,6 @@ import { createPulseRegistry } from '../src/server/pulse-registry.js';
 import type { QueryDescriptor } from '../src/types.js';
 import { driverSchema, orders, statusSchema } from './fixtures.js';
 
-// @ts-expect-error legacy client API was removed
-import('../src/client/index.js').then(({ createRealtimeClient }) => createRealtimeClient);
-
 const withArgs = pulse(orders)
   .query()
   .args(statusSchema)
@@ -53,7 +50,7 @@ const selectedRegistry = createPulseRegistry({
     .query((ctx) => ctx.query({ status: ctx.args.status })),
 });
 type SelectedClient = typeof selectedRegistry.$client;
-const client = createPulseClient<SelectedClient>({ url: '/api/realtime' });
+const client = createPulseClient<SelectedClient>({ url: '/api/pulse' });
 const descriptor = client.withArgs({ status: 'requested' });
 
 expectTypeOf(descriptor).toEqualTypeOf<

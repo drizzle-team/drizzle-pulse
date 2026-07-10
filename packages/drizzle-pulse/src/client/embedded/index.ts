@@ -1,5 +1,5 @@
 import { getTableUniqueName } from 'drizzle-orm';
-import type { RealtimeRuntime } from '../../server/expose.js';
+import type { PulseRuntime } from '../../server/expose.js';
 import type { AnyPulseBuilders } from '../../server/pulse-registry.js';
 import type { PulseClientContract } from '../../server/pulse-types.js';
 import type { PulseRouterHandlers } from '../../server/router.js';
@@ -145,7 +145,7 @@ export class PulseCollection<TRow extends { $pk: unknown }> {
 // ---------------------------------------------------------------------------
 
 export function createPulseClient<TQueries extends AnyPulseBuilders>(
-  runtime: RealtimeRuntime<TQueries>,
+  runtime: PulseRuntime<TQueries>,
 ): EmbeddedPulseClient<TQueries> {
   return new Proxy({} as EmbeddedPulseClient<TQueries>, {
     get(_target, prop: string | symbol) {

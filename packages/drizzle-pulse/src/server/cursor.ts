@@ -1,6 +1,6 @@
-// Cursor tokens pair a events-table epoch (rotated on every DDL recreate) with a snapshot
+// Cursor tokens pair an events-table epoch (rotated on every DDL recreate) with a snapshot
 // so a stale token — one minted before the table was dropped/recreated — is detectable: the
-// epoch won't match the current one. Wave 2a consumes these; this wave only ships the codec.
+// epoch won't match the current one.
 
 export function formatCursor(epoch: string, snapshot: number): string {
   return `${epoch}:${snapshot}`;

@@ -213,7 +213,7 @@ before any statement reaches Postgres.
 
 ## 5. Runtime provisioning & reconcile
 
-Nothing outside the runtime creates or migrates these tables. On `RealtimeRuntime.start()`
+Nothing outside the runtime creates or migrates these tables. On `PulseRuntime.start()`
 — and, identically, on `provision()` (section 5.5) — the runtime runs `reconcile()`
 ([`expose.ts`](../packages/drizzle-pulse/src/server/expose.ts)): one transaction, guarded by a
 `pg_advisory_xact_lock` keyed on the events schema so two booting runtimes can't race the same
@@ -297,7 +297,7 @@ most likely needs (e.g. *ownership of `public.orders`*, *the database `CREATE` p
 *ownership of the publication*).
 
 For split-role deployments where the app role is deliberately unprivileged, call
-`RealtimeRuntime.provision()` once from a migration/deploy step under an elevated role: it runs
+`PulseRuntime.provision()` once from a migration/deploy step under an elevated role: it runs
 the same `reconcile()` over a short-lived admin connection and returns without opening the WAL
 stream. The app's later `start()` then finds everything in place and no-ops the DDL. The
 reconcile role needs, across the statements it may run:
@@ -330,7 +330,7 @@ live subscriber's snapshot is a straightforward future addition and needs no sch
 - [`events-table-resolver.ts`](../packages/drizzle-pulse/src/server/events-table-resolver.ts)
   is normative for every rule in sections 1–4. `buildEventsTable(sourceTable, options?)`
   returns a genuine Drizzle `PgTable` — the runtime inserts events into it directly
-  (`db.insert(eventsTable).values(...)` in `realtime-store.ts`), so codec-faithful column
+  (`db.insert(eventsTable).values(...)` in `pulse-store.ts`), so codec-faithful column
   reconstruction (reusing each source column's own `mapToDriverValue`/`mapFromDriverValue`) is
   part of this contract, not an implementation detail.
 - [`events-table-ddl.ts`](../packages/drizzle-pulse/src/server/events-table-ddl.ts) renders the

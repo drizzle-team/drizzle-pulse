@@ -7,7 +7,7 @@ import {
   type PulseRow,
 } from '../src/client/embedded/index.js';
 import { pulse } from '../src/index.js';
-import type { RealtimeRuntime } from '../src/server/expose.js';
+import type { PulseRuntime } from '../src/server/expose.js';
 import { createPulseRegistry } from '../src/server/pulse-registry.js';
 import { driverSchema, orders, statusSchema } from './fixtures.js';
 
@@ -28,7 +28,7 @@ createPulseRegistry({ withArgs, noArgs });
 // Runtime (type-only: declared, not constructed — tsc --noEmit only)
 // ---------------------------------------------------------------------------
 
-declare const runtime: RealtimeRuntime<{ withArgs: typeof withArgs; noArgs: typeof noArgs }>;
+declare const runtime: PulseRuntime<{ withArgs: typeof withArgs; noArgs: typeof noArgs }>;
 
 // ---------------------------------------------------------------------------
 // Client inference — no explicit generic required
@@ -136,7 +136,7 @@ const selectedQueries = {
     .args(driverSchema)
     .query((ctx) => ctx.query({ driverId: ctx.args.driverId })),
 };
-declare const selectedRuntime: RealtimeRuntime<typeof selectedQueries>;
+declare const selectedRuntime: PulseRuntime<typeof selectedQueries>;
 const selectedClient = createPulseClient(selectedRuntime);
 
 type ByStatusResult = PulseRow<ReturnType<typeof selectedClient.byStatus>>;

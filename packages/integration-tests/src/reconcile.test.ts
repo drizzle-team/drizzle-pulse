@@ -9,7 +9,7 @@
 import { afterAll, describe, expect, spyOn, test } from 'bun:test';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
-import { createPulseRegistry, expose } from 'drizzle-pulse/server';
+import { createPulseRegistry, expose, LogLevel } from 'drizzle-pulse/server';
 import type { Pool } from 'pg';
 import postgres from 'postgres';
 import { orders } from './fixtures/minimal-orders/schema.js';
@@ -27,7 +27,7 @@ afterAll(async () => {
   await adminPool.end();
 });
 
-async function setupHealthyScenario(label: string, logLevel: 'error' | 'info' = 'error') {
+async function setupHealthyScenario(label: string, logLevel: LogLevel = LogLevel.Error) {
   const databaseName = `pulse_reconcile_${label}_${randomSuffix()}`;
   await adminPool.query(`CREATE DATABASE "${databaseName}"`);
   const databaseUrl = buildDatabaseUrl(baseDatabaseUrl(), databaseName);
@@ -139,7 +139,7 @@ describe('runtime-owned events-table reconcile', () => {
   });
 
   test('orphan sweep drops meta-registered tables and warns (only) about unmanaged ones', async () => {
-    const s = await setupHealthyScenario('orphan', 'info');
+    const s = await setupHealthyScenario('orphan', LogLevel.Info);
     const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
     try {
       await s.runtime.provision();

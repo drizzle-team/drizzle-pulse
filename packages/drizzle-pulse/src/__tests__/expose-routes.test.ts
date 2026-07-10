@@ -6,11 +6,11 @@ import { z } from 'zod';
 import { pulse } from '../pulse-table.js';
 import { buildEventsTable } from '../server/events-table-resolver.js';
 import { expose } from '../server/expose.js';
-import { RealtimeRequestHandler } from '../server/sdk.js';
+import { PulseRequestHandler } from '../server/sdk.js';
 import type { AnyPulseBuilders, PulseRegistry } from '../server/pulse-registry.js';
 import { createPulseRegistry } from '../server/pulse-registry.js';
-import type { RealtimeService } from '../server/realtime-store.js';
-import { createRealtimeRouter } from '../server/router.js';
+import type { PulseStore } from '../server/pulse-store.js';
+import { createPulseRouter } from '../server/router.js';
 import type {
   LoadMoreResponse,
   PullResponse,
@@ -135,10 +135,10 @@ function createPulseSourceDbMock(rowsProvider: () => Record<string, unknown>[]):
   } as unknown as MockPulseSourceDb;
 }
 
-function createRealtimeServiceMock(data?: {
+function createPulseStoreMock(data?: {
   latestSnapshot?: number;
   events?: Record<string, unknown>[];
-}): Pick<RealtimeService, 'getDb' | 'getLatestSnapshot'> {
+}): Pick<PulseStore, 'getDb' | 'getLatestSnapshot'> {
   const latestSnapshot = data?.latestSnapshot ?? 0;
   const events = data?.events ?? [];
 
@@ -175,7 +175,7 @@ function createRealtimeServiceMock(data?: {
             },
           };
         },
-      } as unknown as ReturnType<RealtimeService['getDb']>;
+      } as unknown as ReturnType<PulseStore['getDb']>;
     },
     async getLatestSnapshot(_table: unknown) {
       return latestSnapshot;
@@ -205,21 +205,21 @@ function createRouterHarness(params?: {
   const eventsSourceTable = params?.eventsTable ?? ordersTable;
   const sourceDb = createMockSourceDb(params?.sourceRows ?? [[]]);
   const pulseSourceDb = createPulseSourceDbMock(() => sourceDb.takeRows());
-  const realtimeService = createRealtimeServiceMock({
+  const pulseStore = createPulseStoreMock({
     latestSnapshot: params?.latestSnapshot,
     events: params?.events,
   });
   const epoch = params && 'epoch' in params ? params.epoch : HARNESS_EPOCH;
-  const requestHandler = new RealtimeRequestHandler(
+  const requestHandler = new PulseRequestHandler(
     registry,
     pulseSourceDb,
-    () => realtimeService,
+    () => pulseStore,
     () => buildEventsTable(eventsSourceTable),
     () => epoch,
     params?.pullEventLimit,
   );
 
-  const router = createRealtimeRouter(requestHandler, { userId: null });
+  const router = createPulseRouter(requestHandler, { userId: null });
 
   return { router };
 }
@@ -560,7 +560,7 @@ describe('subscribe reads the snapshot cursor before the baseline SELECT', () =>
       },
     } as unknown as MockPulseSourceDb;
 
-    const realtimeService: Pick<RealtimeService, 'getDb' | 'getLatestSnapshot'> = {
+    const pulseStore: Pick<PulseStore, 'getDb' | 'getLatestSnapshot'> = {
       getDb() {
         throw new Error('getDb should not be called from subscribe()');
       },
@@ -570,10 +570,10 @@ describe('subscribe reads the snapshot cursor before the baseline SELECT', () =>
       },
     };
 
-    const requestHandler = new RealtimeRequestHandler(
+    const requestHandler = new PulseRequestHandler(
       registry,
       pulseSourceDb,
-      () => realtimeService,
+      () => pulseStore,
       () => buildEventsTable(ordersTable),
       () => HARNESS_EPOCH,
     );

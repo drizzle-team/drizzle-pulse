@@ -4,7 +4,7 @@ import type { PgTable } from 'drizzle-orm/pg-core';
 import { getTableConfig } from 'drizzle-orm/pg-core';
 import type { Pool } from 'pg';
 
-export class RealtimeService {
+export class PulseStore {
   private readonly db: ReturnType<typeof drizzle>;
 
   constructor(pool: Pool) {

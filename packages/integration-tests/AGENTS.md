@@ -2,7 +2,7 @@
 
 ## Role
 
-Live PostgreSQL + WAL integration coverage for the realtime SDK runtime. These tests validate subscribe, pull, load-more, fetch-adapter, event-merging, embedded-collection, runtime self-provisioning (reconcile), and WAL-reconnect resilience behavior against a real database and logical replication slot.
+Live PostgreSQL + WAL integration coverage for the Pulse SDK runtime. These tests validate subscribe, pull, load-more, fetch-adapter, event-merging, embedded-collection, runtime self-provisioning (reconcile), and WAL-reconnect resilience behavior against a real database and logical replication slot.
 
 ## Entry Points
 

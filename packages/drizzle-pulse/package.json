@@ -1,7 +1,7 @@
 {
   "name": "drizzle-pulse",
   "version": "0.0.4",
-  "description": "Type-safe realtime SDK for Drizzle — server runtime, HTTP client, React hook, and embedded client",
+  "description": "Type-safe Pulse SDK for Drizzle — server runtime, HTTP client, React hook, and embedded client",
   "type": "module",
   "license": "Apache-2.0",
   "author": "Dan Kochetov",
@@ -16,7 +16,7 @@
     "drizzle-orm",
     "postgres",
     "postgresql",
-    "realtime",
+    "pulse",
     "wal",
     "logical-replication",
     "live-query",

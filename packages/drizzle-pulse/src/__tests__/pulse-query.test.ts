@@ -60,7 +60,7 @@ function createTestClient(fetchImpl: typeof fetch) {
   return createPulseClient<{
     ordersByStatus(args?: Record<string, unknown>): QueryDescriptor<TestRow>;
   }>({
-    url: '/api/realtime',
+    url: '/api/pulse',
     fetchImpl,
   });
 }
@@ -249,7 +249,7 @@ describe('PulseQuery runtime characterization', () => {
     await core.subscribe();
     await core.loadMore();
 
-    expect(calls[1]?.url).toBe('/api/realtime/load-more');
+    expect(calls[1]?.url).toBe('/api/pulse/load-more');
     expect(calls[1]?.body).toEqual({
       queryName: 'ordersByStatus',
       args: {},
@@ -299,8 +299,8 @@ describe('PulseQuery runtime characterization', () => {
     await core.poll();
 
     expect(calls.map((call) => call.url)).toEqual([
-      '/api/realtime/subscribe',
-      '/api/realtime/pull',
+      '/api/pulse/subscribe',
+      '/api/pulse/pull',
     ]);
     expect(calls[1]?.body).toEqual({
       subscriptions: [
@@ -371,9 +371,9 @@ describe('PulseQuery runtime characterization', () => {
     await Promise.all([first.poll(), second.poll()]);
 
     expect(calls.map((call) => call.url)).toEqual([
-      '/api/realtime/subscribe',
-      '/api/realtime/subscribe',
-      '/api/realtime/pull',
+      '/api/pulse/subscribe',
+      '/api/pulse/subscribe',
+      '/api/pulse/pull',
     ]);
     const pullBody = calls[2]?.body as { subscriptions: PullEntry[] };
     expect(pullBody.subscriptions).toHaveLength(2);

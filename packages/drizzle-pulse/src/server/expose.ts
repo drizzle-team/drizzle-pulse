@@ -5,10 +5,10 @@ import { type ClientConfig, Pool, type PoolConfig, types } from 'pg';
 import { LogicalReplicationService, type Pgoutput, PgoutputPlugin } from 'pg-logical-replication';
 import { emitEventsTableDdl } from './events-table-ddl.js';
 import { buildEventsTable, DEFAULT_EVENTS_SCHEMA } from './events-table-resolver.js';
-import { DEFAULT_PULL_EVENT_LIMIT, RealtimeRequestHandler } from './sdk.js';
+import { DEFAULT_PULL_EVENT_LIMIT, PulseRequestHandler } from './sdk.js';
 import type { AnyPulseBuilders, PulseRegistry } from './pulse-registry.js';
 import type { PulseSourceDb } from './pulse-sql.js';
-import { RealtimeService } from './realtime-store.js';
+import { PulseStore } from './pulse-store.js';
 import { WalEventEmitter } from './wal-event-emitter.js';
 import { createWalRowNormalizer } from './wal-normalization.js';
 
@@ -29,10 +29,9 @@ const rawTextTypes = {
       : (types.getTypeParser as (oid: number, format?: unknown) => unknown)(oid, format),
 } as PoolConfig['types'];
 
-// Keeps WAL values for the raw-text OIDs as text without mutating the process-global
-// pg-types registry pg-logical-replication decodes through.
-// ponytail: couples to pg-logical-replication internals (relation.columns[].parser); the
-// runtime guard below fails loud if that shape changes on upgrade.
+// Keeps WAL values for the raw-text OIDs as text without mutating the process-global pg-types
+// registry pg-logical-replication decodes through. Couples to pg-logical-replication internals
+// (relation.columns[].parser); the runtime guard below fails loud if that shape changes.
 function scopeRawTextWalParsers(plugin: PgoutputPlugin): PgoutputPlugin {
   const parse = plugin.parse.bind(plugin);
   plugin.parse = (buffer: Buffer) => {
@@ -68,21 +67,21 @@ export type ExposeWalConfig = Partial<
   Pick<WalListenerConfig, 'publicationName' | 'slotName' | 'reconnect'>
 >;
 
-/**
- * Runtime log verbosity. `debug` adds per-WAL-event traces, `info` (default) adds
- * listener-lifecycle messages, `error` keeps only failures, `silent` disables all output.
- */
-export type LogLevel = 'debug' | 'info' | 'error' | 'silent';
-
-const LOG_LEVEL_RANK: Record<LogLevel, number> = { silent: 0, error: 1, info: 2, debug: 3 };
+// Ordered so each log method gates on `this.logLevel >= LogLevel.X`. Debug adds per-WAL-event
+// traces; Info (default) adds listener-lifecycle messages; Error keeps only failures.
+export enum LogLevel {
+  Silent = 0,
+  Error = 1,
+  Info = 2,
+  Debug = 3,
+}
 
 export type ExposeConfig = {
   databaseUrl: string;
   /**
-   * The app's own drizzle connection; baseline and query reads run on it so they keep the
-   * app's session context (RLS, search_path). A node-postgres-backed instance must
-   * configure its pool `types` to deliver date/timestamp/timestamptz/interval/point as
-   * raw text (postgres-js does so natively).
+   * The app's own drizzle connection; baseline and query reads run on it to keep its session
+   * context (RLS, search_path). node-postgres pools must set `types` to deliver
+   * date/timestamp/timestamptz/interval/point as raw text (postgres-js does so natively).
    */
   sourceDb: PulseSourceDb;
   eventsSchema?: string;
@@ -116,7 +115,8 @@ const DEFAULT_RECONNECT = {
   maxDelayMs: 30000,
 };
 
-const DEFAULT_WAL_NAME = 'drizzle_pulse';
+const DEFAULT_PUBLICATION_NAME = 'drizzle_pulse';
+const DEFAULT_SLOT_NAME = 'drizzle_pulse';
 
 function withQuietPgOptions<T extends ClientConfig | PoolConfig>(config: T): T {
   return {
@@ -125,9 +125,9 @@ function withQuietPgOptions<T extends ClientConfig | PoolConfig>(config: T): T {
   };
 }
 
-export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
+export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   private readonly sourceTableMetadata: Map<string, SourceTableMetadata>;
-  private readonly requestHandler: RealtimeRequestHandler;
+  private readonly requestHandler: PulseRequestHandler;
   private readonly pgConfig: ClientConfig & { replication: 'database' };
   private readonly pgPoolConfig: PoolConfig;
   private readonly reconnectConfig: Required<NonNullable<ExposeWalConfig['reconnect']>>;
@@ -140,7 +140,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
   private eventsEpochs = new Map<string, string>();
 
   private pool: Pool | null = null;
-  private realtimeService: RealtimeService | null = null;
+  private pulseStore: PulseStore | null = null;
   private replicationService: LogicalReplicationService | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   isRunning = false;
@@ -174,14 +174,14 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     private readonly config: ExposeConfig,
   ) {
     const wal = this.config.wal ?? {};
-    this.publicationName = wal.publicationName ?? DEFAULT_WAL_NAME;
-    this.slotName = wal.slotName ?? DEFAULT_WAL_NAME;
+    this.publicationName = wal.publicationName ?? DEFAULT_PUBLICATION_NAME;
+    this.slotName = wal.slotName ?? DEFAULT_SLOT_NAME;
     this.eventsSchema = this.config.eventsSchema ?? DEFAULT_EVENTS_SCHEMA;
 
     this.sourceTableMetadata = new Map();
-    // The `_`->`__` escaping is not injective (see events-table-resolver.ts), so distinct
-    // source tables can derive the same events-table name; reject that here, where the full
-    // set of source tables is known, rather than let one table silently shadow another.
+    // Two different source tables can produce the same events-table name (the `_`→`__`
+    // escaping collides for names like `a_`+`b` vs `a`+`_b`), so reject duplicates here where
+    // the full set is known.
     const eventsNameOrigin = new Map<string, string>();
     for (const queryName of this.registry.getQueryNames()) {
       const pulseQuery = this.registry.getPulseQuery(queryName);
@@ -223,12 +223,12 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     };
     this.pgPoolConfig = { ...withQuietPgOptions(pg), types: rawTextTypes };
     this.reconnectConfig = { ...DEFAULT_RECONNECT, ...wal.reconnect };
-    this.logLevel = this.config.logLevel ?? 'info';
+    this.logLevel = this.config.logLevel ?? LogLevel.Info;
 
-    this.requestHandler = new RealtimeRequestHandler(
+    this.requestHandler = new PulseRequestHandler(
       this.registry,
       this.config.sourceDb,
-      () => this.getRealtimeService(),
+      () => this.getPulseStore(),
       (queryName: string) => this.getEventsTableForQuery(queryName),
       (queryName: string) => this.getEpochForQuery(queryName),
       this.config.pullEventLimit ?? DEFAULT_PULL_EVENT_LIMIT,
@@ -266,7 +266,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
   }
 
   async ensureBaselines(): Promise<void> {
-    const currentRealtimeService = this.getRealtimeService();
+    const currentPulseStore = this.getPulseStore();
     const sourceDb = this.config.sourceDb;
 
     for (const queryName of this.registry.getQueryNames()) {
@@ -280,7 +280,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
         .orderBy(desc(pulseQuery.pkColumn))
         .limit(1);
 
-      await currentRealtimeService.createBaselineSnapshot(
+      await currentPulseStore.createBaselineSnapshot(
         this.getEventsTableForQuery(queryName),
         pulseQuery.pkColumn.name,
         baselineRow ?? null,
@@ -303,7 +303,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
       await this.ensureBaselines();
 
       let maxSnapshot = 0;
-      const service = this.getRealtimeService();
+      const service = this.getPulseStore();
       for (const meta of this.sourceTableMetadata.values()) {
         const snap = await service.getLatestSnapshot(meta.eventsTable);
         maxSnapshot = Math.max(maxSnapshot, snap);
@@ -334,7 +334,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
 
     const pool = this.pool;
     this.pool = null;
-    this.realtimeService = null;
+    this.pulseStore = null;
 
     if (pool) {
       await pool.end();
@@ -361,13 +361,13 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
   }
 
   private initializeDatabaseServices(): void {
-    if (this.pool && this.realtimeService) {
+    if (this.pool && this.pulseStore) {
       return;
     }
 
     const pool = new Pool(this.pgPoolConfig);
     this.pool = pool;
-    this.realtimeService = new RealtimeService(pool);
+    this.pulseStore = new PulseStore(pool);
   }
 
   // Mirrors stop()'s pool/service teardown so a failed guard doesn't leak connections —
@@ -375,7 +375,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
   private async teardownFailedStart(): Promise<void> {
     const pool = this.pool;
     this.pool = null;
-    this.realtimeService = null;
+    this.pulseStore = null;
 
     if (pool) {
       await pool.end();
@@ -392,15 +392,14 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
   // Any throw rolls the whole transaction back, so a database it can't fully provision is left
   // untouched. Runtime-owned events-table DDL: the app no longer migrates these tables.
   private async reconcile(): Promise<void> {
-    const adminDb = this.getRealtimeService().getDb();
+    const adminDb = this.getPulseStore().getDb();
     const eventsSchema = this.eventsSchema;
     const schema = sql.identifier(eventsSchema);
     const metaTable = sql`${schema}.${sql.identifier('pulse_meta')}`;
 
     const epochs = await adminDb.transaction(async (tx) => {
-      // Serializes concurrent boots targeting the same events schema so two runtimes can't
-      // race the same DROP+CREATE. Auto-released at transaction end.
-      // ponytail: one lock per events schema; fine for a boot-time step.
+      // Serializes concurrent boots targeting the same events schema (one lock per schema) so
+      // two runtimes can't race the same DROP+CREATE. Auto-released at transaction end.
       await tx.execute(
         sql`SELECT pg_advisory_xact_lock(hashtext(${'drizzle_pulse'}), hashtext(${eventsSchema}))`,
       );
@@ -593,7 +592,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
 
   private async connectReplication(): Promise<void> {
     try {
-      const adminDb = this.getRealtimeService().getDb();
+      const adminDb = this.getPulseStore().getDb();
 
       const replicationService = new LogicalReplicationService(this.pgConfig, {
         acknowledge: { auto: false, timeoutSeconds: 10 },
@@ -799,7 +798,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
   }
 
   private async persistWalEvent(event: WalEvent, metadata: SourceTableMetadata): Promise<void> {
-    const currentRealtimeService = this.getRealtimeService();
+    const currentPulseStore = this.getPulseStore();
     const pkSource = event.operation === 'delete' ? event.oldRowData : event.rowData;
     const pkValue = pkSource?.[metadata.pkColumnName];
 
@@ -818,7 +817,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
 
     let snapshot: number;
     if (event.operation === 'insert') {
-      snapshot = await currentRealtimeService.persistInsertEvent(
+      snapshot = await currentPulseStore.persistInsertEvent(
         metadata.eventsTable,
         metadata.pkColumnName,
         pkValue,
@@ -832,7 +831,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
         return;
       }
 
-      snapshot = await currentRealtimeService.persistUpdateEvent(
+      snapshot = await currentPulseStore.persistUpdateEvent(
         metadata.eventsTable,
         metadata.pkColumnName,
         pkValue,
@@ -849,7 +848,7 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
         return;
       }
 
-      snapshot = await currentRealtimeService.persistDeleteEvent(
+      snapshot = await currentPulseStore.persistDeleteEvent(
         metadata.eventsTable,
         metadata.pkColumnName,
         pkValue,
@@ -871,28 +870,28 @@ export class RealtimeRuntime<TQueries extends AnyPulseBuilders> {
     );
   }
 
-  private getRealtimeService(): RealtimeService {
-    if (!this.realtimeService) {
-      throw new Error('RealtimeService has not been initialized');
+  private getPulseStore(): PulseStore {
+    if (!this.pulseStore) {
+      throw new Error('PulseStore has not been initialized');
     }
 
-    return this.realtimeService;
+    return this.pulseStore;
   }
 
   private logInfo(message: string, ...args: unknown[]): void {
-    if (LOG_LEVEL_RANK[this.logLevel] >= LOG_LEVEL_RANK.info) console.log(message, ...args);
+    if (this.logLevel >= LogLevel.Info) console.log(message, ...args);
   }
 
   private logError(message: string, ...args: unknown[]): void {
-    if (LOG_LEVEL_RANK[this.logLevel] >= LOG_LEVEL_RANK.error) console.error(message, ...args);
+    if (this.logLevel >= LogLevel.Error) console.error(message, ...args);
   }
 
   private logWarn(message: string, ...args: unknown[]): void {
-    if (LOG_LEVEL_RANK[this.logLevel] >= LOG_LEVEL_RANK.info) console.warn(message, ...args);
+    if (this.logLevel >= LogLevel.Info) console.warn(message, ...args);
   }
 
   private logDebug(message: string, ...args: unknown[]): void {
-    if (LOG_LEVEL_RANK[this.logLevel] >= LOG_LEVEL_RANK.debug) console.log(message, ...args);
+    if (this.logLevel >= LogLevel.Debug) console.log(message, ...args);
   }
 }
 
@@ -900,5 +899,5 @@ export function expose<TQueries extends AnyPulseBuilders>(
   registry: PulseRegistry<TQueries>,
   config: ExposeConfig,
 ) {
-  return new RealtimeRuntime(registry, config);
+  return new PulseRuntime(registry, config);
 }

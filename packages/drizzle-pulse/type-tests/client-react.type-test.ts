@@ -17,7 +17,7 @@ const registry = createPulseRegistry({
 });
 
 type Client = typeof registry.$client;
-const pulseClient = createPulseClient<Client>({ url: '/api/realtime' });
+const pulseClient = createPulseClient<Client>({ url: '/api/pulse' });
 
 const statusDescriptor = pulseClient.ordersByStatus({ status: 'requested' });
 const allOrdersDescriptor = pulseClient.allOrders();

@@ -2,7 +2,7 @@
  * Task 2: Router Fetch Adapter Integration Test
  *
  * Focused test to verify that createRouterFetchAdapter correctly converts Hono router
- * to a fetch-compatible interface that can be used by realtime clients.
+ * to a fetch-compatible interface that can be used by pulse clients.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
@@ -207,7 +207,7 @@ describe('Router Fetch Adapter', () => {
     expect(response.ok).toBe(true);
   });
 
-  test('PulseQuery integration: adapter enables realtime subscribe/poll cycle', async () => {
+  test('PulseQuery integration: adapter enables pulse subscribe/poll cycle', async () => {
     // Create test user
     const user = await insertTestUser(ctx.db, `user_${Math.random().toString(36).slice(2)}`);
 

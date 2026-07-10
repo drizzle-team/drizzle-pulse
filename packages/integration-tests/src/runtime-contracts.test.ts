@@ -11,7 +11,7 @@ import { fullOrdersFixture } from './fixtures/full-orders/index.js';
 import type { HarnessProcessDbOperations, RuntimeOf } from './helpers/test-harness.js';
 import {
   cleanupBetweenTestsForFixture,
-  createRealtimeRouterWithAuth,
+  createPulseRouterWithAuth,
   insertTestUser,
   pullClient,
   setupTestSuiteForFixture,
@@ -345,10 +345,10 @@ describe('Runtime Contracts', () => {
     const driverOne = await insertTestUser(db, `auth_driver_${randomUUID().slice(0, 8)}`);
     const driverTwo = await insertTestUser(db, `auth_driver_${randomUUID().slice(0, 8)}`);
 
-    const driverOneRouter = createRealtimeRouterWithAuth(runtime, {
+    const driverOneRouter = createPulseRouterWithAuth(runtime, {
       userId: driverOne.id,
     });
-    const driverTwoRouter = createRealtimeRouterWithAuth(runtime, {
+    const driverTwoRouter = createPulseRouterWithAuth(runtime, {
       userId: driverTwo.id,
     });
 

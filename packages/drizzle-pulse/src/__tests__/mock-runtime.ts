@@ -1,6 +1,6 @@
 import { getColumns } from 'drizzle-orm';
 import { integer, pgTable, serial, text } from 'drizzle-orm/pg-core';
-import { RealtimeRuntime } from '../server/expose.js';
+import { PulseRuntime } from '../server/expose.js';
 import { createPulseRegistry } from '../server/pulse-registry.js';
 import type { PulseSourceDb } from '../server/pulse-sql.js';
 import type { PulseRegistryQuery, ResolvedPulseQuery } from '../types.js';
@@ -82,12 +82,12 @@ export function makeRegistryStub(overrides: Partial<PulseRegistryQuery> = {}): P
   };
 }
 
-// Construct a real RealtimeRuntime with an empty registry (no DB required).
+// Construct a real PulseRuntime with an empty registry (no DB required).
 export function makePulseRuntime(
   opts: { databaseUrl?: string; sourceDb?: PulseSourceDb } = {},
-): RealtimeRuntime<any> {
+): PulseRuntime<any> {
   const emptyRegistry = createPulseRegistry({});
-  return new RealtimeRuntime(emptyRegistry as any, {
+  return new PulseRuntime(emptyRegistry as any, {
     databaseUrl: opts.databaseUrl ?? 'postgresql://user:pass@localhost/test',
     sourceDb: opts.sourceDb ?? ({} as PulseSourceDb),
     wal: { publicationName: 'test_pub', slotName: 'test_slot' },

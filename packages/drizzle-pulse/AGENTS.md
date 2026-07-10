@@ -2,11 +2,11 @@
 
 ## Role
 
-Type-safe realtime SDK shared by server, client, React, and embedded layers.
+Type-safe Pulse SDK shared by server, client, React, and embedded layers.
 
 - root side: `pulse`, `PulseTable` — the collection entity, exported once per table from schema files
 - server side: `PulseBuilder` (seeded via `PulseTable.query(fn?)`), `createPulseRegistry`, `expose`, the transport-agnostic request handler (SDK), and the events-table machinery (`buildEventsTable` resolver + internal DDL renderer + `reconcile`/`provision`)
-- server/router side: `createRealtimeRouter` — an optional Hono wrapper over the SDK on the `./server/router` subpath
+- server/router side: `createPulseRouter` — an optional Hono wrapper over the SDK on the `./server/router` subpath
 - client side: `createPulseClient`, `PulseQuery` (over a pluggable transport)
 - React side: `usePulseQuery`
 - embedded side: `createPulseClient` (in-process, runtime-backed), `PulseCollection` facade
@@ -47,16 +47,16 @@ the platform-imports purity test).
 | `src/server/events-table-ddl.ts` | internal `emitEventsTableDdl`: renders the recreate DDL (`CREATE SCHEMA`/`DROP TABLE`/`CREATE TABLE`) strictly from the resolver's output; `reconcile()` hashes its text to detect divergence (not a public export) |
 | `src/server/cursor.ts` | opaque cursor tokens `"<epoch>:<snapshot>"` — `formatCursor`/`parseCursor`; epoch rotates on events-table recreate so stale tokens are detectable |
 | `src/server/pulse-sql.ts` | query compilation / row predicate evaluation |
-| `src/server/sdk.ts` | `RealtimeRequestHandler` — the transport-agnostic SDK core: subscribe/pull/loadMore, cursor-token mint/validate, `DEFAULT_PULL_EVENT_LIMIT` overflow→reset. Stateless: auth re-resolved per pull, no subscription registry |
-| `src/server/router.ts` | `createRealtimeRouter` — optional Hono wrapper over the SDK's three routes (`/subscribe`, `/pull`, `/load-more`); superjson-encoded responses; `./server/router` subpath |
-| `src/server/expose.ts` | `RealtimeRuntime` assembly, `ExposeConfig` (publication/slot default `drizzle_pulse`, `eventsSchema`, `pullEventLimit`, `logLevel`), `reconcile()` self-provisioning + `provision()`, WAL listener lifecycle |
-| `src/server/realtime-store.ts` | `RealtimeService` — events-table reads/writes over the pulse-owned pool |
+| `src/server/sdk.ts` | `PulseRequestHandler` — the transport-agnostic SDK core: subscribe/pull/loadMore, cursor-token mint/validate, `DEFAULT_PULL_EVENT_LIMIT` overflow→reset. Stateless: auth re-resolved per pull, no subscription registry |
+| `src/server/router.ts` | `createPulseRouter` — optional Hono wrapper over the SDK's three routes (`/subscribe`, `/pull`, `/load-more`); superjson-encoded responses; `./server/router` subpath |
+| `src/server/expose.ts` | `PulseRuntime` assembly, `ExposeConfig` (publication/slot default `drizzle_pulse`, `eventsSchema`, `pullEventLimit`, `logLevel`), `reconcile()` self-provisioning + `provision()`, WAL listener lifecycle |
+| `src/server/pulse-store.ts` | `PulseStore` — events-table reads/writes over the pulse-owned pool |
 | `src/__tests__/` | runtime/unit tests for SDK internals |
 
 ## Provisioning (reconcile / provision)
 
 The runtime **self-provisions all its infrastructure** — the app no longer migrates events
-tables. `RealtimeRuntime.reconcile()` runs inside one transaction under a per-events-schema
+tables. `PulseRuntime.reconcile()` runs inside one transaction under a per-events-schema
 advisory lock and: asserts `wal_level=logical` (the one precondition it can't fix), sets
 `REPLICA IDENTITY FULL` on each source (resets to `DEFAULT` on un-pulse), creates/diffs the
 publication, creates the events schema + `pulse_meta` bookkeeping, creates/recreates each events
@@ -79,17 +79,17 @@ Server (derive queries outside the schema file):
   createPulseRegistry({ queryName })
     → rejects a bare PulseTable; defensive composite-PK re-check
 
-  expose(registry, config) → RealtimeRuntime
+  expose(registry, config) → PulseRuntime
     → resolves each source table's events table via buildEventsTable (no hand-declared
       events tables)
     → start() runs reconcile() (self-provision), then connects WAL
     → provision() runs reconcile() only (no WAL) — for elevated-role deploy steps
 
   runtime.handlers → transport-agnostic SDK (subscribe/pull/loadMore)
-  createRealtimeRouter(runtime.handlers)  [optional Hono wrapper, ./server/router]
+  createPulseRouter(runtime.handlers)  [optional Hono wrapper, ./server/router]
 
 Client:
-  createPulseClient<RealtimeClient>({ url }) → QueryDescriptor<TResult>
+  createPulseClient<PulseClient>({ url }) → QueryDescriptor<TResult>
   new PulseQuery(descriptor, { onStateChange }) → subscribe / poll / loadMore
 
 React:
@@ -116,24 +116,24 @@ Embedded (in-process):
 pulse, PulseTable
 QueryDescriptor
 type ColumnOperators, ResolvedPulseQuery, WhereClause, WhereCondition
-type RealtimeEvent, RealtimeInsertEvent, RealtimeUpdateEvent, RealtimeDeleteEvent
+type PulseWireEvent, PulseWireInsertEvent, PulseWireUpdateEvent, PulseWireDeleteEvent
 type SubscribeRequest, SubscribeResponse, PullRequest, PullSubscriptionRequest
 type PullResponse, PullIncrementalResponse, PullResetResponse, PullResponseError, PullResponseErrorResult
 type LoadMoreRequest, LoadMoreResponse
 
 // drizzle-pulse/server
-expose, RealtimeRuntime, type ExposeConfig, WalListenerConfig
+expose, PulseRuntime, LogLevel, type ExposeConfig, WalListenerConfig
 createPulseRegistry, PulseRegistry
 PulseBuilder, type AnyPulseBuilder, AnyQueries
 buildEventsTable, getEventsTableName, DEFAULT_EVENTS_SCHEMA
 buildSelectQuery
-RealtimeService
+PulseStore
 serializeResponse
 applyColumnFilter, type PulseClientContract, PulseQueryContext, WithPk, ColumnsSelection, ...
 type PulseAuthContext
 
 // drizzle-pulse/server/router
-createRealtimeRouter, type PulseRouterHandlers
+createPulseRouter, type PulseRouterHandlers
 
 // drizzle-pulse/client
 createPulseClient

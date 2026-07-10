@@ -294,7 +294,7 @@ describe('Client State', () => {
       expect(query.getState().hasMore).toBe(false);
     });
 
-    test('loadMore appends older rows after realtime inserts without duplicating visible rows', async () => {
+    test('loadMore appends older rows after pulse inserts without duplicating visible rows', async () => {
       await processDbOperations(
         Array.from({ length: 8 }, (_, index) =>
           db.insert(orders).values(buildRequestedOrder(`Paged ${index + 1}`, 30 + index)),
@@ -306,7 +306,7 @@ describe('Client State', () => {
       expect(query.getState().hasMore).toBe(true);
 
       await processDbOperations([
-        db.insert(orders).values(buildRequestedOrder('Realtime Before Load More', 99.5)),
+        db.insert(orders).values(buildRequestedOrder('Pulse Before Load More', 99.5)),
       ]);
 
       await query.poll();

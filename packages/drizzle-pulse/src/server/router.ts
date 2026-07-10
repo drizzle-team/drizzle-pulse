@@ -1,16 +1,16 @@
 import { Hono } from 'hono';
 import type { LoadMoreRequest, PullRequest, SubscribeRequest } from '../shared/protocol-types.js';
 import type { PulseAuthContext } from '../types.js';
-import type { RealtimeRequestHandler } from './sdk.js';
+import type { PulseRequestHandler } from './sdk.js';
 import { serializeResponse } from './superjson-utils.js';
 
 // The three transport entry points the router drives. Structural so callers can pass a
-// full RealtimeRequestHandler or any equivalent SDK surface.
-export type PulseRouterHandlers = Pick<RealtimeRequestHandler, 'subscribe' | 'pull' | 'loadMore'>;
+// full PulseRequestHandler or any equivalent SDK surface.
+export type PulseRouterHandlers = Pick<PulseRequestHandler, 'subscribe' | 'pull' | 'loadMore'>;
 
 // Thin Hono wrapper over the SDK: plain-JSON request in, superjson-encoded {status, body}
 // out. The stateless protocol has exactly these three paths.
-export function createRealtimeRouter(
+export function createPulseRouter(
   handlers: PulseRouterHandlers,
   auth: PulseAuthContext = { userId: null },
 ): Hono {

@@ -1,6 +1,6 @@
 # drizzle-pulse
 
-Type-safe realtime SDK for Drizzle ORM — server-defined queries that stream live PostgreSQL changes (via WAL logical replication) to remote clients over HTTP polling, or directly in-process as live in-memory collections. One query definition, one merge implementation, two consumption paths.
+Type-safe Pulse SDK for Drizzle ORM — server-defined queries that stream live PostgreSQL changes (via WAL logical replication) to remote clients over HTTP polling, or directly in-process as live in-memory collections. One query definition, one merge implementation, two consumption paths.
 
 ## Install
 
@@ -94,9 +94,9 @@ Derive queries from collections outside the schema file, register them, and expo
 - Queries that read `ctx.args` in their `queryFn` MUST chain `.args(zodSchema)` first. Without a schema, `ctx.args` is always `{}` at runtime (the registry never forwards unvalidated client input as args) — reading `ctx.args` on a schemaless query silently sees no fields rather than attacker-controlled data.
 - `.columns()` must be called before `.transform()` in the chain — calling it after throws, rather than silently discarding the transform.
 - `createPulseRegistry(queries)` — collects builders into a `PulseRegistry`; rejects a bare `PulseTable` (queries must be derived via `.query()` first)
-- `expose(registry, config)` — returns a `RealtimeRuntime`; call `.start()` to self-provision infrastructure and connect WAL, `runtime.handlers.{subscribe,pull,loadMore}` to serve requests
-- `RealtimeRuntime` — WAL listener + request handlers; `.start()` / `.stop()`. The server is stateless: each pull re-resolves auth and validates its own opaque cursor token, so there's no per-subscription server state, no TTL, and no `unsubscribe` — a client simply stops pulling.
-- `RealtimeRuntime.provision()` — runs the same infrastructure reconciliation as `.start()` without opening the WAL stream, for split-role deploys (see "Provisioning & privileges" below)
+- `expose(registry, config)` — returns a `PulseRuntime`; call `.start()` to self-provision infrastructure and connect WAL, `runtime.handlers.{subscribe,pull,loadMore}` to serve requests
+- `PulseRuntime` — WAL listener + request handlers; `.start()` / `.stop()`. The server is stateless: each pull re-resolves auth and validates its own opaque cursor token, so there's no per-subscription server state, no TTL, and no `unsubscribe` — a client simply stops pulling.
+- `PulseRuntime.provision()` — runs the same infrastructure reconciliation as `.start()` without opening the WAL stream, for split-role deploys (see "Provisioning & privileges" below)
 
 ```ts
 import { pulse } from 'drizzle-pulse';
@@ -145,9 +145,9 @@ For split-role deploys where the app role is deliberately unprivileged, call `ru
 `runtime.handlers` is a transport-agnostic SDK — plug its `subscribe`/`pull`/`loadMore` methods into any HTTP framework. For Hono, the optional first-party router wraps them (superjson-encoded responses over three POST routes: `/subscribe`, `/pull`, `/load-more`):
 
 ```ts
-import { createRealtimeRouter } from 'drizzle-pulse/server/router';
+import { createPulseRouter } from 'drizzle-pulse/server/router';
 
-const router = createRealtimeRouter(runtime.handlers, { userId: null }); // Hono instance
+const router = createPulseRouter(runtime.handlers, { userId: null }); // Hono instance
 app.route('/pulse', router);
 ```
 
@@ -203,7 +203,7 @@ For server-side consumers that live in the same process as the WAL runtime: `cre
 ```ts
 import { createPulseClient } from 'drizzle-pulse/client/embedded';
 
-const client = createPulseClient(runtime); // same RealtimeRuntime from drizzle-pulse/server
+const client = createPulseClient(runtime); // same PulseRuntime from drizzle-pulse/server
 
 const collection = await client.ordersByStatus({ status: 'active' });
 
