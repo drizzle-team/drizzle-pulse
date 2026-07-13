@@ -1,8 +1,8 @@
 import { getColumns, getTableUniqueName, sql } from 'drizzle-orm';
-import { drizzle } from 'drizzle-orm/node-postgres';
+import { drizzle } from 'drizzle-orm/postgres';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { getTableConfig } from 'drizzle-orm/pg-core';
-import type { Pool } from 'pg';
+import type { Pool } from 'minipg';
 
 export class PulseStore {
   private readonly db: ReturnType<typeof drizzle>;

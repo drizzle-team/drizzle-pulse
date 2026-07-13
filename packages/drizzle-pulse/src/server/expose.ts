@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { desc, getTableUniqueName, sql } from 'drizzle-orm';
 import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
-import { type ClientConfig, Pool, type PoolConfig, types } from 'pg';
+import { createPool, type Pool } from 'minipg';
+import type { ClientConfig, PoolConfig } from 'pg';
 import { LogicalReplicationService, type Pgoutput, PgoutputPlugin } from 'pg-logical-replication';
 import { emitEventsTableDdl } from './events-table-ddl.js';
 import { buildEventsTable, DEFAULT_EVENTS_SCHEMA } from './events-table-resolver.js';
@@ -20,15 +21,6 @@ type RuntimeLifecycleListener = () => void;
 const RAW_TEXT_PG_OIDS = new Set([1082, 1114, 1184, 1186, 600]);
 
 const rawText = (value: string): string => value;
-
-// Identity for the raw-text OIDs, pg default otherwise — passed as the `types` option to
-// pulse-owned Pools so their reads (events-table decode) match the WAL text-decode path.
-const rawTextTypes = {
-  getTypeParser: (oid: number, format?: unknown) =>
-    RAW_TEXT_PG_OIDS.has(oid)
-      ? rawText
-      : (types.getTypeParser as (oid: number, format?: unknown) => unknown)(oid, format),
-} as PoolConfig['types'];
 
 // Keeps WAL values for the raw-text OIDs as text without mutating the process-global pg-types
 // registry pg-logical-replication decodes through. Couples to pg-logical-replication internals
@@ -54,7 +46,6 @@ function scopeRawTextWalParsers(plugin: PgoutputPlugin): PgoutputPlugin {
 
 export interface WalListenerConfig {
   pgConfig: ClientConfig & { replication: 'database' };
-  pgPoolConfig: PoolConfig;
   publicationName: string;
   slotName: string;
   reconnect?: {
@@ -130,7 +121,6 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   private readonly sourceTableMetadata: Map<string, SourceTableMetadata>;
   private readonly requestHandler: PulseRequestHandler;
   private readonly pgConfig: ClientConfig & { replication: 'database' };
-  private readonly pgPoolConfig: PoolConfig;
   private readonly reconnectConfig: Required<NonNullable<ExposeWalConfig['reconnect']>>;
   private readonly logLevel: LogLevel;
   readonly publicationName: string;
@@ -234,7 +224,6 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       ...withQuietPgOptions(pg),
       replication: 'database',
     };
-    this.pgPoolConfig = { ...withQuietPgOptions(pg), types: rawTextTypes };
     this.reconnectConfig = { ...DEFAULT_RECONNECT, ...wal.reconnect };
     this.logLevel = this.config.logLevel ?? LogLevel.Info;
 
@@ -412,7 +401,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       return;
     }
 
-    const pool = new Pool(this.pgPoolConfig);
+    const pool = createPool(this.config.databaseUrl);
     this.pool = pool;
     this.pulseStore = new PulseStore(pool);
   }

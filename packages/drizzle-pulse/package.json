@@ -87,6 +87,7 @@
   },
   "dependencies": {
     "@types/pg": "^8.11.0",
+    "minipg": "file:../../vendor/minipg-0.1.0.tgz",
     "pg": "^8.13.0",
     "pg-logical-replication": "^2.1.0",
     "superjson": "^2.2.6"
@@ -99,7 +100,6 @@
     "drizzle-orm": "catalog:",
     "fast-check": "^3.23.2",
     "hono": "^4.6.0",
-    "minipg": "file:../../vendor/minipg-0.1.0.tgz",
     "publint": "^0.3.21",
     "react": "^18.2.0",
     "typescript": "^5.9.3",

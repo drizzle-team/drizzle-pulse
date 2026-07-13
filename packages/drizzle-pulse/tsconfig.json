@@ -5,6 +5,9 @@
     "moduleResolution": "bundler",
     "lib": ["ES2022", "DOM"],
     "types": ["node", "pg"],
+    "paths": {
+      "minipg": ["../../node_modules/minipg"]
+    },
     "declaration": true,
     "declarationMap": false,
     "stripInternal": true,
