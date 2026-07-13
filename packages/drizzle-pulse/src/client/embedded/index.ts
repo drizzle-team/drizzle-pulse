@@ -191,10 +191,20 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
         // necessarily written at-or-after the watermark read — strict greater-than would risk
         // dropping a commit landing exactly there. Any baseline/tap overlap this admits is
         // absorbed by the merge core's $pk dedup, making the handshake exactly-once.
-        async function runHandshake(): Promise<string> {
+        //
+        // `baselining`/`buffer` are shared closure state, so overlapping invocations (a
+        // reconnect racing the initial load, or reconnect flapping) must not both act on them:
+        // the generation token lets a superseded handshake detect it lost the race and
+        // abandon its (possibly stale) results instead of rebuilding over/under a newer
+        // handshake's state. Returns `null` when superseded — the caller must not treat that
+        // as "no watermark", only as "a newer handshake owns the collection now".
+        let handshakeGen = 0;
+        async function runHandshake(): Promise<string | null> {
+          const gen = ++handshakeGen;
           baselining = true;
           buffer = [];
           const { rows, watermark } = await runtime.readCollectionBaseline(resolved);
+          if (gen !== handshakeGen) return null;
           core.rebuildFromRows(applyProjectionPipeline(rows, resolved) as AnyRow[]);
           const pending = buffer;
           buffer = [];
@@ -217,6 +227,7 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
             void (async () => {
               try {
                 const watermark = await runHandshake();
+                if (watermark === null) return; // superseded by a newer reconnect handshake
                 if (collection.isDisposed) return;
                 collection.fireOnChange([], watermark);
               } catch (err) {

@@ -330,6 +330,69 @@ describe('embedded client — tap-direct handshake', () => {
     collection.dispose();
   });
 
+  test('an overlapping reconnect handshake supersedes a slower stale one (CR-01)', async () => {
+    let reconnectListener: (() => void) | undefined;
+    const runtime = makeMockRuntime({
+      baselineRows: [{ id: 1, status: 'accepted', price: 10 }],
+      watermark: '0/100',
+    });
+    runtime.onReconnect = (listener: () => void) => {
+      reconnectListener = listener;
+      return () => {
+        reconnectListener = undefined;
+      };
+    };
+
+    let releaseInitial!: () => void;
+    let releaseReconnect!: () => void;
+    const initialGate = new Promise<void>((resolve) => {
+      releaseInitial = resolve;
+    });
+    const reconnectGate = new Promise<void>((resolve) => {
+      releaseReconnect = resolve;
+    });
+
+    let call = 0;
+    runtime.readCollectionBaseline = async () => {
+      call++;
+      if (call === 1) {
+        await initialGate;
+        return { rows: [{ id: 1, status: 'accepted', price: 10 }], watermark: '0/100' };
+      }
+      await reconnectGate;
+      return {
+        rows: [
+          { id: 1, status: 'accepted', price: 10 },
+          { id: 2, status: 'accepted', price: 20 },
+        ],
+        watermark: '0/200',
+      };
+    };
+
+    const client = createPulseClient(runtime as any);
+    // Initial handshake (gen 1) starts and blocks on initialGate.
+    const collectionPromise = (client as any).orders();
+
+    // Reconnect fires while the initial handshake is still awaiting its baseline read — this
+    // is the overlap CR-01 describes: a reconnect racing collection creation.
+    reconnectListener?.();
+
+    // The newer handshake (gen 2) resolves first with the current 2-row state...
+    releaseReconnect();
+    await flushMicrotasks();
+    // ...then the older, now-stale initial handshake (gen 1) resolves. Pre-fix, it would
+    // unconditionally rebuild the core from its 1-row baseline, clobbering gen 2's state.
+    releaseInitial();
+
+    const collection = await collectionPromise;
+    await flushMicrotasks();
+
+    expect(collection.list()).toHaveLength(2);
+    expect(collection.list().map((r: any) => r.id).sort()).toEqual([1, 2]);
+
+    collection.dispose();
+  });
+
   test('a rejecting re-baseline fires onError instead of throwing', async () => {
     let reconnectListener: (() => void) | undefined;
     const runtime = makeMockRuntime();
