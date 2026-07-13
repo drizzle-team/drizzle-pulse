@@ -434,6 +434,52 @@ describe('embedded client — tap-direct handshake', () => {
     collection.dispose();
   });
 
+  test('a buffered payload drained by a re-baseline after dispose() does not fire onChange (WR-03)', async () => {
+    let reconnectListener: (() => void) | undefined;
+    const runtime = makeMockRuntime();
+    runtime.onReconnect = (listener: () => void) => {
+      reconnectListener = listener;
+      return () => {
+        reconnectListener = undefined;
+      };
+    };
+
+    const client = createPulseClient(runtime as any);
+    const collection = await (client as any).orders();
+
+    let changeCount = 0;
+    collection.onChange(() => changeCount++);
+
+    let releaseBaseline!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseBaseline = resolve;
+    });
+    runtime.readCollectionBaseline = async () => {
+      await gate;
+      return { rows: [], watermark: '0/100' };
+    };
+
+    reconnectListener?.();
+    // While the re-baseline is in flight, this payload is buffered (above the watermark, so
+    // it will be applied when the buffer drains).
+    runtime.walEventEmitter.emit(
+      tableKey,
+      'insert',
+      { id: 9, status: 'accepted', price: 90 },
+      null,
+      0,
+      '0/200',
+    );
+
+    // dispose() before the buffer drains — the drain (inside runHandshake, before the
+    // reconnect wrapper's own isDisposed check runs) must not fire onChange into it.
+    collection.dispose();
+    releaseBaseline();
+    await flushMicrotasks();
+
+    expect(changeCount).toBe(0);
+  });
+
   test('a terminal replication error fires onError', async () => {
     let terminalErrorListener: ((error: Error) => void) | undefined;
     const runtime = makeMockRuntime();

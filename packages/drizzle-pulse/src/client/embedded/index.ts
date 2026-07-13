@@ -86,6 +86,9 @@ export class PulseCollection<TRow extends { $pk: unknown }> {
 
   /** @internal fed by the tap-direct handshake whenever applying events mutates state. */
   fireOnChange(events: readonly PulseEvent<TRow>[], lsn: string): void {
+    // An in-flight re-baseline can resolve after dispose(); its per-payload drain must not
+    // escape into a disposed collection's listeners.
+    if (this.disposed) return;
     const change: PulseCollectionChange<TRow> = {
       events,
       state: this.core.data as readonly TRow[],
@@ -102,6 +105,7 @@ export class PulseCollection<TRow extends { $pk: unknown }> {
 
   /** @internal fed on re-baseline failure (post-reconnect) and on runtime terminal error. */
   fireOnError(error: Error): void {
+    if (this.disposed) return;
     for (const listener of this.onErrorListeners) {
       try {
         listener(error);
