@@ -7,7 +7,8 @@ import { emitEventsTableDdl } from './events-table-ddl.js';
 import { buildEventsTable, DEFAULT_EVENTS_SCHEMA } from './events-table-resolver.js';
 import { DEFAULT_PULL_EVENT_LIMIT, PulseRequestHandler } from './sdk.js';
 import type { AnyPulseBuilders, PulseRegistry } from './pulse-registry.js';
-import type { PulseSourceDb } from './pulse-sql.js';
+import { buildSelectQuery, type PulseSourceDb } from './pulse-sql.js';
+import type { ResolvedPulseQuery } from '../types.js';
 import { PulseStore } from './pulse-store.js';
 import { WalEventEmitter } from './wal-event-emitter.js';
 import { createWalRowNormalizer } from './wal-normalization.js';
@@ -154,6 +155,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   private everConnected = false;
   private readonly reconnectListeners = new Set<RuntimeLifecycleListener>();
   private readonly stopListeners = new Set<RuntimeLifecycleListener>();
+  private readonly terminalErrorListeners = new Set<(error: Error) => void>();
 
   get sourceDb(): PulseSourceDb {
     return this.config.sourceDb;
@@ -171,6 +173,13 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   onStop(listener: RuntimeLifecycleListener): () => void {
     this.stopListeners.add(listener);
     return () => this.stopListeners.delete(listener);
+  }
+
+  // Fires once replication gives up permanently (reconnect attempts exhausted) — the runtime
+  // then stops, so onStop also fires right after (D-04: terminal error, then teardown).
+  onTerminalError(listener: (error: Error) => void): () => void {
+    this.terminalErrorListeners.add(listener);
+    return () => this.terminalErrorListeners.delete(listener);
   }
 
   constructor(
@@ -290,6 +299,31 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         baselineRow ?? null,
       );
     }
+  }
+
+  /**
+   * @internal Consumed by the embedded (tap-direct) client through the runtime value. Reads the
+   * watermark BEFORE running the baseline SELECT — a row committed between the SELECT completing
+   * and a later watermark read would land in neither the baseline nor the accepted tap stream, so
+   * this ordering is load-bearing for the exactly-once handshake, not incidental.
+   */
+  async readCollectionBaseline(
+    resolved: ResolvedPulseQuery,
+  ): Promise<{ rows: Record<string, unknown>[]; watermark: string }> {
+    // 'objects' mode is the one execute() overload whose return type doesn't route through the
+    // driver-specific PgQueryResultKind mapping — the only shape that type-checks generically
+    // across every driver PulseSourceDb may wrap (pg, postgres.js, minipg, ...).
+    const watermarkRows = await this.config.sourceDb.execute<{ lsn: string }>(
+      sql`SELECT pg_current_wal_lsn()::text AS lsn`,
+      'objects',
+    );
+    const watermark = watermarkRows[0]?.lsn;
+    if (!watermark) {
+      throw new Error('pg_current_wal_lsn() returned no watermark row');
+    }
+
+    const rows = await buildSelectQuery(this.config.sourceDb, resolved.table, resolved);
+    return { rows, watermark };
   }
 
   async start(): Promise<void> {
@@ -708,7 +742,17 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
     if (this.reconnectAttempts >= this.reconnectConfig.maxRetries) {
       this.logError('[WAL Listener] Max reconnection attempts reached. Giving up.');
-      this.isRunning = false;
+      const terminalError = new Error(
+        `WAL replication failed permanently after ${this.reconnectConfig.maxRetries} reconnect attempts`,
+      );
+      for (const listener of [...this.terminalErrorListeners]) {
+        try {
+          listener(terminalError);
+        } catch (err) {
+          this.logError('[WAL Listener] onTerminalError listener error:', err);
+        }
+      }
+      void this.stop();
       return;
     }
 
