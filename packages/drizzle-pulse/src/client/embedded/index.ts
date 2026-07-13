@@ -10,6 +10,9 @@ import type { PulseAuthContext, QueryDescriptor } from '../../types.js';
 import type { WalTapPayload } from '../../server/wal-event-emitter.js';
 import { buildTapEvent, type TapRow } from './tap-events.js';
 
+export { createPulseEvents } from './events.js';
+export type { EmbeddedPulseEvents, PulseEventsCallback, PulseEventsOptions } from './events.js';
+
 // ---------------------------------------------------------------------------
 // Public type surface
 // ---------------------------------------------------------------------------
