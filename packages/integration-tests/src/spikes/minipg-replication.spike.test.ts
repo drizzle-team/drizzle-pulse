@@ -111,12 +111,6 @@ async function teardownScenario(scenario: Scenario): Promise<void> {
   scenario.rep.end();
 
   try {
-    await adminPool.query('SELECT pg_drop_replication_slot($1)', [scenario.slotName]);
-  } catch {
-    // Already dropped (e.g. an earlier assertion failure tore down mid-stream) — tolerate.
-  }
-
-  try {
     await scenario.writePool.query(`DROP PUBLICATION IF EXISTS ${PUBLICATION_NAME}`);
   } catch {
     // The ephemeral DB may already be unreachable after an earlier failure — DROP DATABASE
@@ -134,6 +128,28 @@ async function teardownScenario(scenario: Scenario): Promise<void> {
     `,
     [scenario.databaseName],
   );
+
+  // rep.end() is fire-and-forget (Terminate + socket close) — the server-side walsender can
+  // still be attached when the slot drop below runs. pg_terminate_backend above kills any
+  // lingering walsender, but the slot's "active" flag can lag by a beat, so poll-retry instead
+  // of a single attempt: a swallowed 55006 here leaks a durable (temporary: false) slot into
+  // the shared cluster, which pins WAL retention for every subsequent run.
+  await pollUntil(
+    async () => {
+      try {
+        await adminPool.query('SELECT pg_drop_replication_slot($1)', [scenario.slotName]);
+        return true;
+      } catch (e) {
+        const code = (e as { code?: string }).code;
+        if (code === '42704') return true; // undefined_object — already gone
+        if (code === '55006') return false; // object_in_use — walsender still attached, retry
+        throw e;
+      }
+    },
+    (done) => done,
+    { timeoutMs: 3000, pollIntervalMs: 100 },
+  );
+
   await adminPool.query(`DROP DATABASE IF EXISTS "${scenario.databaseName}"`);
 
   // Teardown proof: no stale slot survives this scenario.

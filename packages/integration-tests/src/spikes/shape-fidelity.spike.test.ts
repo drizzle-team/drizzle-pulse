@@ -151,12 +151,6 @@ async function createScenario(
 async function teardownScenario(scenario: Scenario): Promise<void> {
   scenario.rep.end();
 
-  try {
-    await adminPool.query('SELECT pg_drop_replication_slot($1)', [scenario.slotName]);
-  } catch {
-    // Already dropped (e.g. an earlier assertion failure tore down mid-stream) — tolerate.
-  }
-
   await scenario.writeSql.end();
   await scenario.scenarioPool.end();
 
@@ -169,6 +163,28 @@ async function teardownScenario(scenario: Scenario): Promise<void> {
     `,
     [scenario.databaseName],
   );
+
+  // rep.end() is fire-and-forget (Terminate + socket close) — the server-side walsender can
+  // still be attached when the slot drop below runs. pg_terminate_backend above kills any
+  // lingering walsender, but the slot's "active" flag can lag by a beat, so poll-retry instead
+  // of a single attempt: a swallowed 55006 here leaks a durable (temporary: false) slot into
+  // the shared cluster, which pins WAL retention for every subsequent run.
+  await pollUntil(
+    async () => {
+      try {
+        await adminPool.query('SELECT pg_drop_replication_slot($1)', [scenario.slotName]);
+        return true;
+      } catch (e) {
+        const code = (e as { code?: string }).code;
+        if (code === '42704') return true; // undefined_object — already gone
+        if (code === '55006') return false; // object_in_use — walsender still attached, retry
+        throw e;
+      }
+    },
+    (done) => done,
+    { timeoutMs: 3000, pollIntervalMs: 100 },
+  );
+
   await adminPool.query(`DROP DATABASE IF EXISTS "${scenario.databaseName}"`);
 
   const remaining = await adminPool.query<{ count: string }>(
@@ -180,6 +196,25 @@ async function teardownScenario(scenario: Scenario): Promise<void> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function pollUntil<T>(
+  fn: () => Promise<T>,
+  predicate: (value: T) => boolean,
+  opts?: { timeoutMs?: number; pollIntervalMs?: number },
+): Promise<T> {
+  const timeoutMs = opts?.timeoutMs ?? 5000;
+  const pollIntervalMs = opts?.pollIntervalMs ?? 200;
+  const deadline = Date.now() + timeoutMs;
+
+  while (true) {
+    const value = await fn();
+    if (predicate(value)) return value;
+    if (Date.now() >= deadline) {
+      throw new Error('pollUntil: timed out waiting for condition');
+    }
+    await sleep(pollIntervalMs);
+  }
 }
 
 // Bounded consumption: rejects instead of hanging so a stuck stream fails fast rather than
@@ -220,17 +255,30 @@ async function collectUntil(
 
 type ShapeCol = ReturnType<typeof Shape>['$cols'][number];
 
-function buildCandidateDecoder(): (row: Row) => Row {
+function buildCandidateDecoder(): { decode: (row: Row) => Row; xformHits: () => number } {
   const spec = buildShape.fromTableOrView(pgDataTypes);
   const mapper = Shape(spec);
-  const colsByName = new Map<string, ShapeCol>(mapper.$cols.map((col) => [col.name, col]));
+  const columns = getColumns(pgDataTypes);
+
+  // $cols[].name is the TS property key (e.g. "bigIntNumberCol"); replication rows are keyed by
+  // SQL column name (e.g. "big_int_number_col") — translate via getColumns() so lookups below
+  // actually hit instead of silently falling through to the codec-normalize fallback for every
+  // non-trivial column.
+  const colsByName = new Map<string, ShapeCol>(
+    mapper.$cols.map((col) => [
+      (columns[col.name as keyof typeof columns] as { name: string }).name,
+      col,
+    ]),
+  );
 
   const columnBySqlName = new Map<string, unknown>();
-  for (const column of Object.values(getColumns(pgDataTypes))) {
+  for (const column of Object.values(columns)) {
     columnBySqlName.set((column as { name: string }).name, column);
   }
 
-  return (row: Row): Row => {
+  let xformHits = 0;
+
+  const decode = (row: Row): Row => {
     const out: Row = {};
     for (const [name, value] of Object.entries(row)) {
       // Only string (raw-text) values need further decode — minipg's default decoders already
@@ -242,6 +290,7 @@ function buildCandidateDecoder(): (row: Row) => Row {
       }
       const col = colsByName.get(name);
       if (col?.xform) {
+        xformHits += 1;
         out[name] = col.xform(value);
         continue;
       }
@@ -260,6 +309,8 @@ function buildCandidateDecoder(): (row: Row) => Row {
     }
     return out;
   };
+
+  return { decode, xformHits: () => xformHits };
 }
 
 // --- The oracle (today's output, reconstructed composition-identically) -----------------------
@@ -356,7 +407,9 @@ function diffRows(label: string, candidateRow: Row, oracleRow: Row, matrix: Colu
 
 function deepEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
-  if (typeof a === 'bigint' || typeof b === 'bigint') return String(a) === String(b);
+  if (typeof a === 'bigint' || typeof b === 'bigint') {
+    return typeof a === 'bigint' && typeof b === 'bigint' && a === b;
+  }
   if (a instanceof Date || b instanceof Date) {
     return a instanceof Date && b instanceof Date && a.getTime() === b.getTime();
   }
@@ -397,7 +450,8 @@ test('shape-decoded rows match the wal-normalization oracle across the pg_data_t
     const spec = buildShape.fromTableOrView(pgDataTypes);
     expect(spec).toBeDefined();
 
-    const candidateDecode = buildCandidateDecoder();
+    const candidate = buildCandidateDecoder();
+    const candidateDecode = candidate.decode;
     const oracleDecode = buildOracleDecoder(scenario.oidByName);
 
     const db = drizzle({ client: scenario.writeSql });
@@ -504,6 +558,11 @@ test('shape-decoded rows match the wal-normalization oracle across the pg_data_t
     );
     expect(toastUpdate).toBeDefined();
     expect(toastUpdate!.unchanged).toContain('text_col');
+
+    // Proves the instrument actually exercised the xform bridge under test (CR-01) — without
+    // this, colsByName misses on every lookup and the "zero divergences" result would be
+    // measuring the miniPgCodecs fallback exclusively, never the candidate path.
+    expect(candidate.xformHits()).toBeGreaterThan(0);
 
     console.table(
       matrix.map((row) => ({
