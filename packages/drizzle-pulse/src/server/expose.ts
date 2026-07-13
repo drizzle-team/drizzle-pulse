@@ -4,13 +4,13 @@ import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
 import { createPool, type Pool } from 'minipg';
 import type { ClientConfig, PoolConfig } from 'pg';
 import { LogicalReplicationService, type Pgoutput, PgoutputPlugin } from 'pg-logical-replication';
+import type { ResolvedPulseQuery } from '../types.js';
 import { emitEventsTableDdl } from './events-table-ddl.js';
 import { buildEventsTable, DEFAULT_EVENTS_SCHEMA } from './events-table-resolver.js';
-import { DEFAULT_PULL_EVENT_LIMIT, PulseRequestHandler } from './sdk.js';
 import type { AnyPulseBuilders, PulseRegistry } from './pulse-registry.js';
 import { buildSelectQuery, type PulseSourceDb } from './pulse-sql.js';
-import type { ResolvedPulseQuery } from '../types.js';
 import { PulseStore } from './pulse-store.js';
+import { DEFAULT_PULL_EVENT_LIMIT, PulseRequestHandler } from './sdk.js';
 import { WalEventEmitter } from './wal-event-emitter.js';
 import { createWalRowNormalizer } from './wal-normalization.js';
 
