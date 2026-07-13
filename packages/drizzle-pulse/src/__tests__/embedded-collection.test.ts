@@ -419,6 +419,18 @@ describe('embedded client — tap-direct handshake', () => {
     expect(errors).toHaveLength(1);
     expect(errors[0]!.message).toBe('reconnect baseline failed');
 
+    // The collection must not be left permanently latched into buffering (CR-02): a live tap
+    // payload after the failed re-baseline should apply immediately, not queue forever.
+    runtime.walEventEmitter.emit(
+      tableKey,
+      'insert',
+      { id: 2, status: 'accepted', price: 20 },
+      null,
+      0,
+      '0/999',
+    );
+    expect(collection.list()).toHaveLength(1);
+
     collection.dispose();
   });
 

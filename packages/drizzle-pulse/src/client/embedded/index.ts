@@ -203,17 +203,29 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
           const gen = ++handshakeGen;
           baselining = true;
           buffer = [];
-          const { rows, watermark } = await runtime.readCollectionBaseline(resolved);
+          let baseline: { rows: Record<string, unknown>[]; watermark: string };
+          try {
+            baseline = await runtime.readCollectionBaseline(resolved);
+          } catch (err) {
+            // A rejected re-baseline must not leave the collection permanently latched into
+            // buffering: only reset when this handshake still owns the state (a newer
+            // handshake that has since started owns the reset itself).
+            if (gen === handshakeGen) {
+              baselining = false;
+              buffer = [];
+            }
+            throw err;
+          }
           if (gen !== handshakeGen) return null;
-          core.rebuildFromRows(applyProjectionPipeline(rows, resolved) as AnyRow[]);
+          core.rebuildFromRows(applyProjectionPipeline(baseline.rows, resolved) as AnyRow[]);
           const pending = buffer;
           buffer = [];
           baselining = false;
           for (const payload of pending) {
-            if (compareLsn(payload.lsn, watermark) < 0) continue;
+            if (compareLsn(payload.lsn, baseline.watermark) < 0) continue;
             applyPayload(payload);
           }
-          return watermark;
+          return baseline.watermark;
         }
 
         const unsubs: Array<() => void> = [];
