@@ -2,16 +2,16 @@ import { getTableUniqueName } from 'drizzle-orm';
 import type { PulseRuntime } from '../../server/expose.js';
 import type { AnyPulseBuilders } from '../../server/pulse-registry.js';
 import type { PulseClientContract } from '../../server/pulse-types.js';
+import type { WalTapPayload } from '../../server/wal-event-emitter.js';
 import { compareLsn } from '../../shared/lsn.js';
-import { PulseMergeCore } from '../../shared/pulse-merge-core.js';
 import { applyProjectionPipeline } from '../../shared/projection.js';
 import type { PulseEvent } from '../../shared/pulse-events.js';
+import { PulseMergeCore } from '../../shared/pulse-merge-core.js';
 import type { PulseAuthContext, QueryDescriptor } from '../../types.js';
-import type { WalTapPayload } from '../../server/wal-event-emitter.js';
 import { buildTapEvent, type TapRow } from './tap-events.js';
 
-export { createPulseEvents } from './events.js';
 export type { EmbeddedPulseEvents, PulseEventsCallback, PulseEventsOptions } from './events.js';
+export { createPulseEvents } from './events.js';
 
 // ---------------------------------------------------------------------------
 // Public type surface

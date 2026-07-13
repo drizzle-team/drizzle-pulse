@@ -1,8 +1,8 @@
+import type { WalTapPayload } from '../../server/wal-event-emitter.js';
 import { extractRow } from '../../shared/event-normalization.js';
 import { evaluateCondition } from '../../shared/filter-ast.js';
 import { applyProjectionPipeline } from '../../shared/projection.js';
 import type { PulseEvent } from '../../shared/pulse-events.js';
-import type { WalTapPayload } from '../../server/wal-event-emitter.js';
 import type { ResolvedPulseQuery } from '../../types.js';
 
 // Must stay free of drizzle-orm/pg-core VALUE imports (bare `drizzle-orm` only): both

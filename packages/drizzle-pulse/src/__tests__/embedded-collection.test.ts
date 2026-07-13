@@ -1,64 +1,18 @@
 import { describe, expect, test } from 'bun:test';
+import { getTableUniqueName } from 'drizzle-orm';
 import { createPulseClient } from '../client/embedded/index.js';
-import { WalEventEmitter } from '../server/wal-event-emitter.js';
-import { makeRegistryStub, makeResolvedQuery } from './mock-runtime.js';
+import { makeMockRuntime, ordersTable } from './mock-runtime.js';
 
 // ---------------------------------------------------------------------------
-// No DB required: these cover the embedded client's user-facing error paths.
-// The initial load and live pulls run against a mock SDK handler; real WAL push
-// behavior is covered by the integration suite.
+// No DB required: these cover the embedded client's tap-direct handshake, the
+// watermark filter, and the locked surface (list/onChange/onError/dispose). Real WAL
+// push behavior against Postgres is covered by the integration suite.
 // ---------------------------------------------------------------------------
 
-type HandlerResult = { status: number; body: unknown };
+const tableKey = getTableUniqueName(ordersTable);
 
-function okSubscribeBody(rows: Record<string, unknown>[] = []) {
-  return {
-    rows,
-    rangeStart: null,
-    rangeEnd: null,
-    snapshot: 'e:0',
-    order: 'asc' as const,
-    limit: null,
-    hasMore: false,
-  };
-}
-
-function makeMockHandlers(
-  overrides: {
-    subscribe?: (req: unknown, auth: unknown) => Promise<HandlerResult> | HandlerResult;
-  } = {},
-) {
-  return {
-    subscribe: overrides.subscribe ?? (async () => ({ status: 200, body: okSubscribeBody() })),
-    pull: async () => ({ status: 200, body: { results: {} } }),
-    loadMore: async () => ({
-      status: 200,
-      body: { rows: [], rangeStart: null, rangeEnd: null, hasMore: false },
-    }),
-  };
-}
-
-function makeMockRuntime(
-  opts: {
-    isRunning?: boolean;
-    hasTransform?: boolean;
-    handlers?: ReturnType<typeof makeMockHandlers>;
-  } = {},
-) {
-  const walEventEmitter = new WalEventEmitter();
-  const registryStub = makeRegistryStub({ hasTransform: opts.hasTransform ?? false });
-  const resolved = makeResolvedQuery();
-  return {
-    isRunning: opts.isRunning ?? true,
-    walEventEmitter,
-    handlers: opts.handlers ?? makeMockHandlers(),
-    registry: {
-      getPulseQuery: () => registryStub,
-      resolve: () => resolved,
-    },
-    onReconnect: (_listener: () => void) => () => {},
-    onStop: (_listener: () => void) => () => {},
-  };
+async function flushMicrotasks(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 describe('embedded client — user-facing error paths', () => {
@@ -66,6 +20,12 @@ describe('embedded client — user-facing error paths', () => {
     const runtime = makeMockRuntime({ hasTransform: true });
     const client = createPulseClient(runtime as any);
     await expect((client as any).orders()).rejects.toThrow(/\.transform\(\)/);
+  });
+
+  test('creating a .limit() query rejects (unsupported in the embedded client)', async () => {
+    const runtime = makeMockRuntime({ limit: 2 });
+    const client = createPulseClient(runtime as any);
+    await expect((client as any).orders()).rejects.toThrow(/\.limit\(\)/);
   });
 
   test('creating a collection before runtime.start() rejects', async () => {
@@ -76,18 +36,16 @@ describe('embedded client — user-facing error paths', () => {
 
   test('an unknown query name rejects', async () => {
     const runtime = makeMockRuntime();
-    // The shared mock registry answers every name; unknown-query needs a miss.
     runtime.registry = { ...runtime.registry, getPulseQuery: () => undefined } as any;
     const client = createPulseClient(runtime as any);
     await expect((client as any).nope()).rejects.toThrow('Unknown query: "nope"');
   });
 
-  test('the factory rejects when the initial load fails and the change signal is detached', async () => {
-    const runtime = makeMockRuntime({
-      handlers: makeMockHandlers({
-        subscribe: async () => ({ status: 500, body: { error: 'DB connection failed' } }),
-      }),
-    });
+  test('the factory rejects when the initial baseline read fails and the tap is detached', async () => {
+    const runtime = makeMockRuntime();
+    runtime.readCollectionBaseline = async () => {
+      throw new Error('DB connection failed');
+    };
 
     let unsubCount = 0;
     const realSubscribe = runtime.walEventEmitter.subscribe.bind(runtime.walEventEmitter);
@@ -101,25 +59,22 @@ describe('embedded client — user-facing error paths', () => {
 
     const client = createPulseClient(runtime as any);
     await expect((client as any).orders()).rejects.toThrow('DB connection failed');
-    // dispose() ran on the failed load, detaching the WAL signal.
+    // dispose() ran on the failed handshake, detaching the WAL tap.
     expect(unsubCount).toBe(1);
   });
 
   test('the factory rejects when the runtime stops mid-load', async () => {
-    let releaseSubscribe!: () => void;
+    let releaseBaseline!: () => void;
     const gate = new Promise<void>((resolve) => {
-      releaseSubscribe = resolve;
+      releaseBaseline = resolve;
     });
     const stopListeners: Array<() => void> = [];
 
-    const runtime = makeMockRuntime({
-      handlers: makeMockHandlers({
-        subscribe: async () => {
-          await gate;
-          return { status: 200, body: okSubscribeBody() };
-        },
-      }),
-    });
+    const runtime = makeMockRuntime();
+    runtime.readCollectionBaseline = async () => {
+      await gate;
+      return { rows: [], watermark: '0/100' };
+    };
     runtime.onStop = (listener: () => void) => {
       stopListeners.push(listener);
       return () => {};
@@ -127,9 +82,9 @@ describe('embedded client — user-facing error paths', () => {
 
     const client = createPulseClient(runtime as any);
     const pending = (client as any).orders();
-    // Simulate runtime.stop() broadcasting while the initial load is in flight.
+    // Simulate runtime.stop() broadcasting while the baseline read is in flight.
     for (const listener of stopListeners) listener();
-    releaseSubscribe();
+    releaseBaseline();
 
     await expect(pending).rejects.toThrow(/disposed before the initial sync completed/);
   });
@@ -147,5 +102,284 @@ describe('embedded client — user-facing error paths', () => {
       new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 200)),
     ]);
     expect(resolvedInTime).toBe(true);
+  });
+});
+
+describe('embedded client — zero wire protocol (SPLIT-03)', () => {
+  test('the mock runtime has no handlers property and the collection still works', async () => {
+    // The tap-direct client must not need the SDK/wire-protocol surface at all.
+    const runtime = makeMockRuntime({ baselineRows: [{ id: 1, status: 'accepted', price: 10 }] });
+    expect('handlers' in runtime).toBe(false);
+
+    const client = createPulseClient(runtime as any);
+    const collection = await (client as any).orders();
+    expect(collection.list()).toHaveLength(1);
+
+    runtime.walEventEmitter.emit(
+      tableKey,
+      'insert',
+      { id: 2, status: 'accepted', price: 20 },
+      null,
+      0,
+      '0/999',
+    );
+    expect(collection.list()).toHaveLength(2);
+
+    collection.dispose();
+  });
+});
+
+describe('embedded client — tap-direct handshake', () => {
+  test('a tap payload below the watermark is dropped; at-or-above is applied (exactly-once)', async () => {
+    const runtime = makeMockRuntime({
+      baselineRows: [{ id: 1, status: 'accepted', price: 10 }],
+      watermark: '0/100',
+    });
+    const client = createPulseClient(runtime as any);
+    const collection = await (client as any).orders();
+
+    const changes: Array<{ events: readonly any[]; state: readonly any[]; lsn: string }> = [];
+    collection.onChange((c: any) => changes.push(c));
+
+    // Below the watermark: guaranteed already present in the baseline, so it's dropped.
+    runtime.walEventEmitter.emit(
+      tableKey,
+      'insert',
+      { id: 1, status: 'accepted', price: 10 },
+      null,
+      0,
+      '0/90',
+    );
+    expect(collection.list()).toHaveLength(1);
+    expect(changes).toHaveLength(0);
+
+    // At-or-above the watermark: applied and onChange fires with that payload's lsn.
+    runtime.walEventEmitter.emit(
+      tableKey,
+      'insert',
+      { id: 2, status: 'accepted', price: 20 },
+      null,
+      0,
+      '0/110',
+    );
+    expect(collection.list()).toHaveLength(2);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]!.lsn).toBe('0/110');
+
+    collection.dispose();
+  });
+
+  test('an insert already present in the baseline is deduped by $pk, even above the watermark', async () => {
+    const runtime = makeMockRuntime({
+      baselineRows: [{ id: 1, status: 'accepted', price: 10 }],
+      watermark: '0/100',
+    });
+    const client = createPulseClient(runtime as any);
+    const collection = await (client as any).orders();
+
+    runtime.walEventEmitter.emit(
+      tableKey,
+      'insert',
+      { id: 1, status: 'accepted', price: 10 },
+      null,
+      0,
+      '0/110',
+    );
+
+    expect(collection.list()).toHaveLength(1);
+    expect(collection.list().map((r: any) => r.id)).toEqual([1]);
+
+    collection.dispose();
+  });
+
+  test('an update moving a row out of filter removes it from list(); a delete removes the old row', async () => {
+    const runtime = makeMockRuntime({
+      baselineRows: [{ id: 1, status: 'accepted', price: 10 }],
+      where: { status: { eq: 'accepted' } },
+    });
+    const client = createPulseClient(runtime as any);
+    const collection = await (client as any).orders();
+
+    const changes: any[] = [];
+    collection.onChange((c: any) => changes.push(c));
+
+    // UPDATE out of filter: accepted -> completed (matchesOld=true, matchesNew=false)
+    runtime.walEventEmitter.emit(
+      tableKey,
+      'update',
+      { id: 1, status: 'completed', price: 15 },
+      { id: 1, status: 'accepted', price: 10 },
+      0,
+      '0/300',
+    );
+    expect(collection.list()).toHaveLength(0);
+    expect(changes[0]!.events[0].op).toBe('update');
+    expect(changes[0]!.events[0].matchesNew).toBe(false);
+    expect(changes[0]!.events[0].matchesOld).toBe(true);
+
+    // INSERT another matching row, then DELETE it.
+    runtime.walEventEmitter.emit(
+      tableKey,
+      'insert',
+      { id: 2, status: 'accepted', price: 20 },
+      null,
+      0,
+      '0/400',
+    );
+    expect(collection.list()).toHaveLength(1);
+
+    runtime.walEventEmitter.emit(
+      tableKey,
+      'delete',
+      {},
+      { id: 2, status: 'accepted', price: 20 },
+      0,
+      '0/500',
+    );
+    expect(collection.list()).toHaveLength(0);
+    expect(changes[2]!.events[0].op).toBe('delete');
+    expect(changes[2]!.events[0].matchesOld).toBe(true);
+
+    collection.dispose();
+  });
+
+  test('onChange and onError both return functions that detach', async () => {
+    let terminalErrorListener: ((error: Error) => void) | undefined;
+    const runtime = makeMockRuntime();
+    runtime.onTerminalError = (listener: (error: Error) => void) => {
+      terminalErrorListener = listener;
+      return () => {
+        terminalErrorListener = undefined;
+      };
+    };
+
+    const client = createPulseClient(runtime as any);
+    const collection = await (client as any).orders();
+
+    let changeCount = 0;
+    let errorCount = 0;
+    const offChange = collection.onChange(() => changeCount++);
+    const offError = collection.onError(() => errorCount++);
+
+    runtime.walEventEmitter.emit(
+      tableKey,
+      'insert',
+      { id: 1, status: 'accepted', price: 10 },
+      null,
+      0,
+      '0/200',
+    );
+    terminalErrorListener?.(new Error('boom'));
+    expect(changeCount).toBe(1);
+    expect(errorCount).toBe(1);
+
+    offChange();
+    offError();
+
+    runtime.walEventEmitter.emit(
+      tableKey,
+      'insert',
+      { id: 2, status: 'accepted', price: 20 },
+      null,
+      0,
+      '0/300',
+    );
+    terminalErrorListener?.(new Error('boom again'));
+    expect(changeCount).toBe(1);
+    expect(errorCount).toBe(1);
+
+    collection.dispose();
+  });
+
+  test('re-baseline on reconnect refreshes state and fires onChange with the new watermark', async () => {
+    let reconnectListener: (() => void) | undefined;
+    const runtime = makeMockRuntime({
+      baselineRows: [{ id: 1, status: 'accepted', price: 10 }],
+      watermark: '0/100',
+    });
+    runtime.onReconnect = (listener: () => void) => {
+      reconnectListener = listener;
+      return () => {
+        reconnectListener = undefined;
+      };
+    };
+
+    const client = createPulseClient(runtime as any);
+    const collection = await (client as any).orders();
+    expect(collection.list()).toHaveLength(1);
+
+    const changes: any[] = [];
+    collection.onChange((c: any) => changes.push(c));
+
+    runtime.readCollectionBaseline = async () => ({
+      rows: [
+        { id: 1, status: 'accepted', price: 10 },
+        { id: 2, status: 'accepted', price: 20 },
+      ],
+      watermark: '0/200',
+    });
+
+    reconnectListener?.();
+    await flushMicrotasks();
+
+    expect(collection.list()).toHaveLength(2);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]!.events).toEqual([]);
+    expect(changes[0]!.lsn).toBe('0/200');
+
+    collection.dispose();
+  });
+
+  test('a rejecting re-baseline fires onError instead of throwing', async () => {
+    let reconnectListener: (() => void) | undefined;
+    const runtime = makeMockRuntime();
+    runtime.onReconnect = (listener: () => void) => {
+      reconnectListener = listener;
+      return () => {
+        reconnectListener = undefined;
+      };
+    };
+
+    const client = createPulseClient(runtime as any);
+    const collection = await (client as any).orders();
+
+    const errors: Error[] = [];
+    collection.onError((e: Error) => errors.push(e));
+
+    runtime.readCollectionBaseline = async () => {
+      throw new Error('reconnect baseline failed');
+    };
+
+    reconnectListener?.();
+    await flushMicrotasks();
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.message).toBe('reconnect baseline failed');
+
+    collection.dispose();
+  });
+
+  test('a terminal replication error fires onError', async () => {
+    let terminalErrorListener: ((error: Error) => void) | undefined;
+    const runtime = makeMockRuntime();
+    runtime.onTerminalError = (listener: (error: Error) => void) => {
+      terminalErrorListener = listener;
+      return () => {
+        terminalErrorListener = undefined;
+      };
+    };
+
+    const client = createPulseClient(runtime as any);
+    const collection = await (client as any).orders();
+
+    const errors: Error[] = [];
+    collection.onError((e: Error) => errors.push(e));
+
+    terminalErrorListener?.(new Error('replication gave up'));
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.message).toBe('replication gave up');
+
+    collection.dispose();
   });
 });

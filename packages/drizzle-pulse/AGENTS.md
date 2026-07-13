@@ -9,7 +9,7 @@ Type-safe Pulse SDK shared by server, client, React, and embedded layers.
 - server/router side: `createPulseRouter` — an optional Hono wrapper over the SDK on the `./server/router` subpath
 - client side: `createPulseClient`, `PulseQuery` (over a pluggable transport)
 - React side: `usePulseQuery`
-- embedded side: `createPulseClient` (in-process, runtime-backed), `PulseCollection` facade
+- embedded side: `createPulseClient` (in-process, tap-direct, runtime-backed), `PulseCollection` facade, `createPulseEvents` (stateless per-event subscription)
 
 ## Package Name
 
@@ -39,7 +39,9 @@ the platform-imports purity test).
 | `src/client/pulse-query.ts` | framework-agnostic subscribe/poll/load-more state machine (`PulseQuery`); `destroy()` stops polling — the client holds no server-side state to release |
 | `src/client/superjson.ts` | response deserialization helper |
 | `src/client/react/use-pulse-query.ts` | `usePulseQuery` wrapper around `PulseQuery` |
-| `src/client/embedded/index.ts` | in-process embedded client: `createPulseClient(runtime)` → `PulseCollection` facade (`list`/`getState`/`loadMore`/`onChange`/`dispose`) over a `PulseQuery` on a direct in-process transport; re-pulls on the runtime's WAL change signal (no polling interval) |
+| `src/client/embedded/index.ts` | in-process embedded client: `createPulseClient(runtime)` → `PulseCollection` facade (`list`/`onChange`/`onError`/`dispose`) fed tap-direct — a full-set `PulseMergeCore` rebuilt from `runtime.readCollectionBaseline` and kept live by `runtime.walEventEmitter`, reconciled through an LSN watermark handshake (no events table, no wire protocol); re-exports `createPulseEvents` |
+| `src/client/embedded/tap-events.ts` | `buildTapEvent(payload, resolved)`: the single WAL-tap-payload → `PulseEvent` builder shared by collections and `createPulseEvents` (extracts + WHERE-filters + projects a row; value-imports only `shared/`) |
+| `src/client/embedded/events.ts` | `createPulseEvents(runtime)` → stateless per-event subscription: WHERE-filtered WAL tap, `(event, lsn)` callback, no baseline, no merge core, no per-subscription error surface |
 | `src/server/pulse-builder.ts` | immutable query builder (`.columns/.args/.order/.limit/.transform/.query`), seeded by `PulseTable.query(fn?)` |
 | `src/server/pulse-registry.ts` | registry finalization + `$client` phantom contract; rejects a bare `PulseTable`; defensive composite-PK re-check |
 | `src/server/pulse-projection.ts` | projection/response-shaping helpers split out to preserve platform purity for the embedded client entrypoint |
@@ -95,15 +97,20 @@ Client:
 React:
   usePulseQuery(descriptor) → { data, isLoading, isLoadingMore, hasMore, error, loadMore, refetch }
 
-Embedded (in-process):
+Embedded (in-process, tap-direct):
   createPulseClient(runtime).queryName(args?, { auth? })
-    → PulseCollection facade over a PulseQuery on a direct transport
-    → list() / getState() / loadMore() / onChange() / dispose()
+    → watermark handshake: tap subscribe (buffering) → runtime.readCollectionBaseline
+      → rebuild PulseMergeCore → drain buffered payloads at-or-above the watermark → live
+    → PulseCollection: list() / onChange() / onError() / dispose()
+
+  createPulseEvents(runtime).queryName(args?, callback, { auth? })  // or (callback, options?)
+    → WHERE-filtered WAL tap, no baseline/state → returns an unsubscribe function
+    → callback(event: PulseEvent<TRow>, lsn: string) in WAL commit order
 ```
 
 ## Runtime Notes
 
-- `PulseQuery` is the canonical merge engine used by tests, `usePulseQuery`, and the embedded facade
+- `PulseQuery` is the canonical merge engine used by tests and `usePulseQuery` (HTTP-only); the embedded client owns a full-set `PulseMergeCore` directly and never constructs a `PulseQuery` — the HTTP client is the only `PulseQuery` consumer
 - The server is **stateless**: no `SubscriptionManager`, no `unsubscribe`, no TTL/idle sweep; auth is re-resolved per pull
 - Cursor tokens are opaque `"<epoch>:<snapshot>"`; a pull echoes its token, the handler compares its epoch to the current one. A recreate rotates the epoch → stale tokens reset (re-baseline). A pull exceeding `pullEventLimit` (default 1000) also resets.
 - Every migration that changes a pulsed table's shape recreates its events table and thus resets that table's subscribers (accepted design)
@@ -148,7 +155,9 @@ type UsePulseQueryResult
 // drizzle-pulse/client/embedded
 createPulseClient
 PulseCollection
+createPulseEvents
 type EmbeddedPulseClient, PulseCollectionOptions, PulseCollectionChange, PulseRow
+type EmbeddedPulseEvents, PulseEventsCallback, PulseEventsOptions
 ```
 
 `buildEventsTable` moved off the root (its only cross-package consumer, drizzle-kit, is gone) and
@@ -165,5 +174,6 @@ entrypoint.
 
 - ❌ Import server modules from client/runtime codepaths
 - ❌ Change merge/event semantics in `PulseQuery` without updating integration coverage
-- ❌ Forget that `usePulseQuery` and the embedded `PulseCollection` are thin wrappers over `PulseQuery`, not separate merge implementations
+- ❌ Forget that `usePulseQuery` is a thin wrapper over `PulseQuery`; the embedded `PulseCollection` is a separate tap-direct implementation over `PulseMergeCore` (not a `PulseQuery` wrapper) — do not reintroduce that coupling
+- ❌ Add a merge-core or collection import to `client/embedded/events.ts` — `createPulseEvents` must stay stateless (SPLIT-06)
 - ❌ Re-export `buildEventsTable` / the DDL renderer from the root or client entrypoints — they are server-only and pull in `drizzle-orm/pg-core`
