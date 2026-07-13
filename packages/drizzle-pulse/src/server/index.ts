@@ -23,7 +23,6 @@ export {
   DEFAULT_EVENTS_SCHEMA,
   getEventsTableName,
 } from './events-table-resolver.js';
-export type { WalListenerConfig } from './expose.js';
 export {
   type ExposeConfig,
   expose,

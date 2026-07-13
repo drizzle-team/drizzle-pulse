@@ -1,9 +1,14 @@
 import { createHash } from 'node:crypto';
 import { desc, getTableUniqueName, sql } from 'drizzle-orm';
 import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
-import { createPool, type Pool } from 'minipg';
-import type { ClientConfig, PoolConfig } from 'pg';
-import { LogicalReplicationService, type Pgoutput, PgoutputPlugin } from 'pg-logical-replication';
+import {
+  createPool,
+  lsnFromString,
+  type Pool,
+  replication,
+  type ReplicationConnection,
+  type ReplicationEvent,
+} from 'minipg';
 import type { ResolvedPulseQuery } from '../types.js';
 import { emitEventsTableDdl } from './events-table-ddl.js';
 import { buildEventsTable, DEFAULT_EVENTS_SCHEMA } from './events-table-resolver.js';
@@ -11,53 +16,15 @@ import type { AnyPulseBuilders, PulseRegistry } from './pulse-registry.js';
 import { buildSelectQuery, type PulseSourceDb } from './pulse-sql.js';
 import { PulseStore } from './pulse-store.js';
 import { DEFAULT_PULL_EVENT_LIMIT, PulseRequestHandler } from './sdk.js';
+import { createShapeRowNormalizer } from './wal-shape-bridge.js';
 import { WalEventEmitter } from './wal-event-emitter.js';
-import { createWalRowNormalizer } from './wal-normalization.js';
 
 type RuntimeLifecycleListener = () => void;
 
-// date/timestamp/timestamptz/interval/point: pg-types' defaults yield non-text JS values
-// that Drizzle's from-text codecs cannot consume.
-const RAW_TEXT_PG_OIDS = new Set([1082, 1114, 1184, 1186, 600]);
-
-const rawText = (value: string): string => value;
-
-// Keeps WAL values for the raw-text OIDs as text without mutating the process-global pg-types
-// registry pg-logical-replication decodes through. Couples to pg-logical-replication internals
-// (relation.columns[].parser); the runtime guard below fails loud if that shape changes.
-function scopeRawTextWalParsers(plugin: PgoutputPlugin): PgoutputPlugin {
-  const parse = plugin.parse.bind(plugin);
-  plugin.parse = (buffer: Buffer) => {
-    const message = parse(buffer);
-    if (message.tag === 'relation') {
-      if (!Array.isArray(message.columns)) {
-        throw new Error('pg-logical-replication relation message shape changed: no columns[]');
-      }
-      for (const column of message.columns) {
-        if (RAW_TEXT_PG_OIDS.has(column.typeOid)) {
-          column.parser = rawText;
-        }
-      }
-    }
-    return message;
-  };
-  return plugin;
-}
-
-export interface WalListenerConfig {
-  pgConfig: ClientConfig & { replication: 'database' };
-  publicationName: string;
-  slotName: string;
-  reconnect?: {
-    maxRetries?: number;
-    baseDelayMs?: number;
-    maxDelayMs?: number;
-  };
-}
-
-export type ExposeWalConfig = Partial<
-  Pick<WalListenerConfig, 'publicationName' | 'slotName' | 'reconnect'>
->;
+export type ExposeWalConfig = {
+  publicationName?: string;
+  slotName?: string;
+};
 
 // Ordered so each log method gates on `this.logLevel >= LogLevel.X`. Debug adds per-WAL-event
 // traces; Info (default) adds listener-lifecycle messages; Error keeps only failures.
@@ -93,35 +60,33 @@ type SourceTableMetadata = {
   normalizeRow: (row: Record<string, unknown>) => Record<string, unknown>;
 };
 
-type WalEvent = {
+// A decoded WAL row event, buffered between a transaction's `begin` and `commit` so the whole
+// transaction persists atomically and acks together. `row`/`oldRow` are already normalized via
+// the shape bridge — for delete, `row` is deliberately `{}` (the tap's dedupe-by-absence
+// contract); the persisted events-table row still carries the old row's data (PulseStore's
+// buildEventRow), so persistence and the tap emit stay correctly divergent for deletes.
+export type PendingWalEvent = {
+  eventsTable: PgTable;
+  pkColumnName: string;
+  pkValue: unknown;
+  op: 'insert' | 'update' | 'delete';
+  row: Record<string, unknown>;
+  oldRow: Record<string, unknown> | null;
   tableQualifiedName: string;
-  operation: 'insert' | 'update' | 'delete';
-  rowData: Record<string, unknown>;
-  oldRowData: Record<string, unknown> | null;
-  lsn: string;
 };
 
-const DEFAULT_RECONNECT = {
-  maxRetries: 10,
-  baseDelayMs: 1000,
-  maxDelayMs: 30000,
-};
+// D-04: no reconnect tuning knobs — fixed internal defaults, same values as the prior
+// config-driven defaults.
+const RECONNECT_MAX_RETRIES = 10;
+const RECONNECT_BASE_DELAY_MS = 1000;
+const RECONNECT_MAX_DELAY_MS = 30000;
 
 const DEFAULT_PUBLICATION_NAME = 'drizzle_pulse';
 const DEFAULT_SLOT_NAME = 'drizzle_pulse';
 
-function withQuietPgOptions<T extends ClientConfig | PoolConfig>(config: T): T {
-  return {
-    ...config,
-    options: [config.options, '-c client_min_messages=warning'].filter(Boolean).join(' '),
-  };
-}
-
 export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   private readonly sourceTableMetadata: Map<string, SourceTableMetadata>;
   private readonly requestHandler: PulseRequestHandler;
-  private readonly pgConfig: ClientConfig & { replication: 'database' };
-  private readonly reconnectConfig: Required<NonNullable<ExposeWalConfig['reconnect']>>;
   private readonly logLevel: LogLevel;
   readonly publicationName: string;
   readonly slotName: string;
@@ -132,14 +97,20 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
   private pool: Pool | null = null;
   private pulseStore: PulseStore | null = null;
-  private replicationService: LogicalReplicationService | null = null;
+  private replication: ReplicationConnection | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   isRunning = false;
   private reconnectAttempts = 0;
-  // Set on pgoutput's 'begin' message, cleared on 'commit' — every insert/update/delete between
-  // the two shares this transaction's commit LSN. Null when no begin was observed (e.g. the
-  // stream started mid-transaction), in which case handleMessage falls back to the per-message lsn.
+  // Set on the replication stream's 'begin' event (finalLsn), cleared once its 'commit' is
+  // handled — every insert/update/delete between the two shares this transaction's commit LSN.
+  // Row events carry no per-message LSN under minipg, so a null here (begin never observed) is
+  // a protocol anomaly, not a routine case.
   private currentCommitLsn: string | null = null;
+  // Buffered row events for the in-flight transaction; persisted atomically on commit.
+  private pending: PendingWalEvent[] = [];
+  // In-memory mirror of the durable pulse_stream watermark — dedupes at-least-once replay after
+  // a reconnect without a store round trip on every commit.
+  private lastPersistedCommitLsn: string | null = null;
   lastPersistedSnapshot = 0;
   readonly walEventEmitter = new WalEventEmitter();
   private everConnected = false;
@@ -214,17 +185,10 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         sourceTable,
         pkColumnName: pulseQuery.pkColumn.name,
         eventsTable,
-        normalizeRow: createWalRowNormalizer(sourceTable),
+        normalizeRow: createShapeRowNormalizer(sourceTable),
       });
     }
 
-    const pg = { connectionString: this.config.databaseUrl };
-
-    this.pgConfig = {
-      ...withQuietPgOptions(pg),
-      replication: 'database',
-    };
-    this.reconnectConfig = { ...DEFAULT_RECONNECT, ...wal.reconnect };
     this.logLevel = this.config.logLevel ?? LogLevel.Info;
 
     this.requestHandler = new PulseRequestHandler(
@@ -362,19 +326,11 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     this.isRunning = false;
     this.clearReconnectTimer();
 
-    const replicationService = this.replicationService;
-    this.replicationService = null;
-    if (replicationService) {
-      await replicationService.stop();
-    }
+    const rep = this.replication;
+    this.replication = null;
+    rep?.end();
 
-    const pool = this.pool;
-    this.pool = null;
-    this.pulseStore = null;
-
-    if (pool) {
-      await pool.end();
-    }
+    await this.closePool();
 
     this.logInfo('[WAL Listener] Stopped');
   }
@@ -403,12 +359,16 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
     const pool = createPool(this.config.databaseUrl);
     this.pool = pool;
-    this.pulseStore = new PulseStore(pool);
+    this.pulseStore = new PulseStore(pool, this.eventsSchema);
   }
 
-  // Mirrors stop()'s pool/service teardown so a failed guard doesn't leak connections —
-  // callers await start() rejections and then discard the runtime.
+  // Mirrors stop()'s pool teardown so a failed guard doesn't leak connections — callers await
+  // start() rejections and then discard the runtime.
   private async teardownFailedStart(): Promise<void> {
+    await this.closePool();
+  }
+
+  private async closePool(): Promise<void> {
     const pool = this.pool;
     this.pool = null;
     this.pulseStore = null;
@@ -432,6 +392,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     const eventsSchema = this.eventsSchema;
     const schema = sql.identifier(eventsSchema);
     const metaTable = sql`${schema}.${sql.identifier('pulse_meta')}`;
+    const streamTable = sql`${schema}.${sql.identifier('pulse_stream')}`;
 
     const epochs = await adminDb.transaction(async (tx) => {
       // Serializes concurrent boots targeting the same events schema (one lock per schema) so
@@ -551,6 +512,11 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       await tx.execute(
         sql`CREATE TABLE IF NOT EXISTS ${metaTable} (table_name text PRIMARY KEY, ddl_hash text NOT NULL, epoch uuid NOT NULL)`,
       );
+      // Durable commit-LSN dedupe watermark (research Open Question 1): survives a full process
+      // restart so resuming an intact slot doesn't re-persist minipg's at-least-once replay tail.
+      await tx.execute(
+        sql`CREATE TABLE IF NOT EXISTS ${streamTable} (slot_name text PRIMARY KEY, last_lsn text NOT NULL)`,
+      );
 
       const metaResult = await tx.execute<{
         table_name: string;
@@ -602,7 +568,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         await tx.execute(sql`DELETE FROM ${metaTable} WHERE table_name = ${row.table_name}`);
       }
       for (const relname of physical) {
-        if (relname === 'pulse_meta' || desired.has(relname) || metaByName.has(relname)) continue;
+        if (relname === 'pulse_meta' || relname === 'pulse_stream' || desired.has(relname) || metaByName.has(relname))
+          continue;
         this.logWarn(
           `[reconcile] table "${eventsSchema}.${relname}" shares the events schema but has no pulse_meta row; leaving it untouched`,
         );
@@ -626,59 +593,15 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     this.reconnectAttempts = 0;
   }
 
+  // Branches every (re)connect on slot state (LOCKED backfill/resume spec, STATE.md
+  // §Decisions): an intact slot resumes from confirmed_flush with commit-LSN-deduped replay; a
+  // missing slot is recreated (full recovery machine incl. re-baseline lands in plan 04 — this
+  // plan only wires the branch and the resulting `from`/watermark seed).
   private async connectReplication(): Promise<void> {
     try {
       const adminDb = this.getPulseStore().getDb();
-
-      const replicationService = new LogicalReplicationService(this.pgConfig, {
-        acknowledge: { auto: false, timeoutSeconds: 10 },
-        flowControl: { enabled: true },
-      });
-      this.replicationService = replicationService;
-
-      const plugin = scopeRawTextWalParsers(
-        new PgoutputPlugin({
-          protoVersion: 1,
-          publicationNames: [this.publicationName],
-        }),
-      );
-
-      replicationService.on('data', async (lsn: string, log: Pgoutput.Message) => {
-        try {
-          await this.handleMessage(lsn, log);
-          if (this.replicationService === replicationService) {
-            await replicationService.acknowledge(lsn);
-          }
-        } catch (error) {
-          this.logError('[WAL Listener] Error processing message:', error);
-        }
-      });
-
-      replicationService.on('error', async (error: Error) => {
-        if (this.replicationService !== replicationService) {
-          return;
-        }
-
-        this.logError('[WAL Listener] Replication error:', error);
-        await this.handleDisconnect(replicationService);
-      });
-
-      replicationService.on('start', () => {
-        this.onReplicationStart();
-      });
-
-      replicationService.on('acknowledge', (lsn: string) => {
-        this.logDebug(`[WAL Listener] Acknowledged LSN: ${lsn}`);
-      });
-
-      replicationService.on(
-        'heartbeat',
-        (lsn: string, timestamp: number, shouldRespond: boolean) => {
-          if (shouldRespond) {
-            this.logDebug(`[WAL Listener] Heartbeat at LSN: ${lsn}, timestamp: ${timestamp}`);
-          }
-        },
-      );
+      const rep = await replication(this.config.databaseUrl);
+      this.replication = rep;
 
       const slotName = this.slotName;
       const result = await adminDb.execute<{
@@ -689,12 +612,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         sql`SELECT slot_name, active, active_pid FROM pg_replication_slots WHERE slot_name = ${slotName}`,
       );
 
-      if (result.rows.length === 0) {
-        this.logInfo(`[WAL Listener] Creating replication slot '${slotName}'`);
-        await adminDb.execute(
-          sql`SELECT pg_create_logical_replication_slot(${slotName}, ${'pgoutput'})`,
-        );
-      } else {
+      let from: string | undefined;
+      if (result.rows.length > 0) {
         const slot = result.rows[0];
         if (slot?.active && slot.active_pid) {
           this.logInfo(
@@ -705,32 +624,191 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         }
 
         this.logInfo(`[WAL Listener] Replication slot '${slotName}' ready`);
+        from = undefined; // server resumes from the slot's confirmed_flush position
+        this.lastPersistedCommitLsn = await this.getPulseStore().getStreamWatermark(slotName);
+      } else {
+        this.logInfo(`[WAL Listener] Creating replication slot '${slotName}'`);
+        const { consistentPoint } = await rep.createSlot(slotName, {
+          temporary: false,
+          snapshot: 'export',
+        });
+        from = consistentPoint;
+        this.lastPersistedCommitLsn = null;
       }
 
-      this.logInfo(`[WAL Listener] Subscribing to slot '${this.slotName}'`);
-      const streaming = replicationService.subscribe(plugin, this.slotName);
-      await Promise.race([
-        new Promise((resolve) => replicationService.once('start', resolve)),
-        streaming, // settles first only on immediate failure → propagates the error
-      ]);
-      void streaming.catch(() => {}); // stream-end errors already handled via the 'error' listener
+      this.logInfo(`[WAL Listener] Subscribing to slot '${slotName}'`);
+      const iterator = rep.start({
+        slot: slotName,
+        publications: [this.publicationName],
+        from,
+        statusIntervalMs: 1000,
+        idleAck: true,
+        messages: false,
+      });
+
+      this.onReplicationStart();
+      void this.runReplicationLoop(rep, iterator);
     } catch (error) {
       this.logError('[WAL Listener] Connection error:', error);
-      await this.handleDisconnect(this.replicationService);
+      await this.handleDisconnect(this.replication);
     }
   }
 
-  private async handleDisconnect(
-    replicationService: LogicalReplicationService | null,
+  // The tight for-await loop: minipg's internal read loop only advances while a next() pull is
+  // pending, so this never parks between pulls — persisting inside the commit branch is fine
+  // (it's still driven by the same next() call), background work between pulls is not.
+  private async runReplicationLoop(
+    rep: ReplicationConnection,
+    iterator: AsyncGenerator<ReplicationEvent>,
   ): Promise<void> {
-    if (replicationService && this.replicationService === replicationService) {
-      this.replicationService = null;
-      try {
-        await replicationService.stop();
-      } catch (error) {
-        this.logError('[WAL Listener] Error during stop:', error);
+    try {
+      for await (const ev of iterator) {
+        if (ev.kind === 'begin') {
+          this.currentCommitLsn = ev.finalLsn;
+          this.pending = [];
+          continue;
+        }
+        if (ev.kind === 'insert' || ev.kind === 'update' || ev.kind === 'delete') {
+          this.bufferWalEvent(ev);
+          continue;
+        }
+        if (ev.kind === 'commit') {
+          await this.handleCommit(rep, ev);
+          continue;
+        }
+        // relation/truncate/message: ignored
       }
+    } catch (error) {
+      if (this.replication !== rep) return; // superseded by a newer connection — expected
+      this.logError('[WAL Listener] Replication error:', error);
+      await this.handleDisconnect(rep);
+      return;
     }
+
+    if (this.replication !== rep) return; // superseded; the old connection's stream ended cleanly
+  }
+
+  private bufferWalEvent(
+    ev: Extract<ReplicationEvent, { kind: 'insert' | 'update' | 'delete' }>,
+  ): void {
+    const tableQualifiedName = `${ev.schema}.${ev.table}`;
+
+    if (this.currentCommitLsn === null) {
+      // pgoutput streams transactions whole (begin always precedes its row events), so this is
+      // a protocol anomaly, not routine — there is no per-message LSN to fall back to under
+      // minipg. Skip the event entirely; a later re-baseline recovers it.
+      this.logError(
+        `[WAL Listener] Protocol anomaly: no tracked begin.finalLsn for ${tableQualifiedName}; skipping event`,
+      );
+      return;
+    }
+
+    const metadata = this.sourceTableMetadata.get(tableQualifiedName);
+    if (!metadata) {
+      return;
+    }
+
+    let row: Record<string, unknown>;
+    let oldRow: Record<string, unknown> | null;
+
+    if (ev.kind === 'insert') {
+      row = metadata.normalizeRow(ev.new);
+      oldRow = null;
+    } else if (ev.kind === 'update') {
+      const normalizedOld = ev.old ? metadata.normalizeRow(ev.old) : null;
+      // pgoutput omits an UPDATE's unchanged TOASTed columns from the new tuple; the old-under-
+      // new spread carries them forward under REPLICA IDENTITY FULL (DRIVER-04). `ev.unchanged`
+      // names exactly those columns but is not needed as the mechanism.
+      row = normalizedOld
+        ? { ...normalizedOld, ...metadata.normalizeRow(ev.new) }
+        : metadata.normalizeRow(ev.new);
+      oldRow = normalizedOld;
+    } else {
+      // Deliberately empty: the tap's dedupe-by-absence contract for deletes. The persisted
+      // events-table row still carries the old row's data via PulseStore's buildEventRow.
+      row = {};
+      oldRow = ev.old ? metadata.normalizeRow(ev.old) : null;
+    }
+
+    const pkSource = ev.kind === 'delete' ? oldRow : row;
+    const pkValue = pkSource?.[metadata.pkColumnName];
+    if (pkValue === undefined || pkValue === null) {
+      this.logDebug(
+        `[WAL Listener] Skipping ${ev.kind} on ${tableQualifiedName}: missing pk (${String(pkValue)})`,
+      );
+      return;
+    }
+
+    if ((ev.kind === 'update' || ev.kind === 'delete') && !oldRow) {
+      this.logDebug(
+        `[WAL Listener] Skipping ${ev.kind} on ${tableQualifiedName}: missing old row data for pk=${pkValue}`,
+      );
+      return;
+    }
+
+    this.pending.push({
+      eventsTable: metadata.eventsTable,
+      pkColumnName: metadata.pkColumnName,
+      pkValue,
+      op: ev.kind,
+      row,
+      oldRow,
+      tableQualifiedName,
+    });
+  }
+
+  private async handleCommit(
+    rep: ReplicationConnection,
+    ev: Extract<ReplicationEvent, { kind: 'commit' }>,
+  ): Promise<void> {
+    const commitLsn = this.currentCommitLsn;
+    const pending = this.pending;
+    this.currentCommitLsn = null;
+    this.pending = [];
+
+    if (commitLsn === null) {
+      // No begin was observed for this transaction (see bufferWalEvent) — nothing was buffered
+      // to persist.
+      rep.ack(ev.endLsn);
+      return;
+    }
+
+    if (
+      this.lastPersistedCommitLsn !== null &&
+      lsnFromString(commitLsn) <= lsnFromString(this.lastPersistedCommitLsn)
+    ) {
+      // Replayed transaction (at-least-once reconnect) — already durably persisted; skip persist
+      // AND the tap emits.
+      rep.ack(ev.endLsn);
+      return;
+    }
+
+    const snapshots = await this.getPulseStore().persistCommit(pending, this.slotName, commitLsn);
+    if (snapshots.length > 0) {
+      this.lastPersistedSnapshot = Math.max(this.lastPersistedSnapshot, ...snapshots);
+    }
+    this.lastPersistedCommitLsn = commitLsn;
+
+    pending.forEach((event, index) => {
+      this.walEventEmitter.emit(
+        event.tableQualifiedName,
+        event.op,
+        event.row,
+        event.oldRow,
+        snapshots[index] ?? 0,
+        commitLsn,
+      );
+    });
+
+    // endLsn, never lsn — idleAck's gate tracks endLsn, and only after persist resolves.
+    rep.ack(ev.endLsn);
+  }
+
+  private async handleDisconnect(rep: ReplicationConnection | null): Promise<void> {
+    if (rep && this.replication === rep) {
+      this.replication = null;
+    }
+    rep?.end();
 
     if (!this.isRunning) {
       return;
@@ -738,10 +816,10 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
     this.clearReconnectTimer();
 
-    if (this.reconnectAttempts >= this.reconnectConfig.maxRetries) {
+    if (this.reconnectAttempts >= RECONNECT_MAX_RETRIES) {
       this.logError('[WAL Listener] Max reconnection attempts reached. Giving up.');
       const terminalError = new Error(
-        `WAL replication failed permanently after ${this.reconnectConfig.maxRetries} reconnect attempts`,
+        `WAL replication failed permanently after ${RECONNECT_MAX_RETRIES} reconnect attempts`,
       );
       for (const listener of [...this.terminalErrorListeners]) {
         try {
@@ -754,13 +832,13 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       return;
     }
 
-    const exponentialDelay = this.reconnectConfig.baseDelayMs * 2 ** this.reconnectAttempts;
+    const exponentialDelay = RECONNECT_BASE_DELAY_MS * 2 ** this.reconnectAttempts;
     const jitter = Math.random() * 1000;
-    const delay = Math.min(exponentialDelay + jitter, this.reconnectConfig.maxDelayMs);
+    const delay = Math.min(exponentialDelay + jitter, RECONNECT_MAX_DELAY_MS);
 
     this.reconnectAttempts += 1;
     this.logInfo(
-      `[WAL Listener] Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts}/${this.reconnectConfig.maxRetries})`,
+      `[WAL Listener] Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts}/${RECONNECT_MAX_RETRIES})`,
     );
 
     this.reconnectTimer = setTimeout(() => {
@@ -778,186 +856,6 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
-  }
-
-  private async handleMessage(lsn: string, log: Pgoutput.Message): Promise<void> {
-    if (log.tag === 'begin') {
-      this.currentCommitLsn = log.commitLsn;
-      return;
-    }
-    if (log.tag === 'commit') {
-      this.currentCommitLsn = null;
-      return;
-    }
-    if (log.tag !== 'insert' && log.tag !== 'update' && log.tag !== 'delete') {
-      return;
-    }
-
-    const event = this.parseWalEvent(lsn, log);
-    if (!event) {
-      return;
-    }
-
-    const metadata = this.sourceTableMetadata.get(event.tableQualifiedName);
-    if (!metadata) {
-      return;
-    }
-
-    let commitLsn = this.currentCommitLsn;
-    // A change message's own lsn is always below its transaction's commit lsn, so this fallback
-    // stamps an undervalued watermark: a tap payload could then carry an lsn below the embedded
-    // client's watermark for a row not actually in its baseline, and get silently dropped
-    // (unrecoverable) instead of buffered. pgoutput streams transactions whole (`begin` first),
-    // so this should be unreachable — treat it as a protocol anomaly, not routine, and skip the
-    // tap emit (the events-table row is still persisted; a later re-baseline picks it up).
-    let commitLsnIsFallback = false;
-    if (!commitLsn) {
-      commitLsnIsFallback = true;
-      this.logError(
-        `[WAL Listener] Protocol anomaly: no tracked begin.commitLsn for ${event.tableQualifiedName}; falling back to per-message lsn and skipping the tap emit`,
-      );
-      commitLsn = lsn;
-    }
-
-    this.logDebug(
-      `[WAL Listener] ${event.operation.toUpperCase()} on ${event.tableQualifiedName}:`,
-      {
-        lsn: event.lsn,
-        row_data: event.rowData,
-        old_row_data: event.oldRowData,
-      },
-    );
-
-    await this.persistWalEvent(event, metadata, commitLsn, commitLsnIsFallback);
-  }
-
-  private parseWalEvent(
-    lsn: string,
-    log: Pgoutput.MessageInsert | Pgoutput.MessageUpdate | Pgoutput.MessageDelete,
-  ): WalEvent | null {
-    const tableQualifiedName = `${log.relation.schema}.${log.relation.name}`;
-
-    switch (log.tag) {
-      case 'insert':
-        return {
-          tableQualifiedName,
-          operation: 'insert',
-          rowData: log.new as Record<string, unknown>,
-          oldRowData: null,
-          lsn,
-        };
-      case 'update':
-        return {
-          tableQualifiedName,
-          operation: 'update',
-          rowData: log.new as Record<string, unknown>,
-          oldRowData: (log.old as Record<string, unknown>) ?? null,
-          lsn,
-        };
-      case 'delete':
-        return {
-          tableQualifiedName,
-          operation: 'delete',
-          rowData: {},
-          oldRowData: (log.old as Record<string, unknown>) ?? null,
-          lsn,
-        };
-      default:
-        return null;
-    }
-  }
-
-  private async persistWalEvent(
-    event: WalEvent,
-    metadata: SourceTableMetadata,
-    commitLsn: string,
-    commitLsnIsFallback = false,
-  ): Promise<void> {
-    const currentPulseStore = this.getPulseStore();
-    const pkSource = event.operation === 'delete' ? event.oldRowData : event.rowData;
-    const pkValue = pkSource?.[metadata.pkColumnName];
-
-    if (pkValue === undefined || pkValue === null) {
-      this.logDebug(
-        `[WAL Listener] Skipping ${event.operation} on ${event.tableQualifiedName}: missing pk (${String(pkValue)})`,
-      );
-      return;
-    }
-
-    // Normalize the raw WAL row to JS types once with Drizzle's codecs, then feed that
-    // single representation to BOTH the events-table insert (normal Drizzle mapping, no
-    // raw ::type cast) and the tap.
-    const normalizedOldRowData = event.oldRowData ? metadata.normalizeRow(event.oldRowData) : null;
-    // pgoutput omits an UPDATE's unchanged TOASTed columns from the new tuple entirely; without
-    // REPLICA IDENTITY FULL backfilling those keys from the old tuple, the column would go
-    // missing from normalizedRowData and PulseMergeCore.applyEvents (which replaces the stored
-    // row wholesale) would drop a previously-known large value from collection state. Insert has
-    // no old row (spreading null is a no-op) and delete's rowData is deliberately empty for the
-    // tap's dedup-by-absence contract (see tap-events.ts), so this only applies to updates.
-    const normalizedRowData =
-      event.operation === 'update' && normalizedOldRowData
-        ? { ...normalizedOldRowData, ...metadata.normalizeRow(event.rowData) }
-        : metadata.normalizeRow(event.rowData);
-
-    let snapshot: number;
-    if (event.operation === 'insert') {
-      snapshot = await currentPulseStore.persistInsertEvent(
-        metadata.eventsTable,
-        metadata.pkColumnName,
-        pkValue,
-        normalizedRowData,
-      );
-    } else if (event.operation === 'update') {
-      if (!normalizedOldRowData) {
-        this.logDebug(
-          `[WAL Listener] Skipping update on ${event.tableQualifiedName}: missing old row data for pk=${pkValue}`,
-        );
-        return;
-      }
-
-      snapshot = await currentPulseStore.persistUpdateEvent(
-        metadata.eventsTable,
-        metadata.pkColumnName,
-        pkValue,
-        normalizedRowData,
-        normalizedOldRowData,
-      );
-    } else {
-      // pkValue for a delete is extracted from event.oldRowData above, so a non-null
-      // pk guarantees normalizedOldRowData is present; the guard is defensive only.
-      if (!normalizedOldRowData) {
-        this.logDebug(
-          `[WAL Listener] Skipping delete on ${event.tableQualifiedName}: missing old row data for pk=${pkValue}`,
-        );
-        return;
-      }
-
-      snapshot = await currentPulseStore.persistDeleteEvent(
-        metadata.eventsTable,
-        metadata.pkColumnName,
-        pkValue,
-        normalizedOldRowData,
-      );
-    }
-
-    this.lastPersistedSnapshot = Math.max(this.lastPersistedSnapshot, snapshot);
-    // An undervalued (fallback) commitLsn would let the embedded client's watermark filter
-    // silently drop this event instead of buffering it — the persisted events-table row is
-    // the recoverable path (a re-baseline picks it up); skip only the live tap emit.
-    if (!commitLsnIsFallback) {
-      this.walEventEmitter.emit(
-        event.tableQualifiedName,
-        event.operation,
-        normalizedRowData,
-        normalizedOldRowData,
-        snapshot,
-        commitLsn,
-      );
-    }
-
-    this.logDebug(
-      `[WAL Listener] Persisted ${event.operation} event on ${event.tableQualifiedName} (pk=${pkValue})`,
-    );
   }
 
   private getPulseStore(): PulseStore {
