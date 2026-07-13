@@ -180,9 +180,9 @@ describe('Embedded Collection', () => {
     // lsn is non-decreasing across sequential commits (compareLsn semantics, checked locally
     // rather than importing the library's own comparator).
     for (let i = 1; i < changes.length; i += 1) {
-      expect(parseLsnForAssertions(changes[i]!.lsn) >= parseLsnForAssertions(changes[i - 1]!.lsn)).toBe(
-        true,
-      );
+      expect(
+        parseLsnForAssertions(changes[i]!.lsn) >= parseLsnForAssertions(changes[i - 1]!.lsn),
+      ).toBe(true);
     }
 
     collection.dispose();
