@@ -7,7 +7,7 @@ import type {
   PullSubscriptionRequest,
 } from '../shared/protocol-types.js';
 import type { PulseEvent } from '../shared/pulse-events.js';
-import { PulseMergeCore } from '../shared/pulse-merge-core.js';
+import { RangedPulseMergeCore } from '../shared/ranged-merge-core.js';
 import type { QueryDescriptor } from '../types.js';
 import type { PullClient } from './create-client.js';
 import type { PulseQueryTransport } from './transport.js';
@@ -54,7 +54,7 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
     error: null,
   };
 
-  private readonly core: PulseMergeCore<TResult>;
+  private readonly core: RangedPulseMergeCore<TResult>;
   // Cursor token from the server; also the "subscribed" signal — empty until subscribe()
   // resolves, reset to empty on reset(). Echoed back verbatim on each pull.
   private snapshot = '';
@@ -74,7 +74,12 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
     this.transport = descriptor.transport;
     this.pullClient = descriptor.pullClient;
     this.queryKey = `${descriptor.queryName}:${JSON.stringify(descriptor.args)}:${Math.random().toString(36).slice(2, 10)}`;
-    this.core = new PulseMergeCore({ order: 'asc', limit: null, rangeStart: null, rangeEnd: null });
+    this.core = new RangedPulseMergeCore({
+      order: 'asc',
+      limit: null,
+      rangeStart: null,
+      rangeEnd: null,
+    });
   }
 
   getState() {

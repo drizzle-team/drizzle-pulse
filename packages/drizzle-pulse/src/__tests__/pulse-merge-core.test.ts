@@ -1,20 +1,16 @@
 import { describe, expect, test } from 'bun:test';
 import { PulseMergeCore } from '../shared/pulse-merge-core.js';
+import { RangedPulseMergeCore } from '../shared/ranged-merge-core.js';
 
 type TestRow = {
   $pk: number;
   label: string;
 };
 
-describe('PulseMergeCore', () => {
-  describe('no-range mode (limit: null)', () => {
+describe('PulseMergeCore (full-set base)', () => {
+  describe('full-set inserts', () => {
     test('accepts every insert with a comparable pk', () => {
-      const core = new PulseMergeCore<TestRow>({
-        order: 'asc',
-        limit: null,
-        rangeStart: null,
-        rangeEnd: null,
-      });
+      const core = new PulseMergeCore<TestRow>({ order: 'asc' });
 
       const changed = core.applyEvents([
         { op: 'insert', row: { $pk: 999, label: 'big' }, pk: 999 },
@@ -24,15 +20,9 @@ describe('PulseMergeCore', () => {
       expect(core.data[0]?.$pk).toBe(999);
     });
 
-    test('accepts arbitrary pk magnitudes regardless of window', () => {
-      const core = new PulseMergeCore<TestRow>({
-        order: 'asc',
-        limit: null,
-        rangeStart: null,
-        rangeEnd: null,
-      });
+    test('accepts arbitrary pk magnitudes — no window gate', () => {
+      const core = new PulseMergeCore<TestRow>({ order: 'asc' });
 
-      // No range is set, so any pk should be accepted
       core.applyEvents([
         { op: 'insert', row: { $pk: 100, label: 'hundred' }, pk: 100 },
         { op: 'insert', row: { $pk: 1, label: 'one' }, pk: 1 },
@@ -43,12 +33,7 @@ describe('PulseMergeCore', () => {
     });
 
     test('maintains asc order for inserts', () => {
-      const core = new PulseMergeCore<TestRow>({
-        order: 'asc',
-        limit: null,
-        rangeStart: null,
-        rangeEnd: null,
-      });
+      const core = new PulseMergeCore<TestRow>({ order: 'asc' });
 
       core.applyEvents([
         { op: 'insert', row: { $pk: 3, label: 'c' }, pk: 3 },
@@ -60,12 +45,7 @@ describe('PulseMergeCore', () => {
     });
 
     test('maintains desc order for inserts', () => {
-      const core = new PulseMergeCore<TestRow>({
-        order: 'desc',
-        limit: null,
-        rangeStart: null,
-        rangeEnd: null,
-      });
+      const core = new PulseMergeCore<TestRow>({ order: 'desc' });
 
       core.applyEvents([
         { op: 'insert', row: { $pk: 1, label: 'a' }, pk: 1 },
@@ -75,62 +55,33 @@ describe('PulseMergeCore', () => {
 
       expect(core.data.map((r) => r.$pk)).toEqual([3, 2, 1]);
     });
+
+    test('a full-set core accepts every matching insert regardless of prior state (no window gate reachable)', () => {
+      const core = new PulseMergeCore<TestRow>({ order: 'asc' });
+      core.rebuildFromRows(Array.from({ length: 50 }, (_, i) => ({ $pk: i, label: `${i}` })));
+
+      const changed = core.applyEvents([
+        { op: 'insert', row: { $pk: -1, label: 'below-everything' }, pk: -1 },
+        { op: 'insert', row: { $pk: 1000, label: 'above-everything' }, pk: 1000 },
+      ]);
+
+      expect(changed).toBe(true);
+      expect(core.data).toHaveLength(52);
+      expect(core.data[0]?.$pk).toBe(-1);
+      expect(core.data.at(-1)?.$pk).toBe(1000);
+    });
   });
 
   describe('no-op-batch guard', () => {
     test('empty batch returns false', () => {
-      const core = new PulseMergeCore<TestRow>({
-        order: 'asc',
-        limit: null,
-        rangeStart: null,
-        rangeEnd: null,
-      });
+      const core = new PulseMergeCore<TestRow>({ order: 'asc' });
 
       const changed = core.applyEvents([]);
       expect(changed).toBe(false);
     });
 
-    test('insert rejected by range window returns false', () => {
-      // asc, rangeStart=100 means prepend inserts must have pk < 100
-      // pk=200 fails that check → batch is a no-op
-      const core = new PulseMergeCore<TestRow>({
-        order: 'asc',
-        limit: 10,
-        rangeStart: 100,
-        rangeEnd: 110,
-      });
-
-      const changed = core.applyEvents([
-        { op: 'insert', row: { $pk: 200, label: 'outside' }, pk: 200 },
-      ]);
-      expect(changed).toBe(false);
-      expect(core.data).toHaveLength(0);
-    });
-
-    test('all-rejected batch leaves data unchanged', () => {
-      const core = new PulseMergeCore<TestRow>({
-        order: 'asc',
-        limit: 10,
-        rangeStart: 100,
-        rangeEnd: 110,
-      });
-      core.rebuildFromRows([{ $pk: 105, label: 'x' }]);
-
-      const before = core.data;
-      const changed = core.applyEvents([
-        { op: 'insert', row: { $pk: 200, label: 'outside' }, pk: 200 },
-      ]);
-      expect(changed).toBe(false);
-      expect(core.data).toBe(before);
-    });
-
     test('duplicate-insert batch (pk already in pkMap) returns false', () => {
-      const core = new PulseMergeCore<TestRow>({
-        order: 'asc',
-        limit: null,
-        rangeStart: null,
-        rangeEnd: null,
-      });
+      const core = new PulseMergeCore<TestRow>({ order: 'asc' });
       core.rebuildFromRows([{ $pk: 1, label: 'a' }]);
 
       const changed = core.applyEvents([{ op: 'insert', row: { $pk: 1, label: 'a-dup' }, pk: 1 }]);
@@ -139,12 +90,7 @@ describe('PulseMergeCore', () => {
     });
 
     test('returns true when at least one event mutates state', () => {
-      const core = new PulseMergeCore<TestRow>({
-        order: 'asc',
-        limit: null,
-        rangeStart: null,
-        rangeEnd: null,
-      });
+      const core = new PulseMergeCore<TestRow>({ order: 'asc' });
 
       const changed = core.applyEvents([{ op: 'insert', row: { $pk: 1, label: 'a' }, pk: 1 }]);
       expect(changed).toBe(true);
@@ -153,12 +99,7 @@ describe('PulseMergeCore', () => {
 
   describe('merge operations', () => {
     test('insert then update(matchesNew) replaces the row', () => {
-      const core = new PulseMergeCore<TestRow>({
-        order: 'asc',
-        limit: null,
-        rangeStart: null,
-        rangeEnd: null,
-      });
+      const core = new PulseMergeCore<TestRow>({ order: 'asc' });
       core.applyEvents([{ op: 'insert', row: { $pk: 1, label: 'a' }, pk: 1 }]);
 
       const changed = core.applyEvents([
@@ -176,12 +117,7 @@ describe('PulseMergeCore', () => {
     });
 
     test('update(matchesOld only) removes the row', () => {
-      const core = new PulseMergeCore<TestRow>({
-        order: 'asc',
-        limit: null,
-        rangeStart: null,
-        rangeEnd: null,
-      });
+      const core = new PulseMergeCore<TestRow>({ order: 'asc' });
       core.rebuildFromRows([{ $pk: 1, label: 'a' }]);
 
       const changed = core.applyEvents([
@@ -199,12 +135,7 @@ describe('PulseMergeCore', () => {
     });
 
     test('delete(matchesOld) removes the row', () => {
-      const core = new PulseMergeCore<TestRow>({
-        order: 'asc',
-        limit: null,
-        rangeStart: null,
-        rangeEnd: null,
-      });
+      const core = new PulseMergeCore<TestRow>({ order: 'asc' });
       core.rebuildFromRows([{ $pk: 1, label: 'a' }]);
 
       const changed = core.applyEvents([
@@ -216,12 +147,7 @@ describe('PulseMergeCore', () => {
     });
 
     test('update with matchesNew for absent pk inserts it sorted', () => {
-      const core = new PulseMergeCore<TestRow>({
-        order: 'asc',
-        limit: null,
-        rangeStart: null,
-        rangeEnd: null,
-      });
+      const core = new PulseMergeCore<TestRow>({ order: 'asc' });
       core.rebuildFromRows([
         { $pk: 1, label: 'a' },
         { $pk: 3, label: 'c' },
@@ -241,12 +167,7 @@ describe('PulseMergeCore', () => {
     });
 
     test('delete for pk not in pkMap is a no-op', () => {
-      const core = new PulseMergeCore<TestRow>({
-        order: 'asc',
-        limit: null,
-        rangeStart: null,
-        rangeEnd: null,
-      });
+      const core = new PulseMergeCore<TestRow>({ order: 'asc' });
       core.rebuildFromRows([{ $pk: 1, label: 'a' }]);
 
       const changed = core.applyEvents([
@@ -257,9 +178,61 @@ describe('PulseMergeCore', () => {
     });
   });
 
+  describe('clear', () => {
+    test('resets pkMap and data', () => {
+      const core = new PulseMergeCore<TestRow>({ order: 'asc' });
+      core.rebuildFromRows([{ $pk: 1, label: 'a' }]);
+      core.clear();
+
+      expect(core.data).toHaveLength(0);
+      // pkMap must also be cleared — re-adding the same pk succeeds instead of being deduped
+      const changed = core.applyEvents([{ op: 'insert', row: { $pk: 1, label: 'a2' }, pk: 1 }]);
+      expect(changed).toBe(true);
+      expect(core.data).toEqual([{ $pk: 1, label: 'a2' }]);
+    });
+  });
+});
+
+describe('RangedPulseMergeCore', () => {
+  describe('range window insert gate', () => {
+    test('insert rejected by range window returns false', () => {
+      // asc, rangeStart=100 means prepend inserts must have pk < 100
+      // pk=200 fails that check → batch is a no-op
+      const core = new RangedPulseMergeCore<TestRow>({
+        order: 'asc',
+        limit: 10,
+        rangeStart: 100,
+        rangeEnd: 110,
+      });
+
+      const changed = core.applyEvents([
+        { op: 'insert', row: { $pk: 200, label: 'outside' }, pk: 200 },
+      ]);
+      expect(changed).toBe(false);
+      expect(core.data).toHaveLength(0);
+    });
+
+    test('all-rejected batch leaves data unchanged', () => {
+      const core = new RangedPulseMergeCore<TestRow>({
+        order: 'asc',
+        limit: 10,
+        rangeStart: 100,
+        rangeEnd: 110,
+      });
+      core.rebuildFromRows([{ $pk: 105, label: 'x' }]);
+
+      const before = core.data;
+      const changed = core.applyEvents([
+        { op: 'insert', row: { $pk: 200, label: 'outside' }, pk: 200 },
+      ]);
+      expect(changed).toBe(false);
+      expect(core.data).toBe(before);
+    });
+  });
+
   describe('appendRows', () => {
     test('appends new rows and dedupes existing pks', () => {
-      const core = new PulseMergeCore<TestRow>({
+      const core = new RangedPulseMergeCore<TestRow>({
         order: 'asc',
         limit: null,
         rangeStart: null,
@@ -279,7 +252,7 @@ describe('PulseMergeCore', () => {
     });
 
     test('returns false when all rows are duplicates', () => {
-      const core = new PulseMergeCore<TestRow>({
+      const core = new RangedPulseMergeCore<TestRow>({
         order: 'asc',
         limit: null,
         rangeStart: null,
@@ -293,8 +266,8 @@ describe('PulseMergeCore', () => {
   });
 
   describe('clear', () => {
-    test('resets all state', () => {
-      const core = new PulseMergeCore<TestRow>({
+    test('resets all state including the range window', () => {
+      const core = new RangedPulseMergeCore<TestRow>({
         order: 'asc',
         limit: 10,
         rangeStart: 1,
@@ -304,6 +277,8 @@ describe('PulseMergeCore', () => {
       core.clear();
 
       expect(core.data).toHaveLength(0);
+      expect(core.rangeStart).toBeNull();
+      expect(core.rangeEnd).toBeNull();
       // pkMap must also be cleared — re-adding the same pk succeeds instead of being deduped
       const appended = core.appendRows([{ $pk: 1, label: 'a2' }]);
       expect(appended).toBe(true);

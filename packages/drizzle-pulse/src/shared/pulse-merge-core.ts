@@ -1,28 +1,22 @@
 import { comparePkValues, isPkComparable } from './pk-utils.js';
 import type { PulseEvent } from './pulse-events.js';
 
-type PulsePk = string | number;
+export type PulsePk = string | number;
 
 export interface MergeCoreOptions {
   order: 'asc' | 'desc';
-  limit: number | null;
-  rangeStart: PulsePk | null;
-  rangeEnd: PulsePk | null;
 }
 
+// Full-set merge core: every matching insert is accepted unconditionally (no window/pagination
+// gate). This is the variant the embedded client value-imports — the ranged/HTTP-only surface
+// (appendRows, the range window gate) lives in RangedPulseMergeCore instead.
 export class PulseMergeCore<TRow extends Record<string, unknown> & { $pk: unknown }> {
-  private _pkMap = new Map<PulsePk, TRow>();
+  protected _pkMap = new Map<PulsePk, TRow>();
   data: TRow[] = [];
   order: 'asc' | 'desc';
-  limit: number | null;
-  rangeStart: PulsePk | null;
-  rangeEnd: PulsePk | null;
 
   constructor(opts: MergeCoreOptions) {
     this.order = opts.order;
-    this.limit = opts.limit;
-    this.rangeStart = opts.rangeStart;
-    this.rangeEnd = opts.rangeEnd;
   }
 
   rebuildFromRows(rows: TRow[]): void {
@@ -33,22 +27,6 @@ export class PulseMergeCore<TRow extends Record<string, unknown> & { $pk: unknow
     }
     this._pkMap = nextPkMap;
     this.data = rows;
-  }
-
-  // Appends load-more rows to the end without re-sorting. Returns true if any row was added.
-  appendRows(rows: readonly TRow[]): boolean {
-    const toAppend: TRow[] = [];
-    for (const row of rows) {
-      if (!isPkComparable(row.$pk)) continue;
-      if (this._pkMap.has(row.$pk)) continue;
-      toAppend.push(row);
-    }
-    if (toAppend.length === 0) return false;
-    for (const row of toAppend) {
-      this._pkMap.set(row.$pk as PulsePk, row);
-    }
-    this.data = [...this.data, ...toAppend];
-    return true;
   }
 
   // Returns true only if at least one event mutated state (no-op-batch guard).
@@ -62,7 +40,7 @@ export class PulseMergeCore<TRow extends Record<string, unknown> & { $pk: unknow
         const row = event.row;
         if (!isPkComparable(row.$pk)) continue;
         if (this._pkMap.has(row.$pk)) continue;
-        if (!this.shouldApplyPrependInsert(row.$pk)) continue;
+        if (!this.acceptInsert(row.$pk)) continue;
         this._pkMap.set(row.$pk, row);
         updated = this.insertSorted(updated, row);
         mutated = true;
@@ -116,8 +94,6 @@ export class PulseMergeCore<TRow extends Record<string, unknown> & { $pk: unknow
   clear(): void {
     this._pkMap = new Map();
     this.data = [];
-    this.rangeStart = null;
-    this.rangeEnd = null;
   }
 
   private insertSorted(rows: TRow[], row: TRow): TRow[] {
@@ -151,14 +127,9 @@ export class PulseMergeCore<TRow extends Record<string, unknown> & { $pk: unknow
     return updated;
   }
 
-  // Returns true when a new insert should be accepted into the current window.
-  // limit === null means no-range mode: every matching insert is accepted.
-  private shouldApplyPrependInsert(rowPk: PulsePk): boolean {
-    if (this.limit === null) return true;
-    if (this.rangeStart === null || this.rangeEnd === null) return true;
-    if (this.order === 'desc') {
-      return comparePkValues(rowPk, this.rangeEnd) > 0;
-    }
-    return comparePkValues(rowPk, this.rangeStart) < 0;
+  // Returns true when a new insert should be accepted into the current state. The full-set
+  // base always accepts — the ranged/HTTP variant overrides this with a window gate.
+  protected acceptInsert(_rowPk: PulsePk): boolean {
+    return true;
   }
 }
