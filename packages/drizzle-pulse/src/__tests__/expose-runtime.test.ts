@@ -1,27 +1,29 @@
 import { describe, expect, test } from 'bun:test';
+import { PulseRuntime } from '../server/expose.js';
+import { createPulseRegistry } from '../server/pulse-registry.js';
+import type { PulseSourceDb } from '../server/pulse-sql.js';
 import { makePulseRuntime } from './mock-runtime.js';
 
-describe('connection-string handling', () => {
-  test('pgConfig passes the raw connectionString through instead of re-parsing it', () => {
-    const databaseUrl = 'postgresql://user:p%40ss@localhost:5433/my_db?sslmode=require';
-    const runtime = makePulseRuntime({ databaseUrl }) as any;
+describe('wal config resolution', () => {
+  test('wal.publicationName/slotName are exposed on the runtime', () => {
+    // makePulseRuntime passes wal: { publicationName: 'test_pub', slotName: 'test_slot' }.
+    const runtime = makePulseRuntime({
+      databaseUrl: 'postgresql://user:p%40ss@localhost:5433/my_db?sslmode=require',
+    });
 
-    expect(runtime.pgConfig.connectionString).toBe(databaseUrl);
-
-    // No hand-parsed discrete fields that could silently drop percent-encoding or
-    // query params — `pg` derives these itself from connectionString.
-    expect(runtime.pgConfig.host).toBeUndefined();
-    expect(runtime.pgConfig.port).toBeUndefined();
-    expect(runtime.pgConfig.user).toBeUndefined();
-    expect(runtime.pgConfig.password).toBeUndefined();
-    expect(runtime.pgConfig.database).toBeUndefined();
+    expect(runtime.publicationName).toBe('test_pub');
+    expect(runtime.slotName).toBe('test_slot');
   });
 
-  test('replication flag is still layered onto pgConfig only', () => {
-    const runtime = makePulseRuntime({
+  test('defaults to drizzle_pulse/drizzle_pulse when wal is omitted', () => {
+    const emptyRegistry = createPulseRegistry({});
+    const runtime = new PulseRuntime(emptyRegistry as any, {
       databaseUrl: 'postgresql://user:pass@localhost/test',
-    }) as any;
-    expect(runtime.pgConfig.replication).toBe('database');
+      sourceDb: {} as PulseSourceDb,
+    });
+
+    expect(runtime.publicationName).toBe('drizzle_pulse');
+    expect(runtime.slotName).toBe('drizzle_pulse');
   });
 });
 

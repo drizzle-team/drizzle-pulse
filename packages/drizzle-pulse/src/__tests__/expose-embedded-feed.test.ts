@@ -94,7 +94,9 @@ describe('onTerminalError', () => {
     });
 
     (runtime as any).isRunning = true;
-    (runtime as any).reconnectAttempts = (runtime as any).reconnectConfig.maxRetries;
+    // RECONNECT_MAX_RETRIES is a hardcoded module constant in expose.ts (D-04: no reconnect
+    // knobs), not a per-runtime config surface — mirror its value (10) directly.
+    (runtime as any).reconnectAttempts = 10;
 
     await (runtime as any).handleDisconnect(null);
     // stop() is invoked fire-and-forget (`void this.stop()`); flush any pending microtasks.
@@ -116,7 +118,9 @@ describe('onTerminalError', () => {
     });
 
     (runtime as any).isRunning = true;
-    (runtime as any).reconnectAttempts = (runtime as any).reconnectConfig.maxRetries;
+    // RECONNECT_MAX_RETRIES is a hardcoded module constant in expose.ts (D-04: no reconnect
+    // knobs), not a per-runtime config surface — mirror its value (10) directly.
+    (runtime as any).reconnectAttempts = 10;
 
     await (runtime as any).handleDisconnect(null);
     await Promise.resolve();
