@@ -105,7 +105,9 @@ Embedded (in-process, tap-direct):
 
   createPulseEvents(runtime).queryName(args?, callback, { auth? })  // or (callback, options?)
     → WHERE-filtered WAL tap, no baseline/state → returns an unsubscribe function
-    → callback(event: PulseEvent<TRow>, lsn: string) in WAL commit order
+    → callback(event: PulseEvent<TRow>, lsn: string) in WAL commit order, at-least-once
+      (a disconnect between tap emit and slot ack replays the commit on reconnect; no
+      baseline/dedup here — consumers should key idempotency off (pk, lsn))
 ```
 
 ## Runtime Notes

@@ -10,6 +10,14 @@ import { buildTapEvent, type TapRow } from './tap-events.js';
 // no state to reconcile here, only a WHERE-filtered tap. Value imports limited to ./tap-events.js
 // and bare drizzle-orm; platform-imports.test.ts enforces purity across the embedded graph.
 
+/**
+ * Called with each tapped event in WAL commit order. Delivery is **at-least-once**: a
+ * disconnect between the tap emit and the replication slot's per-message acknowledge replays
+ * the same commit again after reconnect, and this surface has no baseline/dedup to absorb it
+ * (unlike `PulseCollection`, which dedups the replay via its merge core's $pk map). Consumers
+ * with side effects keyed off `lsn` should treat `(pk, lsn)` — or `lsn` alone for single-event
+ * transactions — as an idempotency key.
+ */
 export type PulseEventsCallback<TRow> = (event: PulseEvent<TRow>, lsn: string) => void;
 
 export interface PulseEventsOptions {
