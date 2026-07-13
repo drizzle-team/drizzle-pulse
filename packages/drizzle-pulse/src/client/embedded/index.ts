@@ -2,12 +2,13 @@ import { getTableUniqueName } from 'drizzle-orm';
 import type { PulseRuntime } from '../../server/expose.js';
 import type { AnyPulseBuilders } from '../../server/pulse-registry.js';
 import type { PulseClientContract } from '../../server/pulse-types.js';
-import type { PulseRouterHandlers } from '../../server/router.js';
-import type { PulseAuthContext } from '../../types.js';
-import { QueryDescriptor } from '../../types.js';
-import type { PulseEvent, PulseQueryState } from '../pulse-query.js';
-import { PulseQuery } from '../pulse-query.js';
-import type { PullResultMap, PulseQueryTransport } from '../transport.js';
+import { compareLsn } from '../../shared/lsn.js';
+import { PulseMergeCore } from '../../shared/pulse-merge-core.js';
+import { applyProjectionPipeline } from '../../shared/projection.js';
+import type { PulseEvent } from '../../shared/pulse-events.js';
+import type { PulseAuthContext, QueryDescriptor } from '../../types.js';
+import type { WalTapPayload } from '../../server/wal-event-emitter.js';
+import { buildTapEvent, type TapRow } from './tap-events.js';
 
 // ---------------------------------------------------------------------------
 // Public type surface
@@ -20,7 +21,7 @@ export interface PulseCollectionOptions {
 export interface PulseCollectionChange<T> {
   events: readonly PulseEvent<T>[];
   state: readonly T[];
-  snapshot: number;
+  lsn: string;
 }
 
 export type PulseRow<C> =
@@ -38,57 +39,20 @@ export type EmbeddedPulseClient<TQueries extends AnyPulseBuilders> = {
     : never;
 };
 
-type AnyRow = Record<string, unknown> & { $pk: unknown };
+type AnyRow = TapRow;
 
 // ---------------------------------------------------------------------------
-// Direct transport — the in-process SDK handler, no HTTP, no superjson, no PullClient.
-// Constructed per collection so its calls carry that collection's auth.
-// ---------------------------------------------------------------------------
-
-function createDirectTransport(
-  handlers: PulseRouterHandlers,
-  auth: PulseAuthContext,
-): PulseQueryTransport {
-  return {
-    async subscribe(request) {
-      const { status, body } = await handlers.subscribe(request, auth);
-      if ('error' in body) throw new Error(body.error);
-      if (status !== 200) throw new Error(`Subscribe failed: ${status}`);
-      return body as Awaited<ReturnType<PulseQueryTransport['subscribe']>>;
-    },
-    async pull(entries) {
-      const { status, body } = await handlers.pull({ subscriptions: entries }, auth);
-      if ('error' in body) throw new Error(body.error);
-      if (status !== 200) throw new Error(`Pull failed: ${status}`);
-      return body.results as PullResultMap;
-    },
-    async loadMore(request) {
-      const { status, body } = await handlers.loadMore(request, auth);
-      if ('error' in body) throw new Error(body.error);
-      if (status !== 200) throw new Error(`Load more failed: ${status}`);
-      return body as Awaited<ReturnType<PulseQueryTransport['loadMore']>>;
-    },
-  };
-}
-
-// Cursor tokens are `epoch:snapshot`; PulseCollectionChange exposes the snapshot number.
-function snapshotNumber(token: string): number {
-  const separator = token.indexOf(':');
-  return separator >= 0 ? Number(token.slice(separator + 1)) || 0 : 0;
-}
-
-// ---------------------------------------------------------------------------
-// PulseCollection — a thin facade over a PulseQuery driven by the direct transport.
+// PulseCollection — a full-set merge core fed tap-direct (no HTTP wire protocol).
 // ---------------------------------------------------------------------------
 
 export class PulseCollection<TRow extends { $pk: unknown }> {
   private disposed = false;
   private readonly onChangeListeners = new Set<(change: PulseCollectionChange<TRow>) => void>();
+  private readonly onErrorListeners = new Set<(error: Error) => void>();
 
   /** @internal */
   constructor(
-    /** @internal */
-    readonly query: PulseQuery<TRow & Record<string, unknown>>,
+    private readonly core: PulseMergeCore<TRow & Record<string, unknown>>,
     private readonly teardown: () => void = () => {},
   ) {}
 
@@ -98,17 +62,7 @@ export class PulseCollection<TRow extends { $pk: unknown }> {
   }
 
   list(): readonly TRow[] {
-    return this.query.getState().data as readonly TRow[];
-  }
-
-  /** The full query state: `data` plus the loading/pagination/error flags. */
-  getState(): PulseQueryState<TRow> {
-    return this.query.getState() as PulseQueryState<TRow>;
-  }
-
-  /** Fetches the next page of a `.limit()` query, extending `list()` in place. */
-  loadMore(): Promise<void> {
-    return this.query.loadMore();
+    return this.core.data as readonly TRow[];
   }
 
   onChange(listener: (change: PulseCollectionChange<TRow>) => void): () => void {
@@ -116,25 +70,40 @@ export class PulseCollection<TRow extends { $pk: unknown }> {
     return () => this.onChangeListeners.delete(listener);
   }
 
+  onError(listener: (error: Error) => void): () => void {
+    this.onErrorListeners.add(listener);
+    return () => this.onErrorListeners.delete(listener);
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.query.destroy();
     this.teardown();
   }
 
-  /** @internal fed by the PulseQuery onEvents hook. */
-  fireOnChange(
-    events: readonly PulseEvent<TRow>[],
-    state: readonly TRow[],
-    snapshot: number,
-  ): void {
-    const change: PulseCollectionChange<TRow> = { events, state, snapshot };
+  /** @internal fed by the tap-direct handshake whenever applying events mutates state. */
+  fireOnChange(events: readonly PulseEvent<TRow>[], lsn: string): void {
+    const change: PulseCollectionChange<TRow> = {
+      events,
+      state: this.core.data as readonly TRow[],
+      lsn,
+    };
     for (const listener of this.onChangeListeners) {
       try {
         listener(change);
       } catch (e) {
         console.error('[PulseCollection] onChange error:', e);
+      }
+    }
+  }
+
+  /** @internal fed on re-baseline failure (post-reconnect) and on runtime terminal error. */
+  fireOnError(error: Error): void {
+    for (const listener of this.onErrorListeners) {
+      try {
+        listener(error);
+      } catch (e) {
+        console.error('[PulseCollection] onError error:', e);
       }
     }
   }
@@ -164,6 +133,8 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
           throw new Error('PulseCollection can only be created after runtime.start()');
         if (pulseQuery.hasTransform)
           throw new Error('Queries with .transform() are not supported in the embedded client');
+        if (pulseQuery.limit !== null)
+          throw new Error('Queries with .limit() are not supported in the embedded client');
 
         // Split the optional trailing PulseCollectionOptions from query args.
         // Args queries: (queryArgs, options?) — options is callArgs[1].
@@ -180,46 +151,96 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
         }
 
         const auth: PulseAuthContext = options?.auth ?? { userId: null };
-        // resolve() validates args and yields the source table for the change signal.
+        // resolve() validates args and yields the source table + auth-scoped WHERE — the
+        // same gate must scope both the baseline read and every tapped event below.
         const resolved = runtime.registry.resolve(prop, rawArgs, auth);
         const tableKey = getTableUniqueName(resolved.table);
 
-        const transport = createDirectTransport(runtime.handlers, auth);
-        const descriptor = new QueryDescriptor<AnyRow>(
-          prop,
-          (rawArgs ?? {}) as Record<string, unknown>,
-          '',
-          transport,
-        );
+        const core = new PulseMergeCore<AnyRow>({ order: resolved.order });
+
+        // Tap-direct handshake state: while `baselining` is up, tapped payloads are buffered
+        // instead of applied so nothing committed during the baseline SELECT is lost or
+        // double-applied — the buffer is drained afterward against the read watermark.
+        let baselining = true;
+        let buffer: WalTapPayload[] = [];
+        let collection!: PulseCollection<AnyRow>;
+
+        function applyPayload(payload: WalTapPayload): void {
+          const event = buildTapEvent(payload, resolved);
+          if (!event) return;
+          const mutated = core.applyEvents([event]);
+          if (mutated) collection.fireOnChange([event], payload.lsn);
+        }
+
+        function handleTapPayload(payload: WalTapPayload): void {
+          if (baselining) {
+            buffer.push(payload);
+            return;
+          }
+          applyPayload(payload);
+        }
+
+        // Same handshake for the initial load AND every re-baseline (reconnect): subscribe
+        // first (buffering), read the baseline + watermark, rebuild state, then drain the
+        // buffer. A payload at-or-above the watermark is applied; below-watermark payloads
+        // are guaranteed already present in the baseline. At-or-above (not strictly greater)
+        // is required because a commit written exactly at the watermark position was
+        // necessarily written at-or-after the watermark read — strict greater-than would risk
+        // dropping a commit landing exactly there. Any baseline/tap overlap this admits is
+        // absorbed by the merge core's $pk dedup, making the handshake exactly-once.
+        async function runHandshake(): Promise<string> {
+          baselining = true;
+          buffer = [];
+          const { rows, watermark } = await runtime.readCollectionBaseline(resolved);
+          core.rebuildFromRows(applyProjectionPipeline(rows, resolved) as AnyRow[]);
+          const pending = buffer;
+          buffer = [];
+          baselining = false;
+          for (const payload of pending) {
+            if (compareLsn(payload.lsn, watermark) < 0) continue;
+            applyPayload(payload);
+          }
+          return watermark;
+        }
 
         const unsubs: Array<() => void> = [];
-        let collection!: PulseCollection<AnyRow>;
-        const query = new PulseQuery(descriptor, {
-          onEvents: (events, state, token) =>
-            collection.fireOnChange(events, state, snapshotNumber(token)),
-        });
-        collection = new PulseCollection(query, () => {
+        collection = new PulseCollection(core, () => {
           for (const unsub of unsubs) unsub();
         });
 
-        // Pull only when nudged: a WAL commit on the source table, or a reconnect (catch up on
-        // events missed while the stream was down). Stop tears the collection down.
-        unsubs.push(runtime.walEventEmitter.subscribe(tableKey, () => void query.poll()));
-        unsubs.push(runtime.onReconnect(() => void query.poll()));
+        unsubs.push(runtime.walEventEmitter.subscribe(tableKey, handleTapPayload));
+        unsubs.push(
+          runtime.onReconnect(() => {
+            void (async () => {
+              try {
+                const watermark = await runHandshake();
+                if (collection.isDisposed) return;
+                collection.fireOnChange([], watermark);
+              } catch (err) {
+                if (collection.isDisposed) return;
+                collection.fireOnError(err instanceof Error ? err : new Error(String(err)));
+              }
+            })();
+          }),
+        );
+        unsubs.push(runtime.onTerminalError((error) => collection.fireOnError(error)));
         unsubs.push(runtime.onStop(() => collection.dispose()));
 
-        // Initial load via the server's baseline SELECT; the factory resolves once it lands.
-        await query.subscribe();
+        // Initial load via the watermark handshake; init failures reject the factory promise
+        // (not onError — there is no collection to report to yet).
+        let initError: unknown;
+        try {
+          await runHandshake();
+        } catch (err) {
+          initError = err;
+        }
         if (collection.isDisposed) {
           throw new Error('PulseCollection was disposed before the initial sync completed');
         }
-        const error = query.getState().error;
-        if (error) {
+        if (initError !== undefined) {
           collection.dispose();
-          throw error;
+          throw initError instanceof Error ? initError : new Error(String(initError));
         }
-        // Catch up on any event committed between subscribe's snapshot read and now.
-        await query.poll();
         return collection;
       };
     },

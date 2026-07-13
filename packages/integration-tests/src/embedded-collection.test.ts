@@ -48,12 +48,9 @@ describe('Embedded Collection', () => {
     .args(fixture.schemas.ordersByStatusArgs)
     .order('asc')
     .query((ctx) => ctx.query({ status: ctx.args.status }));
-  const ordersByStatusLimited = pulse(orders)
-    .args(fixture.schemas.ordersByStatusArgs)
-    .order('asc')
-    .limit(2)
-    .query((ctx) => ctx.query({ status: ctx.args.status }));
-  const registry = createPulseRegistry({ ordersByStatus, ordersByStatusLimited });
+  // ordersByStatusLimited (a `.limit()` query) is gone: embedded collections now reject
+  // `.limit()` at creation (SPLIT-02) — the loadMore() coverage it fed is obsolete.
+  const registry = createPulseRegistry({ ordersByStatus });
 
   beforeAll(async () => {
     const setup = await setupTestSuiteForFixture(fixture, registry);
@@ -108,7 +105,7 @@ describe('Embedded Collection', () => {
     const client = createPulseClient(runtime);
     const collection = await client.ordersByStatus({ status: 'accepted' });
 
-    const changes: Array<{ events: readonly any[]; state: readonly any[]; snapshot: number }> = [];
+    const changes: Array<{ events: readonly any[]; state: readonly any[]; lsn: string }> = [];
     collection.onChange((c) => changes.push(c));
 
     // INSERT
@@ -161,53 +158,6 @@ describe('Embedded Collection', () => {
     collection.dispose();
   });
 
-  // getState() surfaces the underlying query state (data + flags).
-  test('getState() exposes data and loading flags', async () => {
-    const client = createPulseClient(runtime);
-    const collection = await client.ordersByStatus({ status: 'accepted' });
-
-    const state = collection.getState();
-    expect(state.isLoading).toBe(false);
-    expect(state.error).toBeNull();
-    expect(state.data).toBe(collection.list());
-
-    await processDbOperations([
-      db
-        .insert(orders)
-        .values({ driverId: 1, pickup: 'S', dropoff: 'S', price: 10, status: 'accepted' }),
-    ]);
-    await waitFor(() => collection.getState().data.length === 1);
-
-    collection.dispose();
-  });
-
-  // loadMore() extends a .limit() collection through the direct transport.
-  test('loadMore() fetches the next page of a limited collection', async () => {
-    await processDbOperations([
-      db
-        .insert(orders)
-        .values({ driverId: 1, pickup: 'A', dropoff: 'A', price: 10, status: 'accepted' }),
-      db
-        .insert(orders)
-        .values({ driverId: 1, pickup: 'B', dropoff: 'B', price: 20, status: 'accepted' }),
-      db
-        .insert(orders)
-        .values({ driverId: 1, pickup: 'C', dropoff: 'C', price: 30, status: 'accepted' }),
-    ]);
-
-    const client = createPulseClient(runtime);
-    const collection = await client.ordersByStatusLimited({ status: 'accepted' });
-
-    expect(collection.list()).toHaveLength(2);
-    expect(collection.getState().hasMore).toBe(true);
-
-    await collection.loadMore();
-
-    expect(collection.list()).toHaveLength(3);
-    expect(collection.getState().hasMore).toBe(false);
-
-    collection.dispose();
-  });
 });
 
 // ---------------------------------------------------------------------------
