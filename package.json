@@ -18,7 +18,11 @@
     "check": "bun run ci:lint",
     "verify:publish": "bun run build && bun run --filter drizzle-pulse verify:publish"
   },
+  "catalog": {
+    "drizzle-orm": "npm:@drizzle-team/drizzle-orm@1.0.0-rc.4-b4881cd"
+  },
   "devDependencies": {
-    "@biomejs/biome": "2.4.4"
+    "@biomejs/biome": "2.4.4",
+    "minipg": "file:./vendor/minipg-0.1.0.tgz"
   }
 }
