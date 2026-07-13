@@ -806,9 +806,17 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     }
 
     let commitLsn = this.currentCommitLsn;
+    // A change message's own lsn is always below its transaction's commit lsn, so this fallback
+    // stamps an undervalued watermark: a tap payload could then carry an lsn below the embedded
+    // client's watermark for a row not actually in its baseline, and get silently dropped
+    // (unrecoverable) instead of buffered. pgoutput streams transactions whole (`begin` first),
+    // so this should be unreachable — treat it as a protocol anomaly, not routine, and skip the
+    // tap emit (the events-table row is still persisted; a later re-baseline picks it up).
+    let commitLsnIsFallback = false;
     if (!commitLsn) {
-      this.logDebug(
-        `[WAL Listener] No tracked begin.commitLsn for ${event.tableQualifiedName}; falling back to per-message lsn`,
+      commitLsnIsFallback = true;
+      this.logError(
+        `[WAL Listener] Protocol anomaly: no tracked begin.commitLsn for ${event.tableQualifiedName}; falling back to per-message lsn and skipping the tap emit`,
       );
       commitLsn = lsn;
     }
@@ -822,7 +830,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       },
     );
 
-    await this.persistWalEvent(event, metadata, commitLsn);
+    await this.persistWalEvent(event, metadata, commitLsn, commitLsnIsFallback);
   }
 
   private parseWalEvent(
@@ -865,6 +873,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     event: WalEvent,
     metadata: SourceTableMetadata,
     commitLsn: string,
+    commitLsnIsFallback = false,
   ): Promise<void> {
     const currentPulseStore = this.getPulseStore();
     const pkSource = event.operation === 'delete' ? event.oldRowData : event.rowData;
@@ -925,14 +934,19 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     }
 
     this.lastPersistedSnapshot = Math.max(this.lastPersistedSnapshot, snapshot);
-    this.walEventEmitter.emit(
-      event.tableQualifiedName,
-      event.operation,
-      normalizedRowData,
-      normalizedOldRowData,
-      snapshot,
-      commitLsn,
-    );
+    // An undervalued (fallback) commitLsn would let the embedded client's watermark filter
+    // silently drop this event instead of buffering it — the persisted events-table row is
+    // the recoverable path (a re-baseline picks it up); skip only the live tap emit.
+    if (!commitLsnIsFallback) {
+      this.walEventEmitter.emit(
+        event.tableQualifiedName,
+        event.operation,
+        normalizedRowData,
+        normalizedOldRowData,
+        snapshot,
+        commitLsn,
+      );
+    }
 
     this.logDebug(
       `[WAL Listener] Persisted ${event.operation} event on ${event.tableQualifiedName} (pk=${pkValue})`,
