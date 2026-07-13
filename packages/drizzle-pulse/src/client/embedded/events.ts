@@ -74,6 +74,12 @@ export function createPulseEvents<TQueries extends AnyPulseBuilders>(
           options = callArgs[1] as PulseEventsOptions | undefined;
         }
 
+        if (typeof callback !== 'function') {
+          throw new Error(
+            `createPulseEvents: expected a callback function, got ${typeof callback}`,
+          );
+        }
+
         const auth: PulseAuthContext = options?.auth ?? { userId: null };
         // resolve() validates args and yields the auth-scoped WHERE — the same gate every
         // tapped event is filtered through below.

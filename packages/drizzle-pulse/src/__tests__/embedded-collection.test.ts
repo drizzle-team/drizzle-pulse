@@ -388,7 +388,12 @@ describe('embedded client — tap-direct handshake', () => {
     await flushMicrotasks();
 
     expect(collection.list()).toHaveLength(2);
-    expect(collection.list().map((r: any) => r.id).sort()).toEqual([1, 2]);
+    expect(
+      collection
+        .list()
+        .map((r: any) => r.id)
+        .sort(),
+    ).toEqual([1, 2]);
 
     collection.dispose();
   });
