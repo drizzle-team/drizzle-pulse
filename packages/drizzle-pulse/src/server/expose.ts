@@ -306,6 +306,15 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
    * watermark BEFORE running the baseline SELECT — a row committed between the SELECT completing
    * and a later watermark read would land in neither the baseline nor the accepted tap stream, so
    * this ordering is load-bearing for the exactly-once handshake, not incidental.
+   *
+   * Accepted bound: `pg_current_wal_lsn()` returns as soon as a commit's WAL record is written,
+   * which can be microseconds before that transaction becomes visible to a new snapshot (the
+   * procarray exit happens after the WAL write). If the baseline SELECT's snapshot lands in that
+   * window, the row is in neither the baseline (not yet visible) nor the accepted tap stream (its
+   * buffered payload's lsn is below this watermark and gets dropped by the drain filter) — it's
+   * silently missing until its next change. The window is a handful of microseconds per handshake;
+   * closing it fully would require reading the watermark inside the same transaction/snapshot as
+   * the baseline SELECT, which is not attempted here.
    */
   async readCollectionBaseline(
     resolved: ResolvedPulseQuery,
