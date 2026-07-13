@@ -96,7 +96,7 @@
     "@types/node": "^20.11.30",
     "@types/react": "^18.2.0",
     "bun-types": "^1.3.8",
-    "drizzle-orm": "file:../../../drizzle-orm/drizzle-orm/package.tgz",
+    "drizzle-orm": "npm:@drizzle-team/drizzle-orm@1.0.0-rc.4-6b580f6",
     "fast-check": "^3.23.2",
     "hono": "^4.6.0",
     "publint": "^0.3.21",
