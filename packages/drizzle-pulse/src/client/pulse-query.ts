@@ -29,21 +29,12 @@ export interface PulseQueryState<TResult> {
 
 export type CreatePulseQueryOptions<TResult extends Record<string, unknown> & { $pk: unknown }> = {
   onStateChange?: (state: PulseQueryState<TResult>) => void;
-  // Fired after a pull applies events (with the response events) and after a reset (with []).
-  // The embedded facade drives its onChange fan-out from this; the HTTP client ignores it.
-  onEvents?: (
-    events: readonly PulseEvent<TResult>[],
-    state: readonly TResult[],
-    snapshotToken: string,
-  ) => void;
 };
 
 export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown }> {
   private readonly onStateChange?: (state: PulseQueryState<TResult>) => void;
-  private readonly onEvents?: CreatePulseQueryOptions<TResult>['onEvents'];
   private readonly transport: PulseQueryTransport;
-  // Present only on the HTTP path; when absent, poll() drives a single-query direct pull.
-  private readonly pullClient?: PullClient;
+  private readonly pullClient: PullClient;
   private readonly queryKey: string;
 
   private state: PulseQueryState<TResult> = {
@@ -56,21 +47,15 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
 
   private readonly core: RangedPulseMergeCore<TResult>;
   // Cursor token from the server; also the "subscribed" signal — empty until subscribe()
-  // resolves, reset to empty on reset(). Echoed back verbatim on each pull.
+  // resolves. Echoed back verbatim on each pull.
   private snapshot = '';
   private destroyed = false;
-
-  // Direct-poll coalescing: a nudge arriving while a pull is in flight sets `pollAgain` so
-  // exactly one follow-up pull runs — no WAL event is dropped between polls.
-  private directPollInFlight: Promise<void> | null = null;
-  private directPollAgain = false;
 
   constructor(
     private readonly descriptor: QueryDescriptor<TResult>,
     options?: CreatePulseQueryOptions<TResult>,
   ) {
     this.onStateChange = options?.onStateChange;
-    this.onEvents = options?.onEvents;
     this.transport = descriptor.transport;
     this.pullClient = descriptor.pullClient;
     this.queryKey = `${descriptor.queryName}:${JSON.stringify(descriptor.args)}:${Math.random().toString(36).slice(2, 10)}`;
@@ -102,9 +87,7 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
       this.core.rangeStart = isPkComparable(result.rangeStart) ? result.rangeStart : null;
       this.core.rangeEnd = isPkComparable(result.rangeEnd) ? result.rangeEnd : null;
       this.snapshot = result.snapshot;
-      if (this.pullClient) {
-        this.registerWithPullClient(this.pullClient);
-      }
+      this.registerWithPullClient();
 
       this.setState({
         data: this.core.data,
@@ -126,19 +109,13 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
       return;
     }
 
-    if (this.pullClient) {
-      await this.pullClient.pollNow();
-      return;
-    }
-
-    await this.directPoll();
+    await this.pullClient.pollNow();
   }
 
   applyEvents(events: PulseEvent<TResult>[]) {
     const changed = this.core.applyEvents(events);
     if (changed) {
       this.setState({ data: this.core.data });
-      this.onEvents?.(events, this.core.data, this.snapshot);
     }
   }
 
@@ -191,19 +168,6 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
     }
   }
 
-  reset() {
-    this.unregisterFromPullClient();
-    this.core.clear();
-    this.snapshot = '';
-    this.setState({
-      data: [],
-      isLoading: true,
-      isLoadingMore: false,
-      hasMore: false,
-      error: null,
-    });
-  }
-
   destroy() {
     this.unregisterFromPullClient();
     this.destroyed = true;
@@ -216,47 +180,6 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
 
     this.state = { ...this.state, ...next };
     this.onStateChange?.(this.state);
-  }
-
-  // Single-query pull for the direct (embedded) path, coalesced so overlapping nudges collapse
-  // into one follow-up pull without dropping any.
-  private async directPoll(): Promise<void> {
-    if (this.directPollInFlight) {
-      this.directPollAgain = true;
-      return this.directPollInFlight;
-    }
-
-    this.directPollInFlight = (async () => {
-      try {
-        do {
-          this.directPollAgain = false;
-          const state = this.buildPullEntry();
-          if (!state) {
-            return;
-          }
-          const results = await this.transport.pull([{ key: this.queryKey, ...state }]);
-          if (this.destroyed) {
-            return;
-          }
-          const result = results[this.queryKey];
-          if (result !== undefined) {
-            this.applyPullResult(
-              result as
-                | ProtocolPullResponse<TResult, PulseEvent<TResult>>
-                | PullResponseErrorResult,
-            );
-          }
-        } while (this.directPollAgain);
-      } catch (error) {
-        // Surface as query error state (setState no-ops once destroyed), never an unhandled
-        // rejection — background nudges fire poll() fire-and-forget.
-        this.setState({ error: error instanceof Error ? error : new Error(String(error)) });
-      } finally {
-        this.directPollInFlight = null;
-      }
-    })();
-
-    return this.directPollInFlight;
   }
 
   private applyPullResult(
@@ -282,7 +205,6 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
         isLoading: false,
         error: null,
       });
-      this.onEvents?.([], this.core.data, this.snapshot);
       return;
     }
 
@@ -314,11 +236,11 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
   }
 
   private unregisterFromPullClient() {
-    this.pullClient?.unregister(this.queryKey);
+    this.pullClient.unregister(this.queryKey);
   }
 
-  private registerWithPullClient(pullClient: PullClient) {
-    pullClient.register(this.queryKey, {
+  private registerWithPullClient() {
+    this.pullClient.register(this.queryKey, {
       getSubscriptionState: () => this.buildPullEntry(),
       applyPullResult: (result) => {
         this.applyPullResult(

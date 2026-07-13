@@ -421,29 +421,6 @@ describe('Client State', () => {
       expect(query.getState().error).toBe(null);
     });
 
-    test('manual reset returns to initial state and a fresh subscribe restores live data', async () => {
-      await processDbOperations([db.insert(orders).values(buildRequestedOrder('Resettable', 80))]);
-
-      const query = await initTestQuery(client.ordersByStatus({ status: 'requested' }));
-      expect(query.getState().data.map((row) => row.price)).toEqual([80]);
-
-      query.reset();
-
-      expect(query.getState()).toEqual({
-        data: [],
-        isLoading: true,
-        isLoadingMore: false,
-        hasMore: false,
-        error: null,
-      });
-
-      await query.subscribe();
-
-      expect(query.getState().data.map((row) => row.price)).toEqual([80]);
-      expect(query.getState().isLoading).toBe(false);
-      expect(query.getState().error).toBe(null);
-    });
-
     test('multiple deletes on same row result in empty final state', async () => {
       const query = await initTestQuery(client.ordersByStatus({ status: 'requested' }));
 

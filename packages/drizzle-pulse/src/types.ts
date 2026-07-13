@@ -120,9 +120,9 @@ export class QueryDescriptor<TResult> {
     readonly args: Record<string, unknown>,
     readonly url: string,
     readonly transport: PulseQueryTransport,
-    // Present only for the HTTP path, where it batches this query's polls with its siblings;
-    // the embedded (direct) transport polls one query at a time and leaves it undefined.
-    readonly pullClient?: PullClient,
+    // Batches this query's polls with its siblings on the HTTP path; the embedded direct path
+    // that left it undefined no longer exists.
+    readonly pullClient: PullClient,
   ) {}
 }
 

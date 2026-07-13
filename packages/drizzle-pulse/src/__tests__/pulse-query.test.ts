@@ -388,34 +388,6 @@ describe('PulseQuery runtime characterization', () => {
     ]);
   });
 
-  test('reset restores initial state', async () => {
-    const subscribeResponse = new Response(
-      serialize({
-        rows: [{ $pk: 1, label: 'a' }],
-        rangeStart: 1,
-        rangeEnd: 1,
-        snapshot: 'e:1',
-        order: 'asc',
-        limit: null,
-      }),
-      { status: 200 },
-    );
-
-    const { fetchImpl } = createQueuedFetch([subscribeResponse]);
-    const core = new PulseQuery(createTestClient(fetchImpl).ordersByStatus({}));
-
-    await core.subscribe();
-    core.reset();
-
-    expect(core.getState()).toEqual({
-      data: [],
-      isLoading: true,
-      isLoadingMore: false,
-      hasMore: false,
-      error: null,
-    });
-  });
-
   test('destroy prevents delayed subscribe from registering state', async () => {
     let releaseResponse!: () => void;
     const responseGate = new Promise<void>((resolve) => {
