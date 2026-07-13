@@ -1,5 +1,10 @@
 import { getColumns } from 'drizzle-orm';
-import type { AnyPgColumnBuilder, PgColumn, PgColumnToBuilderOverrides, PgTable } from 'drizzle-orm/pg-core';
+import type {
+  AnyPgColumnBuilder,
+  PgColumn,
+  PgColumnToBuilderOverrides,
+  PgTable,
+} from 'drizzle-orm/pg-core';
 import { bigint, getTableConfig, integer, pgSchema, text, timestamp } from 'drizzle-orm/pg-core';
 import { getPulsePkColumn } from '../pulse-table.js';
 
@@ -104,8 +109,8 @@ export function buildEventsTable(
 
     const oldName = `$old_${column.name}`;
     assertIdentifierLength(oldName);
-    columns[oldName] = relaxSerial(column)
-      ?? column.toBuilder({ ...stripSourceConfig, name: oldName });
+    columns[oldName] =
+      relaxSerial(column) ?? column.toBuilder({ ...stripSourceConfig, name: oldName });
   }
 
   Object.assign(columns, {

@@ -14,7 +14,12 @@ import type {
   SubscribeResponse,
 } from '../shared/protocol-types.js';
 
-import type { PulseAuthContext, PulseWireEvent, ResolvedPulseQuery, WhereClause } from '../types.js';
+import type {
+  PulseAuthContext,
+  PulseWireEvent,
+  ResolvedPulseQuery,
+  WhereClause,
+} from '../types.js';
 import { formatCursor, parseCursor } from './cursor.js';
 import { buildWhereClausePredicate } from './drizzle-utils.js';
 import type { AnyPulseBuilders, PulseRegistry } from './pulse-registry.js';
@@ -104,9 +109,7 @@ export class PulseRequestHandler {
       // startHandshake ordering): a write whose event lands between these two reads must
       // still be covered by the cursor returned here, or it would be lost until an
       // unrelated reset. Duplicate replays are already idempotent client-side.
-      const snapshot = await this.getPulseStore().getLatestSnapshot(
-        this.getEventsTable(queryName),
-      );
+      const snapshot = await this.getPulseStore().getLatestSnapshot(this.getEventsTable(queryName));
 
       // Fetch limit+1 so hasMore is authoritative (mirrors loadMore): a full page of
       // exactly `limit` rows must not report hasMore unless a further row exists.

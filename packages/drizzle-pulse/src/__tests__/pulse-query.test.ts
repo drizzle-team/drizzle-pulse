@@ -131,7 +131,8 @@ describe('PulseQuery runtime characterization', () => {
     );
     const pullError = (body: { subscriptions: PullEntry[] }) => {
       const results: Record<string, unknown> = {};
-      for (const entry of body.subscriptions) results[entry.key] = { error: 'query_resolution_failed' };
+      for (const entry of body.subscriptions)
+        results[entry.key] = { error: 'query_resolution_failed' };
       return new Response(serialize({ results }), { status: 200 });
     };
     const pullOk = pullResponder(() => ({
@@ -298,10 +299,7 @@ describe('PulseQuery runtime characterization', () => {
     await core.subscribe();
     await core.poll();
 
-    expect(calls.map((call) => call.url)).toEqual([
-      '/api/pulse/subscribe',
-      '/api/pulse/pull',
-    ]);
+    expect(calls.map((call) => call.url)).toEqual(['/api/pulse/subscribe', '/api/pulse/pull']);
     expect(calls[1]?.body).toEqual({
       subscriptions: [
         {

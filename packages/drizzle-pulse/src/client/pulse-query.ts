@@ -235,7 +235,11 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
           }
           const result = results[this.queryKey];
           if (result !== undefined) {
-            this.applyPullResult(result as ProtocolPullResponse<TResult, PulseEvent<TResult>> | PullResponseErrorResult);
+            this.applyPullResult(
+              result as
+                | ProtocolPullResponse<TResult, PulseEvent<TResult>>
+                | PullResponseErrorResult,
+            );
           }
         } while (this.directPollAgain);
       } catch (error) {
@@ -312,7 +316,9 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
     pullClient.register(this.queryKey, {
       getSubscriptionState: () => this.buildPullEntry(),
       applyPullResult: (result) => {
-        this.applyPullResult(result as ProtocolPullResponse<TResult, PulseEvent<TResult>> | PullResponseErrorResult);
+        this.applyPullResult(
+          result as ProtocolPullResponse<TResult, PulseEvent<TResult>> | PullResponseErrorResult,
+        );
       },
       onPullError: (error) => {
         this.setState({ error });

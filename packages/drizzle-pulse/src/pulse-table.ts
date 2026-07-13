@@ -35,7 +35,9 @@ const SUPPORTED_PK_SQL_TYPES = new Set([
 export function getPulsePkColumn(table: PgTable): PgColumn {
   const columns = Object.values(getColumns(table)) as PgColumn[];
   const extrasPkNames = new Set(
-    getTableConfig(table).primaryKeys.flatMap((pk) => pk.columns).map((c) => c.name),
+    getTableConfig(table)
+      .primaryKeys.flatMap((pk) => pk.columns)
+      .map((c) => c.name),
   );
   const pkColumns = columns.filter((column) => column.primary || extrasPkNames.has(column.name));
 

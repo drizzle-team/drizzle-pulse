@@ -1,6 +1,10 @@
 import { getColumns } from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
-import { buildEventsTable, DEFAULT_EVENTS_SCHEMA, getEventsTableName } from './events-table-resolver.js';
+import {
+  buildEventsTable,
+  DEFAULT_EVENTS_SCHEMA,
+  getEventsTableName,
+} from './events-table-resolver.js';
 
 function quoteIdentifier(identifier: string): string {
   return `"${identifier.replace(/"/g, '""')}"`;
