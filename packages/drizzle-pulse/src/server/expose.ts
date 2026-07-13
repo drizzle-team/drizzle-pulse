@@ -145,6 +145,10 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   isRunning = false;
   private reconnectAttempts = 0;
+  // Set on pgoutput's 'begin' message, cleared on 'commit' — every insert/update/delete between
+  // the two shares this transaction's commit LSN. Null when no begin was observed (e.g. the
+  // stream started mid-transaction), in which case handleMessage falls back to the per-message lsn.
+  private currentCommitLsn: string | null = null;
   lastPersistedSnapshot = 0;
   readonly walEventEmitter = new WalEventEmitter();
   private everConnected = false;
@@ -735,6 +739,14 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   }
 
   private async handleMessage(lsn: string, log: Pgoutput.Message): Promise<void> {
+    if (log.tag === 'begin') {
+      this.currentCommitLsn = log.commitLsn;
+      return;
+    }
+    if (log.tag === 'commit') {
+      this.currentCommitLsn = null;
+      return;
+    }
     if (log.tag !== 'insert' && log.tag !== 'update' && log.tag !== 'delete') {
       return;
     }
@@ -749,6 +761,14 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       return;
     }
 
+    let commitLsn = this.currentCommitLsn;
+    if (!commitLsn) {
+      this.logDebug(
+        `[WAL Listener] No tracked begin.commitLsn for ${event.tableQualifiedName}; falling back to per-message lsn`,
+      );
+      commitLsn = lsn;
+    }
+
     this.logDebug(
       `[WAL Listener] ${event.operation.toUpperCase()} on ${event.tableQualifiedName}:`,
       {
@@ -758,7 +778,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       },
     );
 
-    await this.persistWalEvent(event, metadata);
+    await this.persistWalEvent(event, metadata, commitLsn);
   }
 
   private parseWalEvent(
@@ -797,7 +817,11 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     }
   }
 
-  private async persistWalEvent(event: WalEvent, metadata: SourceTableMetadata): Promise<void> {
+  private async persistWalEvent(
+    event: WalEvent,
+    metadata: SourceTableMetadata,
+    commitLsn: string,
+  ): Promise<void> {
     const currentPulseStore = this.getPulseStore();
     const pkSource = event.operation === 'delete' ? event.oldRowData : event.rowData;
     const pkValue = pkSource?.[metadata.pkColumnName];
@@ -863,6 +887,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       normalizedRowData,
       normalizedOldRowData,
       snapshot,
+      commitLsn,
     );
 
     this.logDebug(

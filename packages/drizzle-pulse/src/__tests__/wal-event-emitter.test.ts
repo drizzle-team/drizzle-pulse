@@ -11,7 +11,7 @@ describe('WalEventEmitter', () => {
     const received: WalTapPayload[] = [];
     emitter.subscribe(TABLE_A, (p) => received.push(p));
 
-    emitter.emit(TABLE_A, 'insert', { id: 1 }, null, 10);
+    emitter.emit(TABLE_A, 'insert', { id: 1 }, null, 10, '0/1A2B3C');
 
     expect(received).toHaveLength(1);
     expect(received[0]).toEqual({
@@ -19,6 +19,7 @@ describe('WalEventEmitter', () => {
       rowData: { id: 1 },
       oldRowData: null,
       $snapshot: 10,
+      lsn: '0/1A2B3C',
     });
   });
 
@@ -29,7 +30,7 @@ describe('WalEventEmitter', () => {
     emitter.subscribe(TABLE_A, () => order.push('second'));
     emitter.subscribe(TABLE_A, () => order.push('third'));
 
-    emitter.emit(TABLE_A, 'update', { id: 1 }, { id: 1, old: true }, 20);
+    emitter.emit(TABLE_A, 'update', { id: 1 }, { id: 1, old: true }, 20, '0/1');
 
     expect(order).toEqual(['first', 'second', 'third']);
   });
@@ -41,7 +42,7 @@ describe('WalEventEmitter', () => {
     emitter.subscribe(TABLE_A, (p) => callsA.push(p));
     emitter.subscribe(TABLE_B, (p) => callsB.push(p));
 
-    emitter.emit(TABLE_A, 'delete', {}, { id: 2 }, 30);
+    emitter.emit(TABLE_A, 'delete', {}, { id: 2 }, 30, '0/1');
 
     expect(callsA).toHaveLength(1);
     expect(callsB).toHaveLength(0);
@@ -49,7 +50,7 @@ describe('WalEventEmitter', () => {
 
   it('is a no-op when no listeners are registered for the table', () => {
     const emitter = new WalEventEmitter();
-    expect(() => emitter.emit(TABLE_A, 'insert', { id: 1 }, null, 5)).not.toThrow();
+    expect(() => emitter.emit(TABLE_A, 'insert', { id: 1 }, null, 5, '0/1')).not.toThrow();
   });
 
   it('stops delivering to a listener after unsubscribe', () => {
@@ -57,9 +58,9 @@ describe('WalEventEmitter', () => {
     const received: WalTapPayload[] = [];
     const unsub = emitter.subscribe(TABLE_A, (p) => received.push(p));
 
-    emitter.emit(TABLE_A, 'insert', { id: 1 }, null, 1);
+    emitter.emit(TABLE_A, 'insert', { id: 1 }, null, 1, '0/1');
     unsub();
-    emitter.emit(TABLE_A, 'insert', { id: 2 }, null, 2);
+    emitter.emit(TABLE_A, 'insert', { id: 2 }, null, 2, '0/2');
 
     expect(received).toHaveLength(1);
     expect(received[0]?.$snapshot).toBe(1);
@@ -72,7 +73,7 @@ describe('WalEventEmitter', () => {
       captured = p;
     });
 
-    emitter.emit(TABLE_A, 'insert', { id: 99 }, null, 77);
+    emitter.emit(TABLE_A, 'insert', { id: 99 }, null, 77, '0/1');
 
     expect(captured).not.toBeNull();
     expect((captured as unknown as WalTapPayload).oldRowData).toBeNull();
@@ -88,7 +89,7 @@ describe('WalEventEmitter', () => {
     emitter.subscribe(TABLE_A, (p) => received.push(p));
 
     // emit must not throw even though the first listener throws
-    expect(() => emitter.emit(TABLE_A, 'insert', { id: 1 }, null, 5)).not.toThrow();
+    expect(() => emitter.emit(TABLE_A, 'insert', { id: 1 }, null, 5, '0/1')).not.toThrow();
     // second listener still received the event
     expect(received).toHaveLength(1);
   });
