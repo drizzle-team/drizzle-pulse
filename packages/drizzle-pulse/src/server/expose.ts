@@ -889,8 +889,17 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     // Normalize the raw WAL row to JS types once with Drizzle's codecs, then feed that
     // single representation to BOTH the events-table insert (normal Drizzle mapping, no
     // raw ::type cast) and the tap.
-    const normalizedRowData = metadata.normalizeRow(event.rowData);
     const normalizedOldRowData = event.oldRowData ? metadata.normalizeRow(event.oldRowData) : null;
+    // pgoutput omits an UPDATE's unchanged TOASTed columns from the new tuple entirely; without
+    // REPLICA IDENTITY FULL backfilling those keys from the old tuple, the column would go
+    // missing from normalizedRowData and PulseMergeCore.applyEvents (which replaces the stored
+    // row wholesale) would drop a previously-known large value from collection state. Insert has
+    // no old row (spreading null is a no-op) and delete's rowData is deliberately empty for the
+    // tap's dedup-by-absence contract (see tap-events.ts), so this only applies to updates.
+    const normalizedRowData =
+      event.operation === 'update' && normalizedOldRowData
+        ? { ...normalizedOldRowData, ...metadata.normalizeRow(event.rowData) }
+        : metadata.normalizeRow(event.rowData);
 
     let snapshot: number;
     if (event.operation === 'insert') {
