@@ -96,35 +96,8 @@ export type PulseClientContract<TShapes extends Record<string, unknown>> = Simpl
     : never;
 }>;
 
-export function getQueryColumnKey(columns: Record<string, PgColumn>, targetColumn: PgColumn) {
-  for (const [queryKey, column] of Object.entries(columns)) {
-    if (column === targetColumn || column.name === targetColumn.name) {
-      return queryKey;
-    }
-  }
-
-  return null;
-}
-
-export function applyColumnFilter(
-  row: Record<string, unknown>,
-  selectedColumns: Record<string, PgColumn>,
-) {
-  const keys = Object.keys(selectedColumns);
-  if (keys.length === 0) return row;
-  const result: Record<string, unknown> & { $pk?: unknown } = {};
-
-  if ('$pk' in row) {
-    const rowWithPk = row as WithPk<typeof row>;
-    result.$pk = rowWithPk.$pk;
-  }
-
-  for (const [k, v] of Object.entries(row)) {
-    if (k === '$pk') continue;
-    if (k in selectedColumns) {
-      result[k] = v;
-    }
-  }
-
-  return result;
-}
+// Relocated to shared/column-filter.ts (value-pure, no drizzle-orm/pg-core value imports) so
+// the embedded client entrypoint can value-import them without dragging in server/ modules.
+// Re-exported here so existing server import paths (pulse-sql.ts, sdk.ts, index.ts) keep
+// resolving unchanged.
+export { applyColumnFilter, getQueryColumnKey } from '../shared/column-filter.js';
