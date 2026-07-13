@@ -17,8 +17,9 @@ import {
   teardownTestSuiteForFixture,
 } from './helpers/test-harness.js';
 
-// Push-driven updates flow through query.poll() (async), so state converges a scheduling
-// beat after processDbOperations resolves — poll for it rather than assert synchronously.
+// Change delivery is tap-direct (WAL listener -> in-process WalEventEmitter -> merge core),
+// not a poll — state converges a scheduling beat after processDbOperations resolves because
+// the tap payload still has to flow through pgoutput, so poll for it rather than assert sync.
 async function waitFor(
   predicate: () => boolean,
   timeoutMs = 2000,
@@ -31,8 +32,19 @@ async function waitFor(
   }
 }
 
+// pg wire LSN form is "hex/hex" (e.g. "0/16B2D30") — assert the shape without importing the
+// library's own shared/lsn.ts, so this test stays independent of the implementation it proves.
+const LSN_PATTERN = /^[0-9A-Fa-f]+\/[0-9A-Fa-f]+$/;
+
+function parseLsnForAssertions(lsn: string): bigint {
+  const [hi, lo] = lsn.split('/');
+  return (BigInt(`0x${hi}`) << 32n) | BigInt(`0x${lo}`);
+}
+
 // ---------------------------------------------------------------------------
-// Main suite — facade behavior over the direct transport.
+// Main suite — collections fed tap-direct (WAL listener -> in-process
+// WalEventEmitter -> baseline/watermark handshake -> PulseMergeCore). No
+// events-table reads, no HTTP wire protocol anywhere in this path.
 // ---------------------------------------------------------------------------
 
 describe('Embedded Collection', () => {
@@ -48,9 +60,14 @@ describe('Embedded Collection', () => {
     .args(fixture.schemas.ordersByStatusArgs)
     .order('asc')
     .query((ctx) => ctx.query({ status: ctx.args.status }));
-  // ordersByStatusLimited (a `.limit()` query) is gone: embedded collections now reject
-  // `.limit()` at creation (SPLIT-02) — the loadMore() coverage it fed is obsolete.
-  const registry = createPulseRegistry({ ordersByStatus });
+  // Kept solely to prove the SPLIT-02 rejection below — embedded collections must reject
+  // `.limit()` at creation, so the registry needs one such query on hand.
+  const ordersByStatusLimited = pulse(orders)
+    .args(fixture.schemas.ordersByStatusArgs)
+    .order('asc')
+    .limit(2)
+    .query((ctx) => ctx.query({ status: ctx.args.status }));
+  const registry = createPulseRegistry({ ordersByStatus, ordersByStatusLimited });
 
   beforeAll(async () => {
     const setup = await setupTestSuiteForFixture(fixture, registry);
@@ -70,7 +87,7 @@ describe('Embedded Collection', () => {
   });
 
   // A row committed while the collection is being created appears exactly once — the
-  // baseline SELECT and the catch-up/live pull dedupe by $pk.
+  // baseline SELECT and the buffered tap payloads dedupe by $pk against the read watermark.
   test('a concurrently-inserted row appears exactly once in list()', async () => {
     await processDbOperations([
       db
@@ -99,8 +116,9 @@ describe('Embedded Collection', () => {
     collection.dispose();
   });
 
-  // Insert into the source table → onChange fires (through the WAL signal → poll), with no
-  // polling interval anywhere. Covers insert/update/delete op shapes and state === list().
+  // Insert into the source table -> onChange fires straight off the WAL tap, with no polling
+  // interval anywhere. Covers insert/update/delete op shapes, state === list(), and the lsn
+  // token every change now carries in place of the old events-table snapshot serial.
   test('push-shaped INSERT/UPDATE/DELETE reach onChange without any interval', async () => {
     const client = createPulseClient(runtime);
     const collection = await client.ordersByStatus({ status: 'accepted' });
@@ -119,10 +137,11 @@ describe('Embedded Collection', () => {
 
     await waitFor(() => changes.length === 1);
     expect(changes[0]!.events[0]!.op).toBe('insert');
+    expect(changes[0]!.lsn).toMatch(LSN_PATTERN);
     expect(changes[0]!.state).toBe(collection.list());
     expect(collection.list()).toHaveLength(1);
 
-    // UPDATE out of filter (accepted → completed): matchesOld=true, matchesNew=false
+    // UPDATE out of filter (accepted -> completed): matchesOld=true, matchesNew=false
     await processDbOperations([
       db.update(orders).set({ status: 'completed' }).where(eq(orders.id, inserted!.id)),
     ]);
@@ -132,6 +151,7 @@ describe('Embedded Collection', () => {
     expect(updateEvt.op).toBe('update');
     expect(updateEvt.matchesOld).toBe(true);
     expect(updateEvt.matchesNew).toBe(false);
+    expect(changes[1]!.lsn).toMatch(LSN_PATTERN);
     expect(collection.list()).toHaveLength(0);
     expect(changes[1]!.state).toBe(collection.list());
 
@@ -146,16 +166,93 @@ describe('Embedded Collection', () => {
 
     await waitFor(() => changes.length === 3);
     expect(changes[2]!.events[0]!.op).toBe('insert');
+    expect(changes[2]!.lsn).toMatch(LSN_PATTERN);
     expect(collection.list()).toHaveLength(1);
 
     await processDbOperations([db.delete(orders).where(eq(orders.id, toDelete!.id))]);
 
     await waitFor(() => changes.length === 4);
     expect(changes[3]!.events[0]!.op).toBe('delete');
+    expect(changes[3]!.lsn).toMatch(LSN_PATTERN);
     expect(collection.list()).toHaveLength(0);
     expect(changes[3]!.state).toBe(collection.list());
 
+    // lsn is non-decreasing across sequential commits (compareLsn semantics, checked locally
+    // rather than importing the library's own comparator).
+    for (let i = 1; i < changes.length; i += 1) {
+      expect(parseLsnForAssertions(changes[i]!.lsn) >= parseLsnForAssertions(changes[i - 1]!.lsn)).toBe(
+        true,
+      );
+    }
+
     collection.dispose();
+  });
+
+  // Assumption A3: every event produced by one multi-row transaction must carry the same
+  // commit lsn — asserted here against the real pgoutput pipeline, not just unit-mocked.
+  test('a single-transaction multi-row insert delivers same-lsn changes', async () => {
+    const client = createPulseClient(runtime);
+    const collection = await client.ordersByStatus({ status: 'accepted' });
+
+    const changes: Array<{ lsn: string }> = [];
+    collection.onChange((c) => changes.push(c));
+
+    await processDbOperations([
+      db.insert(orders).values([
+        { driverId: 1, pickup: 'TxA', dropoff: 'TxA', price: 10, status: 'accepted' },
+        { driverId: 1, pickup: 'TxB', dropoff: 'TxB', price: 20, status: 'accepted' },
+      ]),
+    ]);
+
+    await waitFor(() => collection.list().length === 2);
+    expect(changes.length).toBeGreaterThanOrEqual(2);
+
+    for (const change of changes) {
+      expect(change.lsn).toMatch(LSN_PATTERN);
+    }
+    expect(changes[0]!.lsn).toBe(changes[1]!.lsn);
+
+    collection.dispose();
+  });
+
+  // onChange's unsubscribe function must actually detach — no further callbacks after calling it.
+  test('onChange returns a working unsubscribe', async () => {
+    const client = createPulseClient(runtime);
+    const collection = await client.ordersByStatus({ status: 'accepted' });
+
+    let callCount = 0;
+    const unsubscribe = collection.onChange(() => {
+      callCount += 1;
+    });
+
+    await processDbOperations([
+      db
+        .insert(orders)
+        .values({ driverId: 1, pickup: 'U1', dropoff: 'U1', price: 10, status: 'accepted' }),
+    ]);
+    await waitFor(() => collection.list().length === 1);
+    expect(callCount).toBe(1);
+
+    unsubscribe();
+
+    await processDbOperations([
+      db
+        .insert(orders)
+        .values({ driverId: 1, pickup: 'U2', dropoff: 'U2', price: 20, status: 'accepted' }),
+    ]);
+    await waitFor(() => collection.list().length === 2);
+    expect(callCount).toBe(1); // detached listener saw nothing further
+
+    collection.dispose();
+  });
+
+  // SPLIT-02: the registry keeps a `.limit(2)` query definition precisely so this rejection
+  // is exercised against a real runtime, not just unit-mocked.
+  test('embedded collections reject .limit() queries at creation', async () => {
+    const client = createPulseClient(runtime);
+    await expect(client.ordersByStatusLimited({ status: 'accepted' })).rejects.toThrow(
+      /\.limit\(\)/,
+    );
   });
 });
 
@@ -203,23 +300,24 @@ describe('Embedded Collection lifecycle', () => {
     });
 
     // runtime.stop() broadcasts onStop; each collection wires it to dispose(), which
-    // synchronously detaches its WAL signal and destroys the query.
+    // synchronously unsubscribes from the WAL tap and tears down the merge core.
     await lcRuntime.stop();
 
     // dispose() must be idempotent — no throw on repeated calls
     expect(() => collection.dispose()).not.toThrow();
     expect(() => collection.dispose()).not.toThrow();
 
-    // The signal was detached by dispose(); no onChange fired during stop
+    // The tap subscription was detached by dispose(); no onChange fired during stop
     expect(firedAfterStop).toBe(false);
   });
 });
 
 // ---------------------------------------------------------------------------
-// Exotic-type coverage: the WAL → events-table → pull path must deliver every pg
-// data type in the same normalized JS shape a baseline SELECT produces. The raw
-// pgoutput WAL arrives as text; the server normalizes it with Drizzle's codecs
-// (see server/wal-normalization.ts) before persisting the event this pull reads.
+// Exotic-type coverage: the WAL tap must deliver every pg data type in the same
+// normalized JS shape a baseline SELECT produces. The raw pgoutput WAL arrives as
+// text; the server normalizes it with Drizzle's codecs (see server/wal-normalization.ts)
+// before the tap payload reaches the embedded client — this suite proves that
+// normalization survives the tap-direct path end to end.
 // ---------------------------------------------------------------------------
 
 describe('Embedded Collection — PG Data Types (WAL normalization)', () => {

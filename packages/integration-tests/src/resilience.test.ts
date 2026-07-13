@@ -32,12 +32,16 @@ async function waitFor(
   }
 }
 
+const LSN_PATTERN = /^[0-9A-Fa-f]+\/[0-9A-Fa-f]+$/;
+
 // ---------------------------------------------------------------------------
 // Resilience suite — isolated variantName so its runtime/database is
 // independent of the embedded-collection and lifecycle suites.
 //
-// The bespoke rebaseline/debounce engine is gone: reconnect now just nudges the
-// collection's PulseQuery to poll, catching up through the one pull pipeline.
+// A WAL reconnect edge re-runs the same watermark/baseline handshake collections use on
+// initial load (see client/embedded/index.ts runHandshake): re-select the baseline, read a
+// fresh watermark, rebuild the merge core, then drain buffered tap payloads at-or-above it.
+// No events-table read, no poll — the collection is fed straight off runtime.onReconnect.
 // ---------------------------------------------------------------------------
 
 describe('Resilience', () => {
@@ -72,11 +76,15 @@ describe('Resilience', () => {
     await insertTestUser(db, `driver_${randomUUID().slice(0, 8)}`);
   });
 
-  // A reconnect edge triggers a catch-up poll, and the live collection keeps
-  // reflecting DB state before and after the edge — through the single pipeline.
-  test('reconnect edge triggers a catch-up poll and the collection stays consistent', async () => {
+  // A reconnect edge triggers a full re-baseline (watermark + baseline SELECT), and the live
+  // collection keeps reflecting DB state before and after the edge — through the same
+  // handshake the initial load uses, not a pull.
+  test('reconnect edge triggers a re-baseline and the collection stays consistent', async () => {
     const client = createPulseClient(runtime);
     const collection = await client.ordersByStatus({ status: 'accepted' });
+
+    const changes: Array<{ events: readonly unknown[]; lsn: string }> = [];
+    collection.onChange((c) => changes.push(c));
 
     await processDbOperations([
       db
@@ -88,11 +96,20 @@ describe('Resilience', () => {
     ]);
 
     await waitFor(() => collection.list().length === 2, 2000);
+    const changesBeforeReconnect = changes.length;
 
     // Simulate a WAL reconnect: the runtime broadcasts the reconnect edge, which the
-    // collection wires to query.poll(). State must stay consistent (no loss, no dup).
+    // collection wires to a re-baseline handshake. State must stay consistent (no loss, no
+    // dup), and the re-baseline itself fires onChange with an empty event batch and the
+    // fresh watermark lsn — a plain re-render carrying the new checkpoint, no delta.
     (runtime as any).onReplicationStart();
-    await waitFor(() => collection.list().length === 2, 2000);
+    await waitFor(() => changes.length === changesBeforeReconnect + 1, 2000);
+
+    const rebaselineChange = changes[changesBeforeReconnect]!;
+    expect(rebaselineChange.events).toEqual([]);
+    expect(rebaselineChange.lsn).toMatch(LSN_PATTERN);
+
+    expect(collection.list().length).toBe(2);
     expect(new Set(collection.list().map((r) => r.id)).size).toBe(2);
 
     // The pipeline keeps delivering after the reconnect edge.
