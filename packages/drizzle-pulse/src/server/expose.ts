@@ -42,7 +42,9 @@ export type ExposeConfig = {
   databaseUrl: string;
   /**
    * The app's own drizzle connection; baseline and query reads run on it to keep its session
-   * context (RLS, search_path).
+   * context (RLS, search_path) — except the post-reconnect re-baseline pin, which reads on the
+   * admin connection (see `readCollectionBaseline`'s pin-path note). Row scoping there relies on
+   * the resolve-time auth-scoped WHERE, not on sourceDb-session RLS.
    */
   sourceDb: PulseSourceDb;
   /**
@@ -422,6 +424,10 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
    * exported-snapshot connection instead — same visibility class as the WAL stream itself, so the
    * recreate boundary is gapless by construction and closes the residual race above. A collection
    * materialized after the pin's window closes falls through to the ordinary path.
+   *
+   * Note: the pin's connection is checked out of the admin pool (`databaseUrl`), not the app's
+   * `sourceDb` session — so this path does not carry sourceDb's session context (RLS, search_path).
+   * The resolve-time auth-scoped WHERE is what enforces row scoping here, not RLS.
    */
   async readCollectionBaseline(
     resolved: ResolvedPulseQuery,
