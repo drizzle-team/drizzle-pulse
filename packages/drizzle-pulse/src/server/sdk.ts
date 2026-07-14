@@ -26,8 +26,8 @@ import type { AnyPulseBuilders, PulseRegistry } from './pulse-registry.js';
 import { applyResponsePipeline } from './pulse-registry.js';
 import type { PulseSourceDb } from './pulse-sql.js';
 import { buildSelectQuery } from './pulse-sql.js';
-import { getQueryColumnKey } from './pulse-types.js';
 import type { PulseStore } from './pulse-store.js';
+import { getQueryColumnKey } from './pulse-types.js';
 
 // Hard cap on events a single pull may replay; overflow falls back to a full reset instead
 // of streaming an unbounded batch. Overridable via ExposeConfig.pull.eventLimit.

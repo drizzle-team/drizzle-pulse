@@ -65,7 +65,9 @@ if (missingEntrypointFiles.length > 0) {
   );
 }
 
-const depFields = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'];
+// devDependencies never install for consumers and bun resolves catalog: at publish time,
+// so devDependencies.drizzle-orm=catalog: is a false positive for the shipped artifact.
+const depFields = ['dependencies', 'peerDependencies', 'optionalDependencies'];
 const catalogOrWorkspaceLeaks = [];
 for (const field of depFields) {
   const deps = manifest[field];

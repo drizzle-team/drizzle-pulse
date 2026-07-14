@@ -35,6 +35,7 @@ export type { AnyPulseBuilder, AnyPulseBuilders as AnyQueries } from './pulse-re
 // Registry
 export { createPulseRegistry, PulseRegistry } from './pulse-registry.js';
 export { buildSelectQuery } from './pulse-sql.js';
+export { PulseStore } from './pulse-store.js';
 // Pulse types (public API surface)
 export type {
   ApplyColumns,
@@ -47,5 +48,4 @@ export type {
   WithPk,
 } from './pulse-types.js';
 export { applyColumnFilter } from './pulse-types.js';
-export { PulseStore } from './pulse-store.js';
 export { serializeResponse } from './superjson-utils.js';

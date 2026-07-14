@@ -25,9 +25,9 @@ import {
   vector,
 } from 'drizzle-orm/pg-core';
 import {
+  buildEventsTable,
   DEFAULT_EVENTS_SCHEMA,
   getEventsTableName,
-  buildEventsTable,
 } from '../server/events-table-resolver.js';
 
 const moodEnum = pgEnum('resolver_test_mood', ['sad', 'ok', 'happy']);

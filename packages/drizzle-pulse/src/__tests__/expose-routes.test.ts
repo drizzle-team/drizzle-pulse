@@ -6,11 +6,11 @@ import { z } from 'zod';
 import { pulse } from '../pulse-table.js';
 import { buildEventsTable } from '../server/events-table-resolver.js';
 import { expose } from '../server/expose.js';
-import { PulseRequestHandler } from '../server/sdk.js';
 import type { AnyPulseBuilders, PulseRegistry } from '../server/pulse-registry.js';
 import { createPulseRegistry } from '../server/pulse-registry.js';
 import type { PulseStore } from '../server/pulse-store.js';
 import { createPulseRouter } from '../server/router.js';
+import { PulseRequestHandler } from '../server/sdk.js';
 import type {
   LoadMoreResponse,
   PullResponse,

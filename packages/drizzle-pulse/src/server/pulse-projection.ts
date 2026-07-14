@@ -1,5 +1,5 @@
-import type { ResolvedPulseQuery } from '../types.js';
 import { applyProjectionPipeline } from '../shared/projection.js';
+import type { ResolvedPulseQuery } from '../types.js';
 
 // Relocated to shared/projection.ts (value-pure, no drizzle-orm/pg-core imports) so the
 // embedded client entrypoint can value-import them without dragging in server/ modules.

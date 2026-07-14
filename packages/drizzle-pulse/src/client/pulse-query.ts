@@ -2,8 +2,8 @@ import { comparePkValues, isPkComparable } from '../shared/pk-utils.js';
 import type {
   LoadMoreResponse as ProtocolLoadMoreResponse,
   PullResponse as ProtocolPullResponse,
-  PullResponseErrorResult,
   SubscribeResponse as ProtocolSubscribeResponse,
+  PullResponseErrorResult,
   PullSubscriptionRequest,
 } from '../shared/protocol-types.js';
 import type { PulseEvent } from '../shared/pulse-events.js';

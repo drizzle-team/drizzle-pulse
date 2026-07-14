@@ -62,10 +62,12 @@ export function createShapeRowNormalizer(
       // same per-column codec key drizzle would have composed the xform from.
       const codec = codecBySqlName.get(name);
       const codecEntry = codec
-        ? (miniPgCodecs as Record<
-            string,
-            { normalize?: CodecNormalize; normalizeArray?: CodecNormalizeArray } | undefined
-          >)[codec]
+        ? (
+            miniPgCodecs as Record<
+              string,
+              { normalize?: CodecNormalize; normalizeArray?: CodecNormalizeArray } | undefined
+            >
+          )[codec]
         : undefined;
       const dimensions = dimensionsBySqlName.get(name) ?? 0;
       if (dimensions > 0 && codecEntry?.normalizeArray) {

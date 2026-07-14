@@ -5,9 +5,9 @@ import {
   createPool,
   lsnFromString,
   type Pool,
-  replication,
   type ReplicationConnection,
   type ReplicationEvent,
+  replication,
 } from 'minipg';
 import type { ResolvedPulseQuery } from '../types.js';
 import { emitEventsTableDdl } from './events-table-ddl.js';
@@ -16,8 +16,8 @@ import type { AnyPulseBuilders, PulseRegistry } from './pulse-registry.js';
 import { buildSelectQuery, type PulseSourceDb } from './pulse-sql.js';
 import { PulseStore } from './pulse-store.js';
 import { DEFAULT_PULL_EVENT_LIMIT, PulseRequestHandler } from './sdk.js';
-import { createShapeRowNormalizer } from './wal-shape-bridge.js';
 import { WalEventEmitter } from './wal-event-emitter.js';
+import { createShapeRowNormalizer } from './wal-shape-bridge.js';
 
 type RuntimeLifecycleListener = () => void;
 
@@ -1032,7 +1032,6 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         }
         if (ev.kind === 'commit') {
           await this.handleCommit(rep, ev);
-          continue;
         }
         // relation/truncate/message: ignored
       }
