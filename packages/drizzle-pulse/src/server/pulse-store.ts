@@ -2,23 +2,33 @@ import { getColumns, getTableUniqueName, sql } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { getTableConfig } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/postgres';
-import type { Pool } from 'minipg';
+import { createPool, type Connection, type Pool } from 'minipg';
 import type { PendingWalEvent } from './expose.js';
 
 type DbHandle = ReturnType<typeof drizzle>;
 type TxHandle = Parameters<Parameters<DbHandle['transaction']>[0]>[0];
 
 export class PulseStore {
+  private readonly pool: Pool;
   private readonly db: DbHandle;
   private readonly eventsSchema: string;
 
-  constructor(pool: Pool, eventsSchema: string) {
-    this.db = drizzle({ client: pool });
+  constructor(databaseUrl: string, eventsSchema: string) {
+    this.pool = createPool(databaseUrl);
+    this.db = drizzle({ client: this.pool });
     this.eventsSchema = eventsSchema;
   }
 
   getDb(): DbHandle {
     return this.db;
+  }
+
+  async end(): Promise<void> {
+    await this.pool.end();
+  }
+
+  checkout(): Promise<{ client: Connection; release: () => void }> {
+    return this.pool.connect();
   }
 
   private streamTableIdentifier() {

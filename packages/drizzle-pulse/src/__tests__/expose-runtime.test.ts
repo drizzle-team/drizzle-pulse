@@ -36,8 +36,8 @@ describe('start() failure rolls back to a restartable state', () => {
 
     let poolEnded = 0;
     runtime.initializeDatabaseServices();
-    const firstPool = runtime.pool;
-    firstPool.end = async () => {
+    const firstStore = runtime.store;
+    firstStore.end = async () => {
       poolEnded++;
     };
 
@@ -49,8 +49,7 @@ describe('start() failure rolls back to a restartable state', () => {
     await expect(runtime.start()).rejects.toThrow('sourceDb briefly unavailable');
 
     expect(runtime.isRunning).toBe(false);
-    expect(runtime.pool).toBeNull();
-    expect(runtime.pulseStore).toBeNull();
+    expect(runtime.store).toBeNull();
     expect(poolEnded).toBe(1);
 
     // A retry must not hit the "Already running" early return and silently no-op — it

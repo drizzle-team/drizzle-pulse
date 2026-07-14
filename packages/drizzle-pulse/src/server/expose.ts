@@ -2,9 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { desc, getColumns, getTableUniqueName, sql } from 'drizzle-orm';
 import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
 import {
-  createPool,
   lsnFromString,
-  type Pool,
   type ReplicationConnection,
   type ReplicationEvent,
   replication,
@@ -157,8 +155,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   // recreate). Handlers read it via getEpochForQuery to mint/validate cursor tokens.
   private eventsEpochs = new Map<string, string>();
 
-  private pool: Pool | null = null;
-  private pulseStore: PulseStore | null = null;
+  private store: PulseStore | null = null;
   private replication: ReplicationConnection | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   isRunning = false;
@@ -411,7 +408,9 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       await this.connectReplication();
     } catch (error) {
       this.isRunning = false;
-      await this.teardownFailedStart();
+      // Mirrors stop()'s pool teardown so a failed guard doesn't leak connections — callers
+      // await start() rejections and then discard the runtime.
+      await this.closePool();
       throw error;
     }
   }
@@ -447,33 +446,20 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     try {
       await this.reconcile();
     } finally {
-      await this.teardownFailedStart();
+      await this.closePool();
     }
   }
 
   private initializeDatabaseServices(): void {
-    if (this.pool && this.pulseStore) {
-      return;
-    }
-
-    const pool = createPool(this.config.databaseUrl);
-    this.pool = pool;
-    this.pulseStore = new PulseStore(pool, this.eventsSchema);
-  }
-
-  // Mirrors stop()'s pool teardown so a failed guard doesn't leak connections — callers await
-  // start() rejections and then discard the runtime.
-  private async teardownFailedStart(): Promise<void> {
-    await this.closePool();
+    this.store ??= new PulseStore(this.config.databaseUrl, this.eventsSchema);
   }
 
   private async closePool(): Promise<void> {
-    const pool = this.pool;
-    this.pool = null;
-    this.pulseStore = null;
+    const store = this.store;
+    this.store = null;
 
-    if (pool) {
-      await pool.end();
+    if (store) {
+      await store.end();
     }
   }
 
@@ -1260,11 +1246,11 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   }
 
   private getPulseStore(): PulseStore {
-    if (!this.pulseStore) {
+    if (!this.store) {
       throw new Error('PulseStore has not been initialized');
     }
 
-    return this.pulseStore;
+    return this.store;
   }
 
   private logInfo(message: string, ...args: unknown[]): void {
