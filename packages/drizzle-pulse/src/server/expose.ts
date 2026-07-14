@@ -1043,6 +1043,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     }
 
     if (this.replication !== rep) return; // superseded; the old connection's stream ended cleanly
+    this.logInfo(`[WAL Listener] Stream for slot '${this.slotName}' ended cleanly; reconnecting`);
+    await this.handleDisconnect(rep);
   }
 
   private bufferWalEvent(
