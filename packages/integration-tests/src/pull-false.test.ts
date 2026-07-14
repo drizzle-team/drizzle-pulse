@@ -235,4 +235,72 @@ describe('pull: false — embedded-only runtime writes nothing to events tables 
       await teardownScenario(s);
     }
   });
+
+  test('mid-run reconnect (G4): walsender kill re-converges a live embedded collection on a fresh temporary slot', async () => {
+    const s = await setupPullFalseScenario('reconnect');
+    let terminalError: Error | null = null;
+    s.runtime.onTerminalError((error) => {
+      terminalError = error;
+    });
+
+    try {
+      await s.runtime.start();
+
+      const client = createPulseClient(s.runtime);
+      const collection = await client.ordersByStatus({ status: 'accepted' });
+
+      await s.pool.query(
+        `INSERT INTO "orders" (driver_id, status, price) VALUES (1, 'accepted', 10)`,
+      );
+      await waitFor(() => collection.list().length === 1);
+
+      // Locate the active temp slot (D-01: randomized-suffix, never the base slotName) and its
+      // walsender backend.
+      const before = await s.pool.query<{ slot_name: string; active_pid: number | null }>(
+        `SELECT slot_name, active_pid FROM pg_replication_slots WHERE slot_name LIKE $1`,
+        [`${s.slotName}\\_%`],
+      );
+      expect(before.rows).toHaveLength(1);
+      const killedSlotName = before.rows[0]?.slot_name;
+      const activePid = before.rows[0]?.active_pid;
+      expect(activePid).not.toBeNull();
+
+      // Terminate only — do NOT drop. The temporary slot vanishes with its backend once the
+      // reconnect creates a fresh one (D-01); dropping it ourselves would be redundant and could
+      // race the server's own cleanup.
+      await s.pool.query(`SELECT pg_terminate_backend($1)`, [activePid]);
+
+      // Downtime write while disconnected, before the reconnect lands.
+      await s.pool.query(
+        `INSERT INTO "orders" (driver_id, status, price) VALUES (2, 'accepted', 20)`,
+      );
+
+      // First reconnect lands ~1-2s after the edge (RECONNECT_BASE_DELAY_MS * 2^0 + jitter).
+      await waitFor(async () => {
+        const { rows } = await s.pool.query<{ slot_name: string }>(
+          `SELECT slot_name FROM pg_replication_slots WHERE slot_name LIKE $1`,
+          [`${s.slotName}\\_%`],
+        );
+        return rows.length > 0 && rows[0]?.slot_name !== killedSlotName;
+      }, 10000);
+
+      // Gapless re-baseline: both orders present, including the downtime row — proving the
+      // re-baseline pin anchored at the fresh slot's exported snapshot, not just a resumed
+      // stream.
+      await waitFor(() => collection.list().length === 2, 10000);
+      expect(new Set(collection.list().map((row) => row.driverId))).toEqual(new Set([1, 2]));
+
+      expect(terminalError).toBeNull();
+
+      // Post-recovery liveness: the pipeline keeps delivering after the reconnect settles.
+      await s.pool.query(
+        `INSERT INTO "orders" (driver_id, status, price) VALUES (3, 'accepted', 30)`,
+      );
+      await waitFor(() => collection.list().length === 3);
+
+      collection.dispose();
+    } finally {
+      await teardownScenario(s);
+    }
+  });
 });
