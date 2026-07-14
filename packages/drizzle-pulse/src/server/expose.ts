@@ -267,6 +267,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       (queryName: string) => this.getEpochForQuery(queryName),
       (typeof this.config.pull === 'object' ? this.config.pull.eventLimit : undefined) ??
         DEFAULT_PULL_EVENT_LIMIT,
+      (message: string, ...args: unknown[]) => this.logError(message, ...args),
     );
   }
 

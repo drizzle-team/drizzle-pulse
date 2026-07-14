@@ -83,6 +83,9 @@ export class PulseRequestHandler {
     private readonly getEventsTable: (queryName: string) => PgTable,
     private readonly getEpoch: (queryName: string) => string | undefined,
     private readonly pullEventLimit: number = DEFAULT_PULL_EVENT_LIMIT,
+    // Routes handler-level 500s through the runtime's LogLevel gating (defaults to raw
+    // console.error for callers — mock harnesses, tests — that don't wire a runtime).
+    private readonly logError: (message: string, ...args: unknown[]) => void = console.error,
   ) {}
 
   async subscribe(
@@ -146,7 +149,7 @@ export class PulseRequestHandler {
 
       return { status: 200, body: response };
     } catch (error) {
-      console.error('Error handling subscribe request:', error);
+      this.logError('Error handling subscribe request:', error);
       return { status: 500, body: { error: 'server_error' } };
     }
   }
@@ -248,7 +251,7 @@ export class PulseRequestHandler {
       };
       return { status: 200, body: response };
     } catch (error) {
-      console.error('Error handling loadMore request:', error);
+      this.logError('Error handling loadMore request:', error);
       return { status: 500, body: { error: 'server_error' } };
     }
   }
@@ -329,7 +332,7 @@ export class PulseRequestHandler {
 
       return { status: 200, body: { results } };
     } catch (error) {
-      console.error('Error handling pull request:', error);
+      this.logError('Error handling pull request:', error);
       return { status: 500, body: { error: 'server_error' } };
     }
   }
