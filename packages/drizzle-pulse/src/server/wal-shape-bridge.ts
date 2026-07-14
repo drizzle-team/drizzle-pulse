@@ -6,6 +6,7 @@ import { Shape } from 'minipg';
 
 type ShapeCol = ReturnType<typeof Shape>['$cols'][number];
 type CodecNormalize = (value: unknown) => unknown;
+type CodecNormalizeArray = (value: string, dimensions: number) => unknown;
 
 // Ported verbatim from shape-fidelity.spike.test.ts's buildCandidateDecoder (SPIKE-02,
 // zero-divergence across the pg_data_types matrix). Replaces wal-normalization.ts's
@@ -30,6 +31,16 @@ export function createShapeRowNormalizer(
       (column as { codec?: string }).codec,
     ]),
   );
+  // .array() dimension count (0 for a plain scalar column) — replication never wire-decodes
+  // array columns the way it does the 9 basic scalar OIDs, so every array value (even of an
+  // otherwise natively-decoded element type) arrives as raw '{...}' text and needs the
+  // codec's array-aware parse+normalize below, not the scalar xform/normalize fallback.
+  const dimensionsBySqlName = new Map<string, number>(
+    Object.values(columns).map((column) => [
+      (column as Column).name,
+      (column as { dimensions?: number }).dimensions ?? 0,
+    ]),
+  );
 
   return (row) => {
     const out: Record<string, unknown> = {};
@@ -50,11 +61,18 @@ export function createShapeRowNormalizer(
       // produced the final shape (true for query results, not replication) — fall back to the
       // same per-column codec key drizzle would have composed the xform from.
       const codec = codecBySqlName.get(name);
-      const normalize = codec
-        ? (miniPgCodecs as Record<string, { normalize?: CodecNormalize } | undefined>)[codec]
-            ?.normalize
+      const codecEntry = codec
+        ? (miniPgCodecs as Record<
+            string,
+            { normalize?: CodecNormalize; normalizeArray?: CodecNormalizeArray } | undefined
+          >)[codec]
         : undefined;
-      out[name] = normalize ? normalize(value) : value;
+      const dimensions = dimensionsBySqlName.get(name) ?? 0;
+      if (dimensions > 0 && codecEntry?.normalizeArray) {
+        out[name] = codecEntry.normalizeArray(value, dimensions);
+        continue;
+      }
+      out[name] = codecEntry?.normalize ? codecEntry.normalize(value) : value;
     }
     return out;
   };

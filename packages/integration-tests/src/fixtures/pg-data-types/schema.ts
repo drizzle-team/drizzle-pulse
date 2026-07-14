@@ -95,4 +95,8 @@ export const pgDataTypes = pgTable('pg_data_types', {
   sparsevecCol: sparsevec('sparsevec_col', { dimensions: 3 }),
   bitCol: bit('bit_col', { dimensions: 8 }),
   moodCol: moodEnum('mood_col'),
+  // WR-01: plain array columns have no per-column codec override (unlike vector/point/etc.),
+  // so they exercise the shape bridge's array-decode fallback rather than an xform.
+  textArrayCol: text('text_array_col').array(),
+  intArrayCol: integer('int_array_col').array(),
 });

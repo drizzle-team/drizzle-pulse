@@ -55,4 +55,6 @@ export const pgDataTypeInsertValues = {
   sparsevecCol: '{1:1,3:2}/3',
   bitCol: '10101010',
   moodCol: 'happy',
+  textArrayCol: ['alpha', 'beta', 'gamma'],
+  intArrayCol: [1, 2, 3],
 } satisfies typeof pgDataTypes.$inferInsert;
