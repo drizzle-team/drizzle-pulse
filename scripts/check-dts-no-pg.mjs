@@ -10,7 +10,7 @@ const scanDir = process.argv[2] ? resolve(process.argv[2]) : defaultScanDir;
 // attw's esm-only profile is blind to external dep types (v1.2 CR-01), so this grep
 // over the emitted .d.ts files is the real gate for a @types/pg leak into the public API.
 const leakPattern =
-  /from\s+['"]pg['"]|@types\/pg|pg-logical-replication|node_modules\/pg(?:['"/]|$)/;
+  /from\s+['"]pg['"]|import\(\s*['"]pg['"]\s*\)|@types\/pg|pg-logical-replication|node_modules\/pg(?:['"/]|$)/;
 
 function collectDtsFiles(dir) {
   const files = [];
@@ -28,6 +28,11 @@ function collectDtsFiles(dir) {
 
 const errors = [];
 const dtsFiles = collectDtsFiles(scanDir);
+
+if (dtsFiles.length === 0) {
+  console.error(`check-dts-no-pg: FAILED — no .d.ts files found under ${scanDir}`);
+  process.exit(1);
+}
 
 for (const file of dtsFiles) {
   const lines = readFileSync(file, 'utf8').split('\n');

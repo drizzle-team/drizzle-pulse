@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -83,6 +83,20 @@ for (const field of depFields) {
 }
 if (catalogOrWorkspaceLeaks.length > 0) {
   errors.push(`catalog:/workspace: leaks in manifest: ${catalogOrWorkspaceLeaks.join(', ')}`);
+}
+
+// Catches stale compiled output from since-deleted src files (a bare `tsc` prepack
+// doesn't clean dist/, so deleted modules can keep shipping — see WR-01).
+const orphanedDistFiles = [];
+for (const path of packedPaths) {
+  if (!path.startsWith('dist/') || !path.endsWith('.js')) continue;
+  const srcPath = join(packageDir, `src/${path.slice('dist/'.length, -'.js'.length)}.ts`);
+  if (!existsSync(srcPath)) {
+    orphanedDistFiles.push(path);
+  }
+}
+if (orphanedDistFiles.length > 0) {
+  errors.push(`Packed dist files with no corresponding src file: ${orphanedDistFiles.join(', ')}`);
 }
 
 if (errors.length > 0) {

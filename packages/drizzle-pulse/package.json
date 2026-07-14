@@ -63,7 +63,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "prepack": "tsc",
+    "prepack": "rm -rf dist && tsc",
     "typecheck": "tsc --noEmit && tsc --noEmit --project src/__tests__/tsconfig.json",
     "test": "bun test",
     "test:types": "tsc --noEmit --project type-tests/tsconfig.json",
