@@ -26,13 +26,7 @@ if (untoleratedErrors.length > 0) {
   process.exit(1);
 }
 
-const toleratedErrors = errors.filter(isToleratedMinipgFileError);
 console.log('publint-allow-minipg-file: PASSED');
-if (toleratedErrors.length > 0) {
-  console.log(
-    `Tolerated exception (PUB-01/D-06 — minipg is not publicly installable; swap to a semver range once minipg publishes):`,
-  );
-  for (const message of toleratedErrors) {
-    console.log(`- ${formatMessage(message, pkg, { color: false })}`);
-  }
+for (const message of errors) {
+  console.log(`- tolerated (PUB-01/D-06): ${formatMessage(message, pkg, { color: false })}`);
 }

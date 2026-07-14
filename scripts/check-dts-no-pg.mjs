@@ -1,52 +1,31 @@
 #!/usr/bin/env node
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
-const defaultScanDir = join(scriptDir, '..', 'packages', 'drizzle-pulse', 'dist');
-const scanDir = process.argv[2] ? resolve(process.argv[2]) : defaultScanDir;
+const scanDir = join(scriptDir, '..', 'packages', 'drizzle-pulse', 'dist');
 
 // attw's esm-only profile is blind to external dep types (v1.2 CR-01), so this grep
 // over the emitted .d.ts files is the real gate for a @types/pg leak into the public API.
 const leakPattern =
-  /from\s+['"]pg['"]|import\(\s*['"]pg['"]\s*\)|@types\/pg|pg-logical-replication|node_modules\/pg(?:['"/]|$)/;
+  /from\s+['"]pg['"]|import\(\s*['"]pg['"]\s*\)|@types\/pg|pg-logical-replication|node_modules\/pg(?:['"/]|$)/m;
 
-function collectDtsFiles(dir) {
-  const files = [];
-  for (const entry of readdirSync(dir)) {
-    const fullPath = join(dir, entry);
-    const stats = statSync(fullPath);
-    if (stats.isDirectory()) {
-      files.push(...collectDtsFiles(fullPath));
-    } else if (entry.endsWith('.d.ts')) {
-      files.push(fullPath);
-    }
-  }
-  return files;
-}
-
-const errors = [];
-const dtsFiles = collectDtsFiles(scanDir);
+const dtsFiles = readdirSync(scanDir, { recursive: true })
+  .filter((entry) => entry.endsWith('.d.ts'))
+  .map((entry) => join(scanDir, entry));
 
 if (dtsFiles.length === 0) {
   console.error(`check-dts-no-pg: FAILED — no .d.ts files found under ${scanDir}`);
   process.exit(1);
 }
 
-for (const file of dtsFiles) {
-  const lines = readFileSync(file, 'utf8').split('\n');
-  lines.forEach((line, index) => {
-    if (leakPattern.test(line)) {
-      errors.push(`${file}:${index + 1}: ${line.trim()}`);
-    }
-  });
-}
+const leakingFiles = dtsFiles.filter((file) => leakPattern.test(readFileSync(file, 'utf8')));
 
-if (errors.length > 0) {
+if (leakingFiles.length > 0) {
   console.error('check-dts-no-pg: FAILED');
-  for (const error of errors) {
-    console.error(`- ${error}`);
+  for (const file of leakingFiles) {
+    console.error(`- ${file}`);
   }
   process.exit(1);
 }
