@@ -1108,7 +1108,11 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     const oldPk = oldRow?.[metadata.pkColumnName];
     const pkChanged =
       oldPk !== pkValue &&
-      !(oldPk instanceof Date && pkValue instanceof Date && oldPk.getTime() === pkValue.getTime()) &&
+      !(
+        oldPk instanceof Date &&
+        pkValue instanceof Date &&
+        oldPk.getTime() === pkValue.getTime()
+      ) &&
       !(Buffer.isBuffer(oldPk) && Buffer.isBuffer(pkValue) && oldPk.equals(pkValue));
     if (ev.kind === 'update' && oldPk != null && pkChanged) {
       // pk-changing UPDATE (BUG-02): a single update entry keyed by the new pk leaves every

@@ -76,7 +76,10 @@ export function startWalProxy(targetHost: string, targetPort: number) {
         }
         // Bail out past any sane StartupMessage size so a malformed/non-startup lead-in can't
         // grow this buffer unboundedly.
-        if ((startupLength !== null && startupBytesSeen >= startupLength) || startupBytesSeen > 65536) {
+        if (
+          (startupLength !== null && startupBytesSeen >= startupLength) ||
+          startupBytesSeen > 65536
+        ) {
           classified = true;
           if (startup.includes('replication')) {
             activeClient = client;
