@@ -765,7 +765,9 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         });
 
         const round = everConnected
-          ? Promise.allSettled([...this.reconnectListeners].map((listener) => listener(this.pin)))
+          ? Promise.allSettled(
+              [...this.reconnectListeners].map(async (listener) => listener(this.pin)),
+            )
           : Promise.resolve([]);
         if (this.pin) this.pin.round = round;
         void round.then(() => this.releasePin());
