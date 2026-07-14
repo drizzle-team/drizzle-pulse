@@ -114,6 +114,17 @@ type SnapshotBaseline = {
   txDone: Promise<void>;
 };
 
+// drizzle-orm's postgres executor wraps every driver error in a DrizzleQueryError, which does
+// not forward the underlying PgError's `code` — it lives on `.cause` instead. Pg-error-code
+// switches (55006/42704 retry logic) must unwrap it or every branch always misses.
+function getPgErrorCode(error: unknown): string | undefined {
+  const cause = (error as { cause?: unknown } | null | undefined)?.cause;
+  return (
+    (cause as { code?: string } | null | undefined)?.code ??
+    (error as { code?: string } | null | undefined)?.code
+  );
+}
+
 // T-19-10 (defense-in-depth): the exported snapshot name comes from Postgres itself, but `SET
 // TRANSACTION SNAPSHOT` cannot take a bind parameter — validate its charset before it is ever
 // interpolated into a raw SQL string.
@@ -759,8 +770,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       this.logInfo(
         `[WAL Listener] Terminating stale connection on slot '${slotName}' (PID ${slot.active_pid})`,
       );
-      await adminDb.execute(sql`SELECT pg_terminate_backend(${slot.active_pid})`);
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await this.evictWalsender(slotName);
     }
 
     this.logInfo(`[WAL Listener] Replication slot '${slotName}' ready`);
@@ -776,17 +786,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   private async recoverSlot(rep: ReplicationConnection, slotName: string): Promise<string> {
     await this.releaseSnapshotBaseline();
 
-    const adminDb = this.getPulseStore().getDb();
-    const existing = await adminDb.execute<{ active_pid: number | null }>(
-      sql`SELECT active_pid FROM pg_replication_slots WHERE slot_name = ${slotName}`,
-    );
-    if (existing.rows.length > 0) {
-      const activePid = existing.rows[0]?.active_pid;
-      if (activePid) {
-        await adminDb.execute(sql`SELECT pg_terminate_backend(${activePid})`);
-      }
-      await this.dropSlotWithRetry(slotName);
-    }
+    await this.evictWalsender(slotName);
+    await this.dropSlotWithRetry(slotName);
 
     const { consistentPoint, snapshot } = await rep.createSlot(slotName, {
       temporary: !this.pullEnabled,
@@ -833,11 +834,42 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         await adminDb.execute(sql`SELECT pg_drop_replication_slot(${slotName})`);
         return;
       } catch (error) {
-        const code = (error as { code?: string } | null | undefined)?.code;
+        const code = getPgErrorCode(error);
         if (code === '42704') return; // undefined_object — already gone
         if (code !== '55006' || Date.now() >= deadline) throw error; // object_in_use exhausted, or unexpected
         await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
       }
+    }
+  }
+
+  // Shared zombie-walsender remedy: terminate the backend still attached to the slot, then poll
+  // pg_replication_slots until it reports inactive — replaces a fixed sleep with the same
+  // poll-retry shape dropSlotWithRetry uses above. Degrades to today's proceed-regardless
+  // behavior if the deadline passes with the walsender still marked active.
+  private async evictWalsender(
+    slotName: string,
+    opts: { timeoutMs?: number; pollIntervalMs?: number } = {},
+  ): Promise<void> {
+    const adminDb = this.getPulseStore().getDb();
+    const timeoutMs = opts.timeoutMs ?? 3000;
+    const pollIntervalMs = opts.pollIntervalMs ?? 100;
+    const deadline = Date.now() + timeoutMs;
+
+    const existing = await adminDb.execute<{ active_pid: number | null }>(
+      sql`SELECT active_pid FROM pg_replication_slots WHERE slot_name = ${slotName}`,
+    );
+    const activePid = existing.rows[0]?.active_pid;
+    if (!activePid) return;
+
+    await adminDb.execute(sql`SELECT pg_terminate_backend(${activePid})`);
+
+    for (;;) {
+      const poll = await adminDb.execute<{ active: boolean | null }>(
+        sql`SELECT active FROM pg_replication_slots WHERE slot_name = ${slotName}`,
+      );
+      if (!poll.rows[0]?.active) return;
+      if (Date.now() >= deadline) return;
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     }
   }
 
