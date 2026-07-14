@@ -93,12 +93,12 @@ describe('onTerminalError', () => {
       events.push('stop');
     });
 
-    (runtime as any).isRunning = true;
+    // `isRunning` is now a getter over `run !== null` — install a run object directly.
     // RECONNECT_MAX_RETRIES is a hardcoded module constant in expose.ts (D-04: no reconnect
     // knobs), not a per-runtime config surface — mirror its value (10) directly.
-    (runtime as any).reconnectAttempts = 10;
+    (runtime as any).run = { abort: new AbortController(), attempts: 10 };
 
-    await (runtime as any).handleDisconnect(null);
+    (runtime as any).giveUp();
     // stop() is invoked fire-and-forget (`void this.stop()`); flush any pending microtasks.
     await Promise.resolve();
 
@@ -117,12 +117,11 @@ describe('onTerminalError', () => {
       events.push('stop');
     });
 
-    (runtime as any).isRunning = true;
     // RECONNECT_MAX_RETRIES is a hardcoded module constant in expose.ts (D-04: no reconnect
     // knobs), not a per-runtime config surface — mirror its value (10) directly.
-    (runtime as any).reconnectAttempts = 10;
+    (runtime as any).run = { abort: new AbortController(), attempts: 10 };
 
-    await (runtime as any).handleDisconnect(null);
+    (runtime as any).giveUp();
     await Promise.resolve();
 
     expect(events).toEqual(['stop']);

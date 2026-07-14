@@ -29,20 +29,22 @@ describe('wal config resolution', () => {
 });
 
 describe('start() failure rolls back to a restartable state', () => {
-  test('a throw after the guard resets isRunning and tears down the pool instead of leaving a zombie', async () => {
+  test('a throw from reconcile() resets isRunning and tears down the store instead of leaving a zombie', async () => {
     const runtime = makePulseRuntime({
       databaseUrl: 'postgresql://user:pass@localhost/test',
     }) as any;
 
-    let poolEnded = 0;
-    runtime.initializeDatabaseServices();
-    const firstStore = runtime.store;
-    firstStore.end = async () => {
-      poolEnded++;
+    // Baseline seeding moved inside the supervised connect (resolveSlot's resume branch,
+    // documented delta b) — a failure there now becomes a supervised retry, not a start()
+    // rejection. reconcile() is the only await left in start()'s try block before the guard
+    // resolves, so it's the seam that must throw to exercise the rollback path.
+    let storeEnded = 0;
+    runtime.store = {
+      end: async () => {
+        storeEnded++;
+      },
     };
-
-    runtime.reconcile = async () => {};
-    runtime.ensureBaselines = async () => {
+    runtime.reconcile = async () => {
       throw new Error('sourceDb briefly unavailable');
     };
 
@@ -50,16 +52,17 @@ describe('start() failure rolls back to a restartable state', () => {
 
     expect(runtime.isRunning).toBe(false);
     expect(runtime.store).toBeNull();
-    expect(poolEnded).toBe(1);
+    expect(storeEnded).toBe(1);
 
     // A retry must not hit the "Already running" early return and silently no-op — it
-    // must re-attempt the guard and baseline steps.
+    // must re-attempt reconcile() and actually start supervision.
     let secondAttemptRan = false;
-    runtime.reconcile = async () => {};
-    runtime.ensureBaselines = async () => {
+    runtime.reconcile = async () => {
       secondAttemptRan = true;
     };
-    runtime.connectReplication = async () => {};
+    runtime.supervise = async (_run: unknown, first: { resolve: () => void }) => {
+      first.resolve();
+    };
 
     await runtime.start();
 
@@ -68,29 +71,37 @@ describe('start() failure rolls back to a restartable state', () => {
   });
 });
 
-describe('openRebaselinePin', () => {
-  test('a failing SET TRANSACTION SNAPSHOT rejects instead of hanging start()/reconnect forever', async () => {
+describe('openPin', () => {
+  test('a failing SET TRANSACTION SNAPSHOT rejects and releases the checked-out connection exactly once', async () => {
     const runtime = makePulseRuntime({
       databaseUrl: 'postgresql://user:pass@localhost/test',
     }) as any;
 
+    let releaseCalls = 0;
     runtime.getPulseStore = () => ({
-      getDb: () => ({
-        transaction: async (fn: (tx: unknown) => Promise<void>) => {
-          // Mirrors the real adminDb: the callback's SET TRANSACTION SNAPSHOT throws before
-          // resolveReady is ever called.
-          const tx = {
-            execute: async () => {
+      checkout: async () => ({
+        client: {
+          // Mirrors the real checked-out connection: BEGIN succeeds, SET TRANSACTION SNAPSHOT
+          // throws — the exact SQL that can't be bind-parameterized (assertSnapshotName guards
+          // it upstream, this exercises the query failure itself).
+          query: async (statement: string) => {
+            if (statement.startsWith('SET TRANSACTION SNAPSHOT')) {
               throw new Error('invalid snapshot identifier');
-            },
-          };
-          return fn(tx);
+            }
+          },
+        },
+        release: () => {
+          releaseCalls++;
         },
       }),
     });
 
     await expect(
-      runtime.openRebaselinePin('00000000-0000-0000-0000-000000000000', '0/100'),
+      runtime.openPin('00000000-0000-0000-0000-000000000000', '0/100'),
     ).rejects.toThrow('invalid snapshot identifier');
+
+    // The connection-leak case the old transaction-callback mock couldn't express: release()
+    // must fire even though setup failed, or the checked-out connection leaks.
+    expect(releaseCalls).toBe(1);
   });
 });
