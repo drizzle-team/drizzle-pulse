@@ -798,7 +798,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       this.logInfo(
         `[WAL Listener] Reconnecting (attempt ${run.attempts}/${RECONNECT_MAX_RETRIES})`,
       );
-      await abortableSleep(backoffDelay(run.attempts), signal);
+      await abortableSleep(backoffDelay(run.attempts - 1), signal);
     }
   }
 
