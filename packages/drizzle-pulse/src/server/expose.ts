@@ -1103,6 +1103,22 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       return;
     }
 
+    const oldPk = oldRow?.[metadata.pkColumnName];
+    if (ev.kind === 'update' && oldPk != null && oldPk !== pkValue) {
+      // pk-changing UPDATE (BUG-02): a single update entry keyed by the new pk leaves every
+      // consumer holding a ghost row under the old pk. Synthesize delete(oldPk) then
+      // insert(newPk) — delete MUST precede insert since handleCommit fans out this.pending in
+      // order (per-index snapshots for the events table, emit order for the tap).
+      const base = {
+        eventsTable: metadata.eventsTable,
+        pkColumnName: metadata.pkColumnName,
+        tableQualifiedName,
+      };
+      this.pending.push({ ...base, op: 'delete', pkValue: oldPk, row: {}, oldRow });
+      this.pending.push({ ...base, op: 'insert', pkValue, row, oldRow: null });
+      return;
+    }
+
     this.pending.push({
       eventsTable: metadata.eventsTable,
       pkColumnName: metadata.pkColumnName,
