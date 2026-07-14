@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { desc, getTableUniqueName, sql } from 'drizzle-orm';
+import { desc, getColumns, getTableUniqueName, sql } from 'drizzle-orm';
 import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
 import {
   createPool,
@@ -93,6 +93,57 @@ const RECONNECT_MAX_DELAY_MS = 30000;
 const DEFAULT_PUBLICATION_NAME = 'drizzle_pulse';
 const DEFAULT_SLOT_NAME = 'drizzle_pulse';
 
+// D-04: no knobs — fixed window a live collection's reconnect-debounce round comfortably fits
+// inside; a collection materialized after it just takes the Phase 18 watermark handshake.
+const REBASELINE_PIN_WINDOW_MS = 5000;
+
+type PulseStoreDbHandle = ReturnType<PulseStore['getDb']>;
+type PulseStoreTxHandle = Parameters<Parameters<PulseStoreDbHandle['transaction']>[0]>[0];
+
+// The snapshot-anchored embedded re-baseline pin (Task 2): an open repeatable-read admin
+// transaction holding the recreate's exported snapshot, consumed by readCollectionBaseline
+// until the window closes or it's forced shut (stop()/next recoverSlot()).
+type SnapshotBaseline = {
+  db: PulseStoreTxHandle;
+  watermark: string;
+  inFlight: number;
+  windowExpired: boolean;
+  releaseTimer: ReturnType<typeof setTimeout>;
+  finalize: () => void;
+  // Resolves once the pinned transaction has actually rolled back and its connection is free —
+  // callers that are about to close the pool or open a fresh pin must await this, or the
+  // in-flight ROLLBACK can race a pool teardown (surfaces as a logged "connection is closed").
+  txDone: Promise<void>;
+};
+
+// T-19-10 (defense-in-depth): the exported snapshot name comes from Postgres itself, but `SET
+// TRANSACTION SNAPSHOT` cannot take a bind parameter — validate its charset before it is ever
+// interpolated into a raw SQL string.
+function assertSnapshotName(name: string): void {
+  if (!/^[0-9A-Fa-f-]+$/.test(name)) {
+    throw new Error(
+      `Refusing to use exported snapshot name "${name}": expected only hex digits and dashes`,
+    );
+  }
+}
+
+// A plain `db.select().from(sourceTable)` maps result rows by JS property key (e.g.
+// `driverId`), but PulseStore.insertEventRow/buildEventRow expect SQL-column-name keys — the
+// same shape WAL rows already carry. Translate a baseline SELECT's row before handing it to
+// createBaselineSnapshot.
+function toSqlKeyedRow(
+  sourceTable: PgTable,
+  row: Record<string, unknown>,
+): Record<string, unknown> {
+  const columns = getColumns(sourceTable);
+  const out: Record<string, unknown> = {};
+  for (const [jsKey, value] of Object.entries(row)) {
+    const column = columns[jsKey as keyof typeof columns];
+    out[column ? column.name : jsKey] = value;
+  }
+  return out;
+}
+
 export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   private readonly sourceTableMetadata: Map<string, SourceTableMetadata>;
   private readonly requestHandler: PulseRequestHandler;
@@ -123,6 +174,9 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   // a reconnect without a store round trip on every commit.
   private lastPersistedCommitLsn: string | null = null;
   lastPersistedSnapshot = 0;
+  // Snapshot-anchored embedded re-baseline pin (Task 2), opened by recoverSlot() before
+  // rep.start() when live collections exist; readCollectionBaseline consumes it until it closes.
+  private snapshotBaseline: SnapshotBaseline | null = null;
   readonly walEventEmitter = new WalEventEmitter();
   private everConnected = false;
   private readonly reconnectListeners = new Set<RuntimeLifecycleListener>();
@@ -269,7 +323,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       await currentPulseStore.createBaselineSnapshot(
         this.getEventsTableForQuery(queryName),
         pulseQuery.pkColumn.name,
-        baselineRow ?? null,
+        baselineRow ? toSqlKeyedRow(sourceTable, baselineRow) : null,
       );
     }
   }
@@ -292,6 +346,26 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   async readCollectionBaseline(
     resolved: ResolvedPulseQuery,
   ): Promise<{ rows: Record<string, unknown>[]; watermark: string }> {
+    // Task 2: a mid-run recreate pins an exported snapshot for every live collection before
+    // rep.start() — reading through it here (rather than the ordinary watermark-first path
+    // below) runs on the pulse-owned admin connection (same visibility class as the WAL stream
+    // itself, which bypasses sourceDb session context by nature) and returns watermark =
+    // consistentPoint, making the recreate boundary gapless by construction and closing the
+    // WR-01 residual race there (the microsecond bound documented below only applies to the
+    // ordinary path). A collection materialized after the pin's window closes simply falls
+    // through to that ordinary path instead.
+    const pin = this.snapshotBaseline;
+    if (pin) {
+      pin.inFlight += 1;
+      try {
+        const rows = await buildSelectQuery(pin.db, resolved.table, resolved);
+        return { rows, watermark: pin.watermark };
+      } finally {
+        pin.inFlight -= 1;
+        void this.maybeReleaseSnapshotBaseline(pin);
+      }
+    }
+
     // 'objects' mode is the one execute() overload whose return type doesn't route through the
     // driver-specific PgQueryResultKind mapping — the only shape that type-checks generically
     // across every driver PulseSourceDb may wrap (pg, postgres.js, minipg, ...).
@@ -348,6 +422,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
     this.isRunning = false;
     this.clearReconnectTimer();
+    await this.releaseSnapshotBaseline();
 
     const rep = this.replication;
     this.replication = null;
@@ -627,61 +702,23 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     this.reconnectAttempts = 0;
   }
 
-  // Branches every (re)connect on slot state (LOCKED backfill/resume spec, STATE.md
-  // §Decisions): an intact slot resumes from confirmed_flush with commit-LSN-deduped replay; a
-  // missing slot is recreated (full recovery machine incl. re-baseline lands in plan 04 — this
-  // plan only wires the branch and the resulting `from`/watermark seed).
+  // Branches every (re)connect on slot state, through ONE shared code path for boot and
+  // mid-run reconnect (LOCKED backfill/resume spec, STATE.md §Decisions, D-02): resolveSlotStartup
+  // resumes an intact+continuous slot from confirmed_flush, or routes to recoverSlot()'s full
+  // recovery machine. Slot-state resolution runs inside a successful connectReplication()
+  // attempt, never the failure path — a recreate never consumes a reconnect retry (research Q4).
   private async connectReplication(): Promise<void> {
     try {
-      const adminDb = this.getPulseStore().getDb();
       const rep = await replication(this.config.databaseUrl);
       this.replication = rep;
 
-      let from: string | undefined;
-      let slotName: string;
+      // pull:false (D-01): a fresh session-scoped, randomized-suffix slot on every (re)connect,
+      // never persisted — a crashed process can never leak a WAL-retaining slot.
+      const slotName = this.pullEnabled
+        ? this.slotName
+        : `${this.slotName}_${randomBytes(4).toString('hex')}`;
 
-      if (this.pullEnabled) {
-        slotName = this.slotName;
-        const result = await adminDb.execute<{
-          slot_name: string;
-          active: boolean;
-          active_pid: number | null;
-        }>(
-          sql`SELECT slot_name, active, active_pid FROM pg_replication_slots WHERE slot_name = ${slotName}`,
-        );
-
-        if (result.rows.length > 0) {
-          const slot = result.rows[0];
-          if (slot?.active && slot.active_pid) {
-            this.logInfo(
-              `[WAL Listener] Terminating stale connection on slot '${slotName}' (PID ${slot.active_pid})`,
-            );
-            await adminDb.execute(sql`SELECT pg_terminate_backend(${slot.active_pid})`);
-            await new Promise((resolve) => setTimeout(resolve, 500));
-          }
-
-          this.logInfo(`[WAL Listener] Replication slot '${slotName}' ready`);
-          from = undefined; // server resumes from the slot's confirmed_flush position
-          this.lastPersistedCommitLsn = await this.getPulseStore().getStreamWatermark(slotName);
-        } else {
-          this.logInfo(`[WAL Listener] Creating replication slot '${slotName}'`);
-          const { consistentPoint } = await rep.createSlot(slotName, {
-            temporary: false,
-            snapshot: 'export',
-          });
-          from = consistentPoint;
-          this.lastPersistedCommitLsn = null;
-        }
-      } else {
-        // Embedded-only (D-01): a fresh session-scoped slot on every (re)connect, never
-        // persisted — a crashed process can never leak a WAL-retaining slot. There is no
-        // replay-dedupe concern (the slot never survives past this connection), so no
-        // pg_replication_slots lookup or watermark load is needed.
-        slotName = `${this.slotName}_${randomBytes(4).toString('hex')}`;
-        this.logInfo(`[WAL Listener] Creating temporary replication slot '${slotName}'`);
-        const { consistentPoint } = await rep.createSlot(slotName, { temporary: true });
-        from = consistentPoint;
-      }
+      const { from } = await this.resolveSlotStartup(rep, slotName);
 
       this.logInfo(`[WAL Listener] Subscribing to slot '${slotName}'`);
       const iterator = rep.start({
@@ -699,6 +736,275 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       this.logError('[WAL Listener] Connection error:', error);
       await this.handleDisconnect(this.replication);
     }
+  }
+
+  // The shared slot-state branch (D-02): pull:false always recreates (D-01 — no continuity to
+  // check, a temporary slot never survives past its own connection). pull:true resumes an
+  // intact slot whose durably-persisted events-lsn covers its confirmed_flush position;
+  // anything else (missing row, wal_status 'lost', no/behind watermark — covers first boot,
+  // max_slot_wal_keep_size invalidation, failover, and a manual drop) recreates via recoverSlot().
+  private async resolveSlotStartup(
+    rep: ReplicationConnection,
+    slotName: string,
+  ): Promise<{ from: string | undefined }> {
+    if (!this.pullEnabled) {
+      const consistentPoint = await this.recoverSlot(rep, slotName);
+      return { from: consistentPoint };
+    }
+
+    const adminDb = this.getPulseStore().getDb();
+    const result = await adminDb.execute<{
+      slot_name: string;
+      active: boolean;
+      active_pid: number | null;
+      wal_status: string | null;
+      confirmed_flush_lsn: string | null;
+    }>(
+      sql`SELECT slot_name, active, active_pid, wal_status, confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name = ${slotName}`,
+    );
+    const slot = result.rows[0];
+    const intact = slot !== undefined && slot.wal_status !== 'lost';
+
+    const watermark = intact ? await this.getPulseStore().getStreamWatermark(slotName) : null;
+    const continuous =
+      intact &&
+      watermark !== null &&
+      !!slot?.confirmed_flush_lsn &&
+      lsnFromString(watermark) >= lsnFromString(slot.confirmed_flush_lsn);
+
+    if (!intact || !continuous || !slot) {
+      const consistentPoint = await this.recoverSlot(rep, slotName);
+      return { from: consistentPoint };
+    }
+
+    if (slot.active && slot.active_pid) {
+      this.logInfo(
+        `[WAL Listener] Terminating stale connection on slot '${slotName}' (PID ${slot.active_pid})`,
+      );
+      await adminDb.execute(sql`SELECT pg_terminate_backend(${slot.active_pid})`);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+
+    this.logInfo(`[WAL Listener] Replication slot '${slotName}' ready`);
+    this.lastPersistedCommitLsn = watermark;
+    return { from: undefined }; // server resumes from the slot's confirmed_flush position
+  }
+
+  // Full recovery machine (D-02/D-03): drop-if-present any broken persistent slot, recreate with
+  // an exported snapshot, rotate-and-seed the events tables from it (pull:true only), and open
+  // the embedded re-baseline pin from the SAME snapshot when live collections exist (Task 2) —
+  // all before the caller issues rep.start(), because the export dies on this connection's next
+  // command (replication.d.ts). Returns the consistentPoint the caller starts from.
+  private async recoverSlot(rep: ReplicationConnection, slotName: string): Promise<string> {
+    await this.releaseSnapshotBaseline();
+
+    const adminDb = this.getPulseStore().getDb();
+    const existing = await adminDb.execute<{ active_pid: number | null }>(
+      sql`SELECT active_pid FROM pg_replication_slots WHERE slot_name = ${slotName}`,
+    );
+    if (existing.rows.length > 0) {
+      const activePid = existing.rows[0]?.active_pid;
+      if (activePid) {
+        await adminDb.execute(sql`SELECT pg_terminate_backend(${activePid})`);
+      }
+      await this.dropSlotWithRetry(slotName);
+    }
+
+    const { consistentPoint, snapshot } = await rep.createSlot(slotName, {
+      temporary: !this.pullEnabled,
+      snapshot: 'export',
+    });
+    if (!snapshot) {
+      throw new Error(
+        `createSlot('${slotName}', { snapshot: 'export' }) returned no exported snapshot name`,
+      );
+    }
+
+    if (this.pullEnabled) {
+      await this.rotateAndSeedEvents(snapshot, consistentPoint);
+    }
+
+    // Live collections only exist mid-run (the embedded factory requires a running runtime, so
+    // there are none at boot — research Q4).
+    if (this.reconnectListeners.size > 0) {
+      await this.openRebaselinePin(snapshot, consistentPoint);
+    }
+
+    // Operators must see this (D-02): a recreate resets events/baselines. Name the slot, never
+    // databaseUrl (V7 — info disclosure).
+    this.logError(
+      `[WAL Listener] Replication slot '${slotName}' was missing or invalidated and has been recreated`,
+    );
+
+    return consistentPoint;
+  }
+
+  // Poll-retry a slot drop: the previous owning backend's "active" flag can lag its actual
+  // termination by a beat, so a single attempt can spuriously hit 55006 (object_in_use).
+  private async dropSlotWithRetry(
+    slotName: string,
+    opts: { timeoutMs?: number; pollIntervalMs?: number } = {},
+  ): Promise<void> {
+    const adminDb = this.getPulseStore().getDb();
+    const timeoutMs = opts.timeoutMs ?? 3000;
+    const pollIntervalMs = opts.pollIntervalMs ?? 100;
+    const deadline = Date.now() + timeoutMs;
+
+    for (;;) {
+      try {
+        await adminDb.execute(sql`SELECT pg_drop_replication_slot(${slotName})`);
+        return;
+      } catch (error) {
+        const code = (error as { code?: string } | null | undefined)?.code;
+        if (code === '42704') return; // undefined_object — already gone
+        if (code !== '55006' || Date.now() >= deadline) throw error; // object_in_use exhausted, or unexpected
+        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      }
+    }
+  }
+
+  // D-03: one pinned repeatable-read admin transaction rotates every registered events table's
+  // epoch, truncates it, and seeds it from the exported snapshot ($op:'snapshot', A5) — the
+  // sole write path outside reconcile()/the WAL loop; sdk.ts pull handlers stay strictly
+  // read-only (D-03 invariant).
+  private async rotateAndSeedEvents(snapshotName: string, consistentPoint: string): Promise<void> {
+    assertSnapshotName(snapshotName);
+    const adminDb = this.getPulseStore().getDb();
+    const pulseStore = this.getPulseStore();
+    const metaTable = sql`${sql.identifier(this.eventsSchema)}.${sql.identifier('pulse_meta')}`;
+    const streamTable = sql`${sql.identifier(this.eventsSchema)}.${sql.identifier('pulse_stream')}`;
+
+    const epochByName = await adminDb.transaction(
+      async (tx) => {
+        await tx.execute(sql.raw(`SET TRANSACTION SNAPSHOT '${snapshotName}'`));
+
+        const epochs = new Map<string, string>();
+        for (const queryName of this.registry.getQueryNames()) {
+          const pulseQuery = this.registry.getPulseQuery(queryName);
+          const sourceTable = this.registry.getSourceTable(queryName);
+          if (!pulseQuery || !sourceTable) continue;
+
+          const eventsTable = this.getEventsTableForQuery(queryName);
+          const eventsTableConfig = getTableConfig(eventsTable);
+          if (epochs.has(eventsTableConfig.name)) continue; // two queries, one source table
+
+          const eventsIdentifier = sql`${sql.identifier(eventsTableConfig.schema ?? this.eventsSchema)}.${sql.identifier(eventsTableConfig.name)}`;
+
+          const rotated = await tx.execute<{ epoch: string }>(
+            sql`UPDATE ${metaTable} SET epoch = gen_random_uuid() WHERE table_name = ${eventsTableConfig.name} RETURNING epoch`,
+          );
+          const epoch = rotated.rows[0]?.epoch;
+          if (!epoch) {
+            throw new Error(
+              `pulse_meta rotation found no row for "${eventsTableConfig.name}" — reconcile() should have created it`,
+            );
+          }
+          epochs.set(eventsTableConfig.name, epoch);
+
+          await tx.execute(sql`TRUNCATE TABLE ${eventsIdentifier}`);
+
+          const [baselineRow] = await tx
+            .select()
+            .from(sourceTable)
+            .orderBy(desc(pulseQuery.pkColumn))
+            .limit(1);
+
+          // Skip when the source is empty, exactly as ensureBaselines does today.
+          await pulseStore.createBaselineSnapshot(
+            eventsTable,
+            pulseQuery.pkColumn.name,
+            baselineRow ? toSqlKeyedRow(sourceTable, baselineRow) : null,
+            tx,
+          );
+        }
+
+        await tx.execute(sql`
+          insert into ${streamTable} (slot_name, last_lsn)
+          values (${this.slotName}, ${consistentPoint})
+          on conflict (slot_name) do update set last_lsn = excluded.last_lsn
+        `);
+
+        return epochs;
+      },
+      { isolationLevel: 'repeatable read' },
+    );
+
+    this.eventsEpochs = new Map([...this.eventsEpochs, ...epochByName]);
+    this.lastPersistedCommitLsn = consistentPoint;
+    this.lastPersistedSnapshot = 0;
+  }
+
+  // Task 2: pin the exported snapshot on its own admin transaction for live embedded
+  // collections, BEFORE rep.start() — the same eager-pin-then-start construction as minipg's
+  // own backfill(). Parks on a deferred release so the transaction (and its snapshot) survives
+  // past this function returning; readCollectionBaseline consumes it via this.snapshotBaseline.
+  private async openRebaselinePin(snapshotName: string, consistentPoint: string): Promise<void> {
+    assertSnapshotName(snapshotName);
+    const adminDb = this.getPulseStore().getDb();
+
+    let resolveReady: ((tx: PulseStoreTxHandle) => void) | undefined;
+    const ready = new Promise<PulseStoreTxHandle>((resolve) => {
+      resolveReady = resolve;
+    });
+    let resolveParked: (() => void) | undefined;
+    const parked = new Promise<void>((resolve) => {
+      resolveParked = resolve;
+    });
+
+    const txDone = adminDb
+      .transaction(
+        async (tx) => {
+          await tx.execute(sql.raw(`SET TRANSACTION SNAPSHOT '${snapshotName}'`));
+          resolveReady?.(tx);
+          await parked;
+        },
+        { isolationLevel: 'repeatable read' },
+      )
+      .catch((error) => {
+        this.logError('[WAL Listener] Re-baseline pin transaction ended with an error:', error);
+      });
+
+    const tx = await ready;
+
+    const pin: SnapshotBaseline = {
+      db: tx,
+      watermark: consistentPoint,
+      inFlight: 0,
+      windowExpired: false,
+      releaseTimer: setTimeout(() => {
+        pin.windowExpired = true;
+        void this.maybeReleaseSnapshotBaseline(pin);
+      }, REBASELINE_PIN_WINDOW_MS),
+      finalize: () => resolveParked?.(),
+      txDone,
+    };
+    this.snapshotBaseline = pin;
+  }
+
+  // Releases the pin once BOTH the window has closed AND no readCollectionBaseline call is
+  // mid-flight against it — never indefinitely (T-19-12). Awaits the transaction's actual
+  // rollback so a caller chaining off this never races the pin's connection still winding down.
+  private async maybeReleaseSnapshotBaseline(pin: SnapshotBaseline): Promise<void> {
+    if (this.snapshotBaseline !== pin || pin.inFlight > 0 || !pin.windowExpired) {
+      return;
+    }
+    this.snapshotBaseline = null;
+    clearTimeout(pin.releaseTimer);
+    pin.finalize();
+    await pin.txDone;
+  }
+
+  // Forces an active pin closed regardless of window/inFlight — stop() and a subsequent
+  // recoverSlot() must never let two pins coexist or leak one past teardown. Awaits the actual
+  // rollback before returning: closing the pool (stop()) or opening a new pin (recoverSlot())
+  // right after must never race this pin's connection still winding down.
+  private async releaseSnapshotBaseline(): Promise<void> {
+    const pin = this.snapshotBaseline;
+    if (!pin) return;
+    this.snapshotBaseline = null;
+    clearTimeout(pin.releaseTimer);
+    pin.finalize();
+    await pin.txDone;
   }
 
   // The tight for-await loop: minipg's internal read loop only advances while a next() pull is

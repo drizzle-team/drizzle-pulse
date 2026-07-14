@@ -74,10 +74,11 @@ export class PulseStore {
     table: PgTable,
     pkColumnName: string,
     baselineRow: Record<string, unknown> | null,
+    dbHandle: DbHandle | TxHandle = this.db,
   ): Promise<number> {
     const eventsTableConfig = getTableConfig(table);
     const eventsTableIdentifier = sql`${sql.identifier(eventsTableConfig.schema ?? 'public')}.${sql.identifier(eventsTableConfig.name)}`;
-    const existingRows = await this.db.execute<{ has_rows: boolean }>(sql`
+    const existingRows = await dbHandle.execute<{ has_rows: boolean }>(sql`
       select exists(
         select 1
         from ${eventsTableIdentifier}
@@ -101,6 +102,7 @@ export class PulseStore {
         row,
         oldRow: row,
       }),
+      dbHandle,
     );
   }
 
