@@ -170,7 +170,7 @@ describe('CopyDone reconnect (BUG-01, G3)', () => {
     } finally {
       await runtime.stop();
       await sourceSql.end();
-      await dropSlotWithRetry(pool, slotName);
+      await dropSlotWithRetry(pool, slotName).catch(() => {});
       await pool.end();
       await proxy.close();
       await dropScenarioDatabase(databaseName);

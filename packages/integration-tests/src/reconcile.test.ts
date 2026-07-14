@@ -358,7 +358,7 @@ describe('runtime-owned events-table reconcile', () => {
         await second.sourceSql.end();
       }
     } finally {
-      await dropSlotWithRetry(s.pool, slotName);
+      await dropSlotWithRetry(s.pool, slotName).catch(() => {});
       await teardownScenario(s);
     }
   });

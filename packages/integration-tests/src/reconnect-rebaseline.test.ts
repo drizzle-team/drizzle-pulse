@@ -206,7 +206,7 @@ describe('Reconnect re-baseline (WAL-01, G7/G5)', () => {
     } finally {
       await runtime.stop();
       await sourceSql.end();
-      await dropSlotWithRetry(pool, slotName);
+      await dropSlotWithRetry(pool, slotName).catch(() => {});
       await pool.end();
       await proxy.close();
       await dropScenarioDatabase(databaseName);
@@ -291,7 +291,7 @@ describe('Reconnect re-baseline (WAL-01, G7/G5)', () => {
     } finally {
       await runtime.stop();
       await sourceSql.end();
-      await dropSlotWithRetry(pool, slotName);
+      await dropSlotWithRetry(pool, slotName).catch(() => {});
       await pool.end();
       await proxy.close();
       await dropScenarioDatabase(databaseName);

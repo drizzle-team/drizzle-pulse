@@ -322,7 +322,7 @@ describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeo
         await b.sourceSql.end();
       }
     } finally {
-      await dropSlotWithRetry(pool, slotName);
+      await dropSlotWithRetry(pool, slotName).catch(() => {});
       await pool.end();
       await dropScenarioDatabase(databaseName);
     }
@@ -433,7 +433,7 @@ describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeo
         }
       }
     } finally {
-      await dropSlotWithRetry(pool, slotName);
+      await dropSlotWithRetry(pool, slotName).catch(() => {});
       await pool.end();
       await dropScenarioDatabase(databaseName);
     }
