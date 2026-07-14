@@ -9,7 +9,10 @@
  * This module is value-imported by the embedded entrypoint; it must import nothing.
  */
 
-// ponytail: hand-rolled because Phase 18 stays off minipg (minipg ships lsnFromString, adopted in Phase 19+).
+// ponytail: hand-rolled and staying that way — this module is value-imported by the embedded
+// entrypoint, which the platform-imports guard bans minipg from reaching. Server-side modules
+// (e.g. expose.ts) adopted minipg's own lsnFromString in Phase 19; this shared module
+// intentionally never will, for platform purity.
 
 /**
  * Precondition: `lsn` matches the Postgres wire form "hex/hex". Throws on any other shape —

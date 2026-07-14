@@ -4,9 +4,10 @@
  *
  * DRIVER-05: a plain node-postgres (`pg`) `Pool` — connectionString only, NO `types` override —
  * coexists with minipg-owned replication as a generic `sourceDb`. The old custom-`types` caveat
- * (needed so `wal-normalization.ts`'s from-text codecs could consume date/timestamp/point OIDs
- * that pg's default parsers over-decoded) is dead: minipg's shape bridge now decodes WAL rows,
- * and a plain sourceDb never touches that path (Pitfall 9, 19-RESEARCH.md).
+ * (needed so the deleted hand-rolled WAL normalizer's from-text codecs could consume
+ * date/timestamp/point OIDs that pg's default parsers over-decoded) is dead: minipg's shape
+ * bridge now decodes WAL rows, and a plain sourceDb never touches that path (Pitfall 9,
+ * 19-RESEARCH.md).
  *
  * DRIVER-04: an UPDATE that never touches a TOASTed column omits it from pgoutput's new tuple;
  * the existing old-under-new spread must still carry it forward intact, in both the persisted

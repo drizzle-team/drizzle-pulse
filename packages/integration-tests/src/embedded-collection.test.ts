@@ -315,7 +315,7 @@ describe('Embedded Collection lifecycle', () => {
 // ---------------------------------------------------------------------------
 // Exotic-type coverage: the WAL tap must deliver every pg data type in the same
 // normalized JS shape a baseline SELECT produces. The raw pgoutput WAL arrives as
-// text; the server normalizes it with Drizzle's codecs (see server/wal-normalization.ts)
+// text; the server normalizes it via the shape bridge (see server/wal-shape-bridge.ts)
 // before the tap payload reaches the embedded client — this suite proves that
 // normalization survives the tap-direct path end to end.
 // ---------------------------------------------------------------------------

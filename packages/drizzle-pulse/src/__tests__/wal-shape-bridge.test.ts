@@ -9,7 +9,6 @@ import {
   text,
   timestamp,
 } from 'drizzle-orm/pg-core';
-import { createWalRowNormalizer } from '../server/wal-normalization.js';
 import { createShapeRowNormalizer } from '../server/wal-shape-bridge.js';
 
 // Inline fixture (no DB): bigIntCol's TS property key deliberately differs from its SQL name
@@ -59,9 +58,12 @@ describe('createShapeRowNormalizer', () => {
     expect(result['label_col']).toBe('hello world');
   });
 
-  test('matches createWalRowNormalizer on the same text-form row across integer, bigint-number, timestamp, text-array, and point columns', () => {
+  // Concrete-value pin (DRIVER-03 gate passed — wal-normalization.ts is now deleted): these are
+  // createWalRowNormalizer's captured outputs for this exact row, recorded once before its
+  // removal. count_col/tags_col stay as raw text (no codec.normalize registered for plain
+  // integer/text-array in this oracle); big_int_col/created_at/location_col decode via xform.
+  test('normalizes integer, bigint-number, timestamp, text-array, and point columns to the values the deleted hand-rolled oracle produced', () => {
     const shapeNormalize = createShapeRowNormalizer(fixtureTable);
-    const walNormalize = createWalRowNormalizer(fixtureTable);
 
     const row = {
       count_col: '42',
@@ -71,6 +73,12 @@ describe('createShapeRowNormalizer', () => {
       location_col: '(1,2)',
     };
 
-    expect(shapeNormalize(row)).toEqual(walNormalize(row));
+    expect(shapeNormalize(row)).toEqual({
+      count_col: '42',
+      big_int_col: 9007199254740,
+      created_at: new Date('2024-06-07T08:09:10.000Z'),
+      tags_col: '{a,b,c}',
+      location_col: [1, 2],
+    });
   });
 });
