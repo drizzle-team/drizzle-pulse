@@ -156,10 +156,10 @@ describe('Runtime Contracts', () => {
     expect(updatePull.events[0]).toEqual(
       expect.objectContaining({
         op: 'update',
-        matchesOld: true,
         matchesNew: false,
       }),
     );
+    expect(updatePull.events[0]).not.toHaveProperty('matchesOld');
   });
 
   test('transition into filter exposes exact update flags', async () => {
@@ -191,10 +191,10 @@ describe('Runtime Contracts', () => {
     expect(updatePull.events[0]).toEqual(
       expect.objectContaining({
         op: 'update',
-        matchesOld: false,
         matchesNew: true,
       }),
     );
+    expect(updatePull.events[0]).not.toHaveProperty('matchesOld');
   });
 
   test('a token minted against a since-recreated events table resets on epoch mismatch', async () => {

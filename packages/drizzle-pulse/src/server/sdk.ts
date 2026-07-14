@@ -674,7 +674,6 @@ export class PulseRequestHandler {
           old_row: pipelinedOldRow ?? oldRow ?? {},
           pk: event.pk,
           matchesNew,
-          matchesOld,
         });
         continue;
       }
@@ -690,7 +689,6 @@ export class PulseRequestHandler {
           op: 'delete',
           old_row: pipelinedOldRow,
           pk: event.pk,
-          matchesOld: event.matchesOld,
         });
       }
     }

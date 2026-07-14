@@ -10,14 +10,12 @@ export type PulseUpdateEvent<TResult> = {
   old_row: Record<string, unknown>;
   pk: unknown;
   matchesNew: boolean;
-  matchesOld: boolean;
 };
 
 export type PulseDeleteEvent = {
   op: 'delete';
   old_row: Record<string, unknown>;
   pk: unknown;
-  matchesOld: boolean;
 };
 
 export type PulseEvent<TResult> =

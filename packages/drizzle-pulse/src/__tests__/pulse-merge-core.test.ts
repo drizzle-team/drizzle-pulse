@@ -109,14 +109,13 @@ describe('PulseMergeCore (full-set base)', () => {
           old_row: { $pk: 1, label: 'a' },
           pk: 1,
           matchesNew: true,
-          matchesOld: true,
         },
       ]);
       expect(changed).toBe(true);
       expect(core.data).toEqual([{ $pk: 1, label: 'a2' }]);
     });
 
-    test('update(matchesOld only) removes the row', () => {
+    test('update with matchesNew=false for a present pk removes the row', () => {
       const core = new PulseMergeCore<TestRow>({ order: 'asc' });
       core.rebuildFromRows([{ $pk: 1, label: 'a' }]);
 
@@ -127,20 +126,17 @@ describe('PulseMergeCore (full-set base)', () => {
           old_row: { $pk: 1, label: 'a' },
           pk: 1,
           matchesNew: false,
-          matchesOld: true,
         },
       ]);
       expect(changed).toBe(true);
       expect(core.data).toHaveLength(0);
     });
 
-    test('delete(matchesOld) removes the row', () => {
+    test('delete for a pk in the map removes the row', () => {
       const core = new PulseMergeCore<TestRow>({ order: 'asc' });
       core.rebuildFromRows([{ $pk: 1, label: 'a' }]);
 
-      const changed = core.applyEvents([
-        { op: 'delete', old_row: { $pk: 1, label: 'a' }, pk: 1, matchesOld: true },
-      ]);
+      const changed = core.applyEvents([{ op: 'delete', old_row: { $pk: 1, label: 'a' }, pk: 1 }]);
       expect(changed).toBe(true);
       expect(core.data).toHaveLength(0);
       expect(core.data.some((r) => r.$pk === 1)).toBe(false);
@@ -160,7 +156,6 @@ describe('PulseMergeCore (full-set base)', () => {
           old_row: { $pk: 2, label: 'b-old' },
           pk: 2,
           matchesNew: true,
-          matchesOld: false,
         },
       ]);
       expect(core.data.map((r) => r.$pk)).toEqual([1, 2, 3]);
@@ -171,7 +166,7 @@ describe('PulseMergeCore (full-set base)', () => {
       core.rebuildFromRows([{ $pk: 1, label: 'a' }]);
 
       const changed = core.applyEvents([
-        { op: 'delete', old_row: { $pk: 99, label: 'missing' }, pk: 99, matchesOld: true },
+        { op: 'delete', old_row: { $pk: 99, label: 'missing' }, pk: 99 },
       ]);
       expect(changed).toBe(false);
       expect(core.data).toHaveLength(1);

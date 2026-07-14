@@ -186,7 +186,6 @@ describe('PulseQuery runtime characterization', () => {
         old_row: { $pk: 1, label: 'a' },
         pk: 1,
         matchesNew: true,
-        matchesOld: true,
       },
       {
         op: 'update',
@@ -194,7 +193,6 @@ describe('PulseQuery runtime characterization', () => {
         old_row: { $pk: 2, label: 'b' },
         pk: 2,
         matchesNew: false,
-        matchesOld: true,
       },
       {
         op: 'update',
@@ -202,13 +200,11 @@ describe('PulseQuery runtime characterization', () => {
         old_row: { $pk: 4, label: 'd-old' },
         pk: 4,
         matchesNew: true,
-        matchesOld: false,
       },
       {
         op: 'delete',
         old_row: { $pk: 4, label: 'd' },
         pk: 4,
-        matchesOld: true,
       },
     ]);
 

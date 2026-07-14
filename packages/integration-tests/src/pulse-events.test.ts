@@ -112,17 +112,16 @@ describe('createPulseEvents', () => {
     expect(log[0]!.event.pk).toBe(inserted!.id);
     expect(log[0]!.lsn).toMatch(LSN_PATTERN);
 
-    // UPDATE out of filter (accepted -> completed): matchesOld=true, matchesNew=false
+    // UPDATE out of filter (accepted -> completed): matchesNew=false
     await processDbOperations([
       db.update(orders).set({ status: 'completed' }).where(eq(orders.id, inserted!.id)),
     ]);
     await waitFor(() => log.length === 2);
     expect(log[1]!.event.op).toBe('update');
-    expect(log[1]!.event.matchesOld).toBe(true);
     expect(log[1]!.event.matchesNew).toBe(false);
     expect(log[1]!.event.old_row.id).toBe(inserted!.id);
 
-    // A second matching row, then delete it: matchesOld=true
+    // A second matching row, then delete it.
     const { results: r2 } = await processDbOperations([
       db
         .insert(orders)
@@ -136,7 +135,6 @@ describe('createPulseEvents', () => {
     await processDbOperations([db.delete(orders).where(eq(orders.id, toDelete!.id))]);
     await waitFor(() => log.length === 4);
     expect(log[3]!.event.op).toBe('delete');
-    expect(log[3]!.event.matchesOld).toBe(true);
     expect(log[3]!.event.pk).toBe(toDelete!.id);
 
     unsub();

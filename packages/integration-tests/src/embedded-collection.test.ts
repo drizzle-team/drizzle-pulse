@@ -141,7 +141,7 @@ describe('Embedded Collection', () => {
     expect(changes[0]!.state).toBe(collection.list());
     expect(collection.list()).toHaveLength(1);
 
-    // UPDATE out of filter (accepted -> completed): matchesOld=true, matchesNew=false
+    // UPDATE out of filter (accepted -> completed): matchesNew=false
     await processDbOperations([
       db.update(orders).set({ status: 'completed' }).where(eq(orders.id, inserted!.id)),
     ]);
@@ -149,7 +149,6 @@ describe('Embedded Collection', () => {
     await waitFor(() => changes.length === 2);
     const updateEvt = changes[1]!.events[0];
     expect(updateEvt.op).toBe('update');
-    expect(updateEvt.matchesOld).toBe(true);
     expect(updateEvt.matchesNew).toBe(false);
     expect(changes[1]!.lsn).toMatch(LSN_PATTERN);
     expect(collection.list()).toHaveLength(0);

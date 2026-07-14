@@ -12,9 +12,10 @@ import type { ResolvedPulseQuery } from '../../types.js';
 export type TapRow = Record<string, unknown> & { $pk: unknown };
 
 /**
- * Builds a `PulseEvent` from a raw WAL tap payload, or `null` when the row (before and after
- * the change) falls outside `resolved.where` — the same auth-scoped filter the SQL path
- * enforces, evaluated here in-memory instead of by Postgres.
+ * Builds a `PulseEvent` from a raw WAL tap payload, or `null` when the insert row falls outside
+ * `resolved.where`. Updates and deletes deliver unconditionally — the tap has no reliable way to
+ * evaluate `where` against a key-only old tuple (RID DEFAULT), so filter-leave/removal detection
+ * is left to the consumer's pk-membership check instead of a where-evaluation gate here.
  */
 export function buildTapEvent(
   payload: WalTapPayload,
@@ -26,7 +27,6 @@ export function buildTapEvent(
   const oldRow = payload.oldRowData ? extractRow(payload.oldRowData, resolved.columns) : null;
 
   const matchesNew = newRow ? evaluateCondition(resolved.where, newRow) : false;
-  const matchesOld = oldRow ? evaluateCondition(resolved.where, oldRow) : false;
 
   if (payload.operation === 'insert') {
     if (!matchesNew || !newRow) return null;
@@ -35,7 +35,6 @@ export function buildTapEvent(
   }
 
   if (payload.operation === 'update') {
-    if (!matchesNew && !matchesOld) return null;
     const projectedNew = newRow ? (applyProjectionPipeline([newRow], resolved)[0] as TapRow) : null;
     const projectedOld = oldRow ? (applyProjectionPipeline([oldRow], resolved)[0] as TapRow) : null;
     const row = projectedNew ?? projectedOld;
@@ -46,12 +45,11 @@ export function buildTapEvent(
       old_row: projectedOld ?? {},
       pk: row.$pk,
       matchesNew,
-      matchesOld,
     };
   }
 
   // delete
-  if (!matchesOld || !oldRow) return null;
+  if (!oldRow) return null;
   const projectedOld = applyProjectionPipeline([oldRow], resolved)[0] as TapRow;
-  return { op: 'delete', old_row: projectedOld, pk: projectedOld.$pk, matchesOld };
+  return { op: 'delete', old_row: projectedOld, pk: projectedOld.$pk };
 }

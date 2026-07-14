@@ -199,7 +199,7 @@ describe('embedded client — tap-direct handshake', () => {
     const changes: any[] = [];
     collection.onChange((c: any) => changes.push(c));
 
-    // UPDATE out of filter: accepted -> completed (matchesOld=true, matchesNew=false)
+    // UPDATE out of filter: accepted -> completed (matchesNew=false; membership removes the row)
     runtime.walEventEmitter.emit(
       tableKey,
       'update',
@@ -210,7 +210,6 @@ describe('embedded client — tap-direct handshake', () => {
     expect(collection.list()).toHaveLength(0);
     expect(changes[0]!.events[0].op).toBe('update');
     expect(changes[0]!.events[0].matchesNew).toBe(false);
-    expect(changes[0]!.events[0].matchesOld).toBe(true);
 
     // INSERT another matching row, then DELETE it.
     runtime.walEventEmitter.emit(
@@ -231,7 +230,6 @@ describe('embedded client — tap-direct handshake', () => {
     );
     expect(collection.list()).toHaveLength(0);
     expect(changes[2]!.events[0].op).toBe('delete');
-    expect(changes[2]!.events[0].matchesOld).toBe(true);
 
     collection.dispose();
   });

@@ -113,10 +113,10 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
     expect(received).toEqual([['insert', '0/1A2B']]);
   });
 
-  test('an update carries matchesNew/matchesOld as the row moves in/out of the filter', () => {
+  test('an update carries matchesNew as the row moves out of the filter', () => {
     const runtime = makeMockRuntime({ where: { status: { eq: 'accepted' } } });
     const events = createPulseEvents(runtime as any);
-    const received: Array<{ matchesNew: boolean; matchesOld: boolean }> = [];
+    const received: Array<{ matchesNew: boolean }> = [];
     (events as any).orders((event: any) => received.push(event));
 
     runtime.walEventEmitter.emit(
@@ -129,7 +129,42 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
 
     expect(received).toHaveLength(1);
     expect(received[0]!.matchesNew).toBe(false);
-    expect(received[0]!.matchesOld).toBe(true);
+  });
+
+  test('an update with matchesNew=false and a null old row is still delivered', () => {
+    const runtime = makeMockRuntime({ where: { status: { eq: 'accepted' } } });
+    const events = createPulseEvents(runtime as any);
+    const received: Array<{ matchesNew: boolean }> = [];
+    (events as any).orders((event: any) => received.push(event));
+
+    runtime.walEventEmitter.emit(
+      tableKey,
+      'update',
+      { id: 1, status: 'completed', price: 10 },
+      null,
+      '0/301',
+    );
+
+    expect(received).toHaveLength(1);
+    expect(received[0]!.matchesNew).toBe(false);
+  });
+
+  test('a delete whose old row does not match the where is still delivered', () => {
+    const runtime = makeMockRuntime({ where: { status: { eq: 'accepted' } } });
+    const events = createPulseEvents(runtime as any);
+    const received: Array<{ op: string }> = [];
+    (events as any).orders((event: any) => received.push(event));
+
+    runtime.walEventEmitter.emit(
+      tableKey,
+      'delete',
+      {},
+      { id: 1, status: 'completed', price: 10 },
+      '0/302',
+    );
+
+    expect(received).toHaveLength(1);
+    expect(received[0]!.op).toBe('delete');
   });
 
   test('unsubscribe stops delivery and is idempotent', () => {

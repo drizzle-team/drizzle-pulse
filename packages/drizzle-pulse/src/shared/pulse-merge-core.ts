@@ -58,7 +58,7 @@ export class PulseMergeCore<TRow extends Record<string, unknown> & { $pk: unknow
             this._pkMap.set(rowPk, row);
             updated[existingIndex] = row;
             mutated = true;
-          } else if (event.matchesOld) {
+          } else {
             this._pkMap.delete(rowPk);
             updated.splice(existingIndex, 1);
             mutated = true;
@@ -78,7 +78,6 @@ export class PulseMergeCore<TRow extends Record<string, unknown> & { $pk: unknow
       const rowPk = event.pk;
       if (!isPkComparable(rowPk)) continue;
       if (!this._pkMap.has(rowPk)) continue;
-      if (!event.matchesOld) continue;
       this._pkMap.delete(rowPk);
       const existingIndex = updated.findIndex((candidate) => candidate.$pk === rowPk);
       if (existingIndex >= 0) {

@@ -141,14 +141,12 @@ export type PulseWireUpdateEvent = {
   old_row: Record<string, unknown>;
   pk: unknown;
   matchesNew: boolean;
-  matchesOld: boolean;
 };
 
 export type PulseWireDeleteEvent = {
   op: 'delete';
   old_row: Record<string, unknown>;
   pk: unknown;
-  matchesOld: boolean;
 };
 
 export type PulseWireEvent = PulseWireInsertEvent | PulseWireUpdateEvent | PulseWireDeleteEvent;

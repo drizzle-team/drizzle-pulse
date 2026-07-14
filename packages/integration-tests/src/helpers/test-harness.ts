@@ -129,7 +129,6 @@ const pullEventSchema = z.object({
   row: plainRecordSchema.nullish().transform((value) => value ?? undefined),
   old_row: plainRecordSchema.nullish().transform((value) => value ?? undefined),
   matchesNew: z.boolean().optional(),
-  matchesOld: z.boolean().optional(),
 });
 
 const pullResponseSchema = z.object({
@@ -664,7 +663,6 @@ function parsePullEvents(value: unknown): Array<{
   row?: PlainRecord;
   old_row?: PlainRecord;
   matchesNew?: boolean;
-  matchesOld?: boolean;
 }> {
   return z.array(pullEventSchema).parse(value);
 }
@@ -680,7 +678,6 @@ export async function pullClient(
       row?: PlainRecord;
       old_row?: PlainRecord;
       matchesNew?: boolean;
-      matchesOld?: boolean;
     }>;
     // Parsed snapshot number, for assertions and waitForEventsForFixture.
     snapshot: number;
