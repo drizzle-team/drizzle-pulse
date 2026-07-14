@@ -477,7 +477,11 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
   async stop(): Promise<void> {
     for (const listener of [...this.stopListeners]) {
-      listener();
+      try {
+        listener();
+      } catch (err) {
+        this.logError('[WAL Listener] onStop listener error:', err);
+      }
     }
 
     const run = this.run;
