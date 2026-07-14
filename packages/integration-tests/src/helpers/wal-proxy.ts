@@ -52,21 +52,38 @@ export function startWalProxy(targetHost: string, targetPort: number) {
     client.on('error', () => {});
     upstream.on('error', () => {});
 
-    // Classify only from the connection's first chunk (the StartupMessage) — later chunks on
-    // an admin-pool connection can coincidentally contain the byte sequence "replication" (e.g.
-    // a query against pg_replication_slots) and must not be allowed to steal activeClient.
-    let sawFirstChunk = false;
+    // Classify only once the whole StartupMessage is in hand — a bare first chunk can split the
+    // message mid-parameter (or land only the leading length prefix), and "replication" straddling
+    // a TCP segment boundary must not silently fall through to admin classification. Later chunks
+    // on an admin-pool connection can coincidentally contain the byte sequence "replication" (e.g.
+    // a query against pg_replication_slots) and must not be allowed to steal activeClient, so
+    // classification is one-shot once the full startup message is assembled.
+    let classified = false;
     let isReplication = false;
+    let startupChunks: Buffer[] = [];
+    let startupBytesSeen = 0;
+    let startupLength: number | null = null;
     const adminState: AdminForwardState = { client, paused: false, buffer: [] };
     adminStates.add(adminState);
 
     client.on('data', (chunk) => {
-      if (!sawFirstChunk) {
-        sawFirstChunk = true;
-        if (chunk.includes('replication')) {
-          activeClient = client;
-          isReplication = true;
-          adminStates.delete(adminState); // the replication connection is never stalled
+      if (!classified) {
+        startupChunks.push(chunk);
+        startupBytesSeen += chunk.length;
+        const startup = Buffer.concat(startupChunks);
+        if (startupLength === null && startupBytesSeen >= 4) {
+          startupLength = startup.readInt32BE(0);
+        }
+        // Bail out past any sane StartupMessage size so a malformed/non-startup lead-in can't
+        // grow this buffer unboundedly.
+        if ((startupLength !== null && startupBytesSeen >= startupLength) || startupBytesSeen > 65536) {
+          classified = true;
+          if (startup.includes('replication')) {
+            activeClient = client;
+            isReplication = true;
+            adminStates.delete(adminState); // the replication connection is never stalled
+          }
+          startupChunks = [];
         }
       }
       if (isReplication && stallArmed && chunk.includes('START_REPLICATION')) {
