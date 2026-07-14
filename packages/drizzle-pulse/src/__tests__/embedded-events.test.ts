@@ -67,7 +67,6 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
       'insert',
       { id: 1, status: 'accepted', price: 10 },
       null,
-      0,
       '0/100',
     );
     expect(received).toHaveLength(1);
@@ -84,7 +83,6 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
       'insert',
       { id: 1, status: 'requested', price: 10 },
       null,
-      0,
       '0/100',
     );
     expect(received).toHaveLength(0);
@@ -94,7 +92,6 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
       'insert',
       { id: 2, status: 'accepted', price: 20 },
       null,
-      0,
       '0/200',
     );
     expect(received).toHaveLength(1);
@@ -111,7 +108,6 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
       'insert',
       { id: 1, status: 'accepted', price: 10 },
       null,
-      0,
       '0/1A2B',
     );
     expect(received).toEqual([['insert', '0/1A2B']]);
@@ -128,7 +124,6 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
       'update',
       { id: 1, status: 'completed', price: 10 },
       { id: 1, status: 'accepted', price: 10 },
-      0,
       '0/300',
     );
 
@@ -148,7 +143,6 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
       'insert',
       { id: 1, status: 'accepted', price: 10 },
       null,
-      0,
       '0/100',
     );
     expect(count).toBe(1);
@@ -161,7 +155,6 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
       'insert',
       { id: 2, status: 'accepted', price: 20 },
       null,
-      0,
       '0/200',
     );
     expect(count).toBe(1);
@@ -186,7 +179,6 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
       'insert',
       { id: 1, status: 'accepted', price: 10 },
       null,
-      0,
       '0/100',
     );
     expect(count).toBe(1);
@@ -198,7 +190,6 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
       'insert',
       { id: 2, status: 'accepted', price: 20 },
       null,
-      0,
       '0/200',
     );
     expect(count).toBe(1);

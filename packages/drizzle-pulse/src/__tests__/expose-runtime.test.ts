@@ -59,9 +59,6 @@ describe('start() failure rolls back to a restartable state', () => {
     runtime.ensureBaselines = async () => {
       secondAttemptRan = true;
     };
-    runtime.getPulseStore = () => ({
-      getLatestSnapshot: async () => 0,
-    });
     runtime.connectReplication = async () => {};
 
     await runtime.start();

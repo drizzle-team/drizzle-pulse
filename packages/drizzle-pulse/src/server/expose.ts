@@ -170,7 +170,6 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   // In-memory mirror of the durable pulse_stream watermark — dedupes at-least-once replay after
   // a reconnect without a store round trip on every commit.
   private lastPersistedCommitLsn: string | null = null;
-  lastPersistedSnapshot = 0;
   // Snapshot-anchored embedded re-baseline pin (Task 2), opened by recoverSlot() before
   // rep.start() when live collections exist; readCollectionBaseline consumes it until it closes.
   private snapshotBaseline: SnapshotBaseline | null = null;
@@ -395,14 +394,6 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
       if (this.pullEnabled) {
         await this.ensureBaselines();
-
-        let maxSnapshot = 0;
-        const service = this.getPulseStore();
-        for (const meta of this.sourceTableMetadata.values()) {
-          const snap = await service.getLatestSnapshot(meta.eventsTable);
-          maxSnapshot = Math.max(maxSnapshot, snap);
-        }
-        this.lastPersistedSnapshot = maxSnapshot;
       }
 
       await this.connectReplication();
@@ -918,7 +909,6 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
     this.eventsEpochs = new Map([...this.eventsEpochs, ...epochByName]);
     this.lastPersistedCommitLsn = consistentPoint;
-    this.lastPersistedSnapshot = 0;
   }
 
   // Task 2: pin the exported snapshot on its own admin transaction for live embedded
@@ -1144,15 +1134,13 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
     if (!this.pullEnabled) {
       // No events tables, no persistence, no replay-dedupe concern (D-01's temporary slot never
-      // survives a reconnect) — emit taps directly with $snapshot: 0; tap consumers key off lsn
-      // since Phase 18.
+      // survives a reconnect) — emit taps directly; tap consumers key off lsn since Phase 18.
       pending.forEach((event) => {
         this.walEventEmitter.emit(
           event.tableQualifiedName,
           event.op,
           event.row,
           event.oldRow,
-          0,
           commitLsn,
         );
       });
@@ -1170,19 +1158,15 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       return;
     }
 
-    const snapshots = await this.getPulseStore().persistCommit(pending, this.slotName, commitLsn);
-    if (snapshots.length > 0) {
-      this.lastPersistedSnapshot = Math.max(this.lastPersistedSnapshot, ...snapshots);
-    }
+    await this.getPulseStore().persistCommit(pending, this.slotName, commitLsn);
     this.lastPersistedCommitLsn = commitLsn;
 
-    pending.forEach((event, index) => {
+    pending.forEach((event) => {
       this.walEventEmitter.emit(
         event.tableQualifiedName,
         event.op,
         event.row,
         event.oldRow,
-        snapshots[index] ?? 0,
         commitLsn,
       );
     });

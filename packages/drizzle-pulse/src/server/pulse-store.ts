@@ -1,4 +1,4 @@
-import { getColumns, getTableUniqueName, sql } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { getTableConfig } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/postgres';
@@ -52,11 +52,10 @@ export class PulseStore {
     events: PendingWalEvent[],
     slotName: string,
     commitLsn: string,
-  ): Promise<number[]> {
-    return await this.db.transaction(async (tx) => {
-      const snapshots: number[] = [];
+  ): Promise<void> {
+    await this.db.transaction(async (tx) => {
       for (const event of events) {
-        const snapshot = await this.insertEventRow(
+        await this.insertEventRow(
           event.eventsTable,
           this.buildEventRow({
             op: event.op,
@@ -67,7 +66,6 @@ export class PulseStore {
           }),
           tx,
         );
-        snapshots.push(snapshot);
       }
 
       await tx.execute(sql`
@@ -75,8 +73,6 @@ export class PulseStore {
         values (${slotName}, ${commitLsn})
         on conflict (slot_name) do update set last_lsn = excluded.last_lsn
       `);
-
-      return snapshots;
     });
   }
 
@@ -85,7 +81,7 @@ export class PulseStore {
     pkColumnName: string,
     baselineRow: Record<string, unknown> | null,
     dbHandle: DbHandle | TxHandle = this.db,
-  ): Promise<number> {
+  ): Promise<void> {
     const eventsTableConfig = getTableConfig(table);
     const eventsTableIdentifier = sql`${sql.identifier(eventsTableConfig.schema ?? 'public')}.${sql.identifier(eventsTableConfig.name)}`;
     const existingRows = await dbHandle.execute<{ has_rows: boolean }>(sql`
@@ -94,16 +90,16 @@ export class PulseStore {
         from ${eventsTableIdentifier}
       ) as has_rows
     `);
-    if (existingRows.rows[0]?.has_rows) return 0;
+    if (existingRows.rows[0]?.has_rows) return;
 
     const row = baselineRow;
-    if (!row) return 0;
+    if (!row) return;
     const pkValue = row[pkColumnName];
     if (pkValue === undefined) {
       throw new Error(`Baseline snapshot missing primary key ${pkColumnName}`);
     }
 
-    return await this.insertEventRow(
+    await this.insertEventRow(
       table,
       this.buildEventRow({
         op: 'snapshot',
@@ -130,43 +126,12 @@ export class PulseStore {
     table: PgTable,
     values: Record<string, unknown>,
     dbHandle: DbHandle | TxHandle = this.db,
-  ): Promise<number> {
+  ): Promise<void> {
     if (Object.keys(values).length === 0) {
-      return 0;
+      return;
     }
 
-    const eventsColumns = getColumns(table);
-    const columnKeyBySqlName = new Map(
-      Object.entries(eventsColumns).map(([columnKey, column]) => [column.name, columnKey]),
-    );
-
-    const insertValues = Object.fromEntries(
-      Object.entries(values).map(([columnName, value]) => {
-        const columnKey = columnKeyBySqlName.get(columnName);
-        if (!columnKey) {
-          throw new Error(
-            `Missing events column "${columnName}" for table "${getTableUniqueName(table)}"`,
-          );
-        }
-
-        return [columnKey, value];
-      }),
-    );
-
-    const snapshotColumnKey = columnKeyBySqlName.get('$snapshot');
-    const snapshotColumn = snapshotColumnKey
-      ? eventsColumns[snapshotColumnKey as keyof typeof eventsColumns]
-      : undefined;
-    if (!snapshotColumn) {
-      throw new Error(`${getTableUniqueName(table)} missing $snapshot column`);
-    }
-
-    const result = await dbHandle
-      .insert(table)
-      .values(insertValues)
-      .returning({ $snapshot: snapshotColumn });
-
-    return (result[0]?.['$snapshot'] as number | undefined) ?? 0;
+    await dbHandle.insert(table).values(values);
   }
 
   private toOldRowValues(row: Record<string, unknown>) {

@@ -120,7 +120,6 @@ describe('embedded client — zero wire protocol (SPLIT-03)', () => {
       'insert',
       { id: 2, status: 'accepted', price: 20 },
       null,
-      0,
       '0/999',
     );
     expect(collection.list()).toHaveLength(2);
@@ -147,7 +146,6 @@ describe('embedded client — tap-direct handshake', () => {
       'insert',
       { id: 1, status: 'accepted', price: 10 },
       null,
-      0,
       '0/90',
     );
     expect(collection.list()).toHaveLength(1);
@@ -159,7 +157,6 @@ describe('embedded client — tap-direct handshake', () => {
       'insert',
       { id: 2, status: 'accepted', price: 20 },
       null,
-      0,
       '0/110',
     );
     expect(collection.list()).toHaveLength(2);
@@ -182,7 +179,6 @@ describe('embedded client — tap-direct handshake', () => {
       'insert',
       { id: 1, status: 'accepted', price: 10 },
       null,
-      0,
       '0/110',
     );
 
@@ -209,7 +205,6 @@ describe('embedded client — tap-direct handshake', () => {
       'update',
       { id: 1, status: 'completed', price: 15 },
       { id: 1, status: 'accepted', price: 10 },
-      0,
       '0/300',
     );
     expect(collection.list()).toHaveLength(0);
@@ -223,7 +218,6 @@ describe('embedded client — tap-direct handshake', () => {
       'insert',
       { id: 2, status: 'accepted', price: 20 },
       null,
-      0,
       '0/400',
     );
     expect(collection.list()).toHaveLength(1);
@@ -233,7 +227,6 @@ describe('embedded client — tap-direct handshake', () => {
       'delete',
       {},
       { id: 2, status: 'accepted', price: 20 },
-      0,
       '0/500',
     );
     expect(collection.list()).toHaveLength(0);
@@ -266,7 +259,6 @@ describe('embedded client — tap-direct handshake', () => {
       'insert',
       { id: 1, status: 'accepted', price: 10 },
       null,
-      0,
       '0/200',
     );
     terminalErrorListener?.(new Error('boom'));
@@ -281,7 +273,6 @@ describe('embedded client — tap-direct handshake', () => {
       'insert',
       { id: 2, status: 'accepted', price: 20 },
       null,
-      0,
       '0/300',
     );
     terminalErrorListener?.(new Error('boom again'));
@@ -431,7 +422,6 @@ describe('embedded client — tap-direct handshake', () => {
       'insert',
       { id: 2, status: 'accepted', price: 20 },
       null,
-      0,
       '0/999',
     );
     expect(collection.list()).toHaveLength(1);
@@ -472,7 +462,6 @@ describe('embedded client — tap-direct handshake', () => {
       'insert',
       { id: 9, status: 'accepted', price: 90 },
       null,
-      0,
       '0/200',
     );
 

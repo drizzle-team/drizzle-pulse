@@ -2,7 +2,6 @@ export type WalTapPayload = {
   operation: 'insert' | 'update' | 'delete';
   rowData: Record<string, unknown>;
   oldRowData: Record<string, unknown> | null;
-  $snapshot: number;
   /** Commit LSN of the transaction this event belongs to; shared by every event in that transaction. */
   lsn: string;
 };
@@ -28,12 +27,11 @@ export class WalEventEmitter {
     operation: WalTapPayload['operation'],
     rowData: Record<string, unknown>,
     oldRowData: Record<string, unknown> | null,
-    $snapshot: number,
     lsn: string,
   ): void {
     const set = this.listeners.get(tableQualifiedName);
     if (!set) return;
-    const payload: WalTapPayload = { operation, rowData, oldRowData, $snapshot, lsn };
+    const payload: WalTapPayload = { operation, rowData, oldRowData, lsn };
     for (const listener of set) {
       try {
         listener(payload);
