@@ -1106,7 +1106,11 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     }
 
     const oldPk = oldRow?.[metadata.pkColumnName];
-    if (ev.kind === 'update' && oldPk != null && oldPk !== pkValue) {
+    const pkChanged =
+      oldPk !== pkValue &&
+      !(oldPk instanceof Date && pkValue instanceof Date && oldPk.getTime() === pkValue.getTime()) &&
+      !(Buffer.isBuffer(oldPk) && Buffer.isBuffer(pkValue) && oldPk.equals(pkValue));
+    if (ev.kind === 'update' && oldPk != null && pkChanged) {
       // pk-changing UPDATE (BUG-02): a single update entry keyed by the new pk leaves every
       // consumer holding a ghost row under the old pk. Synthesize delete(oldPk) then
       // insert(newPk) — delete MUST precede insert since handleCommit fans out this.pending in
