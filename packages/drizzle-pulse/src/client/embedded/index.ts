@@ -1,5 +1,5 @@
 import { getTableUniqueName } from 'drizzle-orm';
-import type { PulseRuntime } from '../../server/expose.js';
+import type { BaselinePin, PulseRuntime } from '../../server/expose.js';
 import type { AnyPulseBuilders } from '../../server/pulse-registry.js';
 import type { PulseClientContract } from '../../server/pulse-types.js';
 import type { WalTapPayload } from '../../server/wal-event-emitter.js';
@@ -203,13 +203,13 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
         // handshake's state. Returns `null` when superseded — the caller must not treat that
         // as "no watermark", only as "a newer handshake owns the collection now".
         let handshakeGen = 0;
-        async function runHandshake(): Promise<string | null> {
+        async function runHandshake(pin?: BaselinePin | null): Promise<string | null> {
           const gen = ++handshakeGen;
           baselining = true;
           buffer = [];
           let baseline: { rows: Record<string, unknown>[]; watermark: string };
           try {
-            baseline = await runtime.readCollectionBaseline(resolved);
+            baseline = await runtime.readCollectionBaseline(resolved, pin);
           } catch (err) {
             // A rejected re-baseline must not leave the collection permanently latched into
             // buffering: only reset when this handshake still owns the state (a newer
@@ -239,10 +239,12 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
 
         unsubs.push(runtime.walEventEmitter.subscribe(tableKey, handleTapPayload));
         unsubs.push(
-          runtime.onReconnect(() => {
-            void (async () => {
+          runtime.onReconnect((pin) => {
+            // Returning this promise (rather than firing it and forgetting) lets the
+            // supervisor's reconnect round actually await every listener's handshake.
+            return (async () => {
               try {
-                const watermark = await runHandshake();
+                const watermark = await runHandshake(pin);
                 if (watermark === null) return; // superseded by a newer reconnect handshake
                 if (collection.isDisposed) return;
                 collection.fireOnChange([], watermark);

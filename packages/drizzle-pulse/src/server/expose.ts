@@ -1,7 +1,9 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { desc, getColumns, getTableUniqueName, sql } from 'drizzle-orm';
+import { desc, type EmptyRelations, getColumns, getTableUniqueName, sql } from 'drizzle-orm';
 import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
+import { drizzle } from 'drizzle-orm/postgres';
 import {
+  type Connection,
   lsnFromString,
   type ReplicationConnection,
   type ReplicationEvent,
@@ -18,6 +20,9 @@ import { WalEventEmitter } from './wal-event-emitter.js';
 import { createShapeRowNormalizer } from './wal-shape-bridge.js';
 
 type RuntimeLifecycleListener = () => void;
+// Reconnect listeners receive the mid-round re-baseline pin (or null under pull:false / no
+// recovery) so they can read through it instead of racing the ordinary watermark path.
+type ReconnectListener = (pin: BaselinePin | null) => Promise<void> | void;
 
 export type ExposeWalConfig = {
   publicationName?: string;
@@ -95,23 +100,19 @@ const DEFAULT_SLOT_NAME = 'drizzle_pulse';
 // inside; a collection materialized after it just takes the Phase 18 watermark handshake.
 const REBASELINE_PIN_WINDOW_MS = 5000;
 
-type PulseStoreDbHandle = ReturnType<PulseStore['getDb']>;
-type PulseStoreTxHandle = Parameters<Parameters<PulseStoreDbHandle['transaction']>[0]>[0];
+// One connection lifecycle attempt: aborting closes the socket (the only way to stop a parked
+// minipg next() — see supervise()) and wakes an in-progress backoff sleep. `attempts` is the
+// terminal-path test seam replacing the old reconnectAttempts field.
+type Run = { abort: AbortController; attempts: number };
 
-// The snapshot-anchored embedded re-baseline pin (Task 2): an open repeatable-read admin
-// transaction holding the recreate's exported snapshot, consumed by readCollectionBaseline
-// until the window closes or it's forced shut (stop()/next recoverSlot()).
-type SnapshotBaseline = {
-  db: PulseStoreTxHandle;
+// The snapshot-anchored embedded re-baseline pin: a checked-out admin connection holding the
+// recreate's exported snapshot via SET TRANSACTION SNAPSHOT, consumed by readCollectionBaseline
+// until the reconnect round settles or it's forced shut (stop()/the next recoverSlot()).
+export type BaselinePin = {
+  db: ReturnType<typeof drizzle<EmptyRelations, Connection>>;
   watermark: string;
-  inFlight: number;
-  windowExpired: boolean;
-  releaseTimer: ReturnType<typeof setTimeout>;
-  finalize: () => void;
-  // Resolves once the pinned transaction has actually rolled back and its connection is free —
-  // callers that are about to close the pool or open a fresh pin must await this, or the
-  // in-flight ROLLBACK can race a pool teardown (surfaces as a logged "connection is closed").
-  txDone: Promise<void>;
+  round: Promise<unknown>;
+  close: () => Promise<void>;
 };
 
 // drizzle-orm's postgres executor wraps every driver error in a DrizzleQueryError, which does
@@ -153,6 +154,59 @@ function toSqlKeyedRow(
   return out;
 }
 
+// A resolve() with idempotent settling — supervise() resolves `first` from several exits
+// (connected, retry scheduled, gave up) and only the first must count.
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolveFn!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolveFn = res;
+  });
+  let settled = false;
+  return {
+    promise,
+    resolve: (value: T) => {
+      if (settled) return;
+      settled = true;
+      resolveFn(value);
+    },
+  };
+}
+
+// minipg's `release()` is already idempotent; `once` makes the ROLLBACK-then-release around it
+// idempotent too, so releasePin()/the backstop timer/a forced stop() can never double-run it.
+function once<T>(fn: () => Promise<T>): () => Promise<T> {
+  let result: Promise<T> | undefined;
+  return () => {
+    result ??= fn();
+    return result;
+  };
+}
+
+// stop()-during-backoff must be the abort waking this sleep, never a timer-vs-flag race.
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function backoffDelay(attempts: number): number {
+  const exponential = RECONNECT_BASE_DELAY_MS * 2 ** attempts;
+  const jitter = Math.random() * 1000;
+  return Math.min(exponential + jitter, RECONNECT_MAX_DELAY_MS);
+}
+
 export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   private readonly sourceTableMetadata: Map<string, SourceTableMetadata>;
   private readonly requestHandler: PulseRequestHandler;
@@ -167,28 +221,19 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   private eventsEpochs = new Map<string, string>();
 
   private store: PulseStore | null = null;
-  private replication: ReplicationConnection | null = null;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  isRunning = false;
-  private reconnectAttempts = 0;
-  // Set on the replication stream's 'begin' event (finalLsn), cleared once its 'commit' is
-  // handled — every insert/update/delete between the two shares this transaction's commit LSN.
-  // Row events carry no per-message LSN under minipg, so a null here (begin never observed) is
-  // a protocol anomaly, not a routine case.
-  private currentCommitLsn: string | null = null;
-  // Buffered row events for the in-flight transaction; persisted atomically on commit.
-  private pending: PendingWalEvent[] = [];
+  private run: Run | null = null;
+  private pin: BaselinePin | null = null;
   // In-memory mirror of the durable pulse_stream watermark — dedupes at-least-once replay after
   // a reconnect without a store round trip on every commit.
   private lastPersistedCommitLsn: string | null = null;
-  // Snapshot-anchored embedded re-baseline pin (Task 2), opened by recoverSlot() before
-  // rep.start() when live collections exist; readCollectionBaseline consumes it until it closes.
-  private snapshotBaseline: SnapshotBaseline | null = null;
   readonly walEventEmitter = new WalEventEmitter();
-  private everConnected = false;
-  private readonly reconnectListeners = new Set<RuntimeLifecycleListener>();
+  private readonly reconnectListeners = new Set<ReconnectListener>();
   private readonly stopListeners = new Set<RuntimeLifecycleListener>();
   private readonly terminalErrorListeners = new Set<(error: Error) => void>();
+
+  get isRunning(): boolean {
+    return this.run !== null;
+  }
 
   get sourceDb(): PulseSourceDb {
     return this.config.sourceDb;
@@ -198,7 +243,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   // not own collections — reconnect fires after the WAL stream re-establishes (live
   // collections must rebaseline to catch up on events missed while disconnected), and
   // stop fires as the runtime tears down (collections must dispose).
-  onReconnect(listener: RuntimeLifecycleListener): () => void {
+  onReconnect(listener: ReconnectListener): () => void {
     this.reconnectListeners.add(listener);
     return () => this.reconnectListeners.delete(listener);
   }
@@ -313,8 +358,25 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     return this.eventsEpochs.get(getTableConfig(eventsTable).name);
   }
 
+  // Shared per-table seeding step: skip-if-already-seeded is createBaselineSnapshot's own job;
+  // this just carries a baseline row (or none, for an empty source) from whichever handle the
+  // caller reads on (sourceDb for the resume path, the snapshot-pinned admin tx for a recreate)
+  // to the write handle the caller writes on (undefined = the admin db; a tx during rotation).
+  private async seedBaseline(
+    fetchLatest: () => Promise<Record<string, unknown> | undefined>,
+    writeHandle: Parameters<PulseStore['createBaselineSnapshot']>[3] | undefined,
+    meta: { sourceTable: PgTable; pkColumnName: string; eventsTable: PgTable },
+  ): Promise<void> {
+    const baselineRow = await fetchLatest();
+    await this.getPulseStore().createBaselineSnapshot(
+      meta.eventsTable,
+      meta.pkColumnName,
+      baselineRow ? toSqlKeyedRow(meta.sourceTable, baselineRow) : null,
+      writeHandle,
+    );
+  }
+
   async ensureBaselines(): Promise<void> {
-    const currentPulseStore = this.getPulseStore();
     const sourceDb = this.config.sourceDb;
 
     for (const queryName of this.registry.getQueryNames()) {
@@ -322,16 +384,21 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       const sourceTable = this.registry.getSourceTable(queryName);
       if (!pulseQuery || !sourceTable) continue;
 
-      const [baselineRow] = await sourceDb
-        .select()
-        .from(sourceTable)
-        .orderBy(desc(pulseQuery.pkColumn))
-        .limit(1);
-
-      await currentPulseStore.createBaselineSnapshot(
-        this.getEventsTableForQuery(queryName),
-        pulseQuery.pkColumn.name,
-        baselineRow ? toSqlKeyedRow(sourceTable, baselineRow) : null,
+      await this.seedBaseline(
+        async () => {
+          const [row] = await sourceDb
+            .select()
+            .from(sourceTable)
+            .orderBy(desc(pulseQuery.pkColumn))
+            .limit(1);
+          return row;
+        },
+        undefined,
+        {
+          sourceTable,
+          pkColumnName: pulseQuery.pkColumn.name,
+          eventsTable: this.getEventsTableForQuery(queryName),
+        },
       );
     }
   }
@@ -350,28 +417,19 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
    * silently missing until its next change. The window is a handful of microseconds per handshake;
    * closing it fully would require reading the watermark inside the same transaction/snapshot as
    * the baseline SELECT, which is not attempted here.
+   *
+   * `pin` (passed by the reconnect edge, `client/embedded/index.ts`) reads through the recreate's
+   * exported-snapshot connection instead — same visibility class as the WAL stream itself, so the
+   * recreate boundary is gapless by construction and closes the residual race above. A collection
+   * materialized after the pin's window closes falls through to the ordinary path.
    */
   async readCollectionBaseline(
     resolved: ResolvedPulseQuery,
+    pin?: BaselinePin | null,
   ): Promise<{ rows: Record<string, unknown>[]; watermark: string }> {
-    // Task 2: a mid-run recreate pins an exported snapshot for every live collection before
-    // rep.start() — reading through it here (rather than the ordinary watermark-first path
-    // below) runs on the pulse-owned admin connection (same visibility class as the WAL stream
-    // itself, which bypasses sourceDb session context by nature) and returns watermark =
-    // consistentPoint, making the recreate boundary gapless by construction and closing the
-    // WR-01 residual race there (the microsecond bound documented below only applies to the
-    // ordinary path). A collection materialized after the pin's window closes simply falls
-    // through to that ordinary path instead.
-    const pin = this.snapshotBaseline;
     if (pin) {
-      pin.inFlight += 1;
-      try {
-        const rows = await buildSelectQuery(pin.db, resolved.table, resolved);
-        return { rows, watermark: pin.watermark };
-      } finally {
-        pin.inFlight -= 1;
-        void this.maybeReleaseSnapshotBaseline(pin);
-      }
+      const rows = await buildSelectQuery(pin.db, resolved.table, resolved);
+      return { rows, watermark: pin.watermark };
     }
 
     // 'objects' mode is the one execute() overload whose return type doesn't route through the
@@ -391,28 +449,28 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   }
 
   async start(): Promise<void> {
-    if (this.isRunning) {
+    if (this.run) {
       this.logInfo('[WAL Listener] Already running');
       return;
     }
 
-    this.initializeDatabaseServices();
+    this.store ??= new PulseStore(this.config.databaseUrl, this.eventsSchema);
 
     try {
       await this.reconcile();
 
-      this.isRunning = true;
-
-      if (this.pullEnabled) {
-        await this.ensureBaselines();
-      }
-
-      await this.connectReplication();
+      const run: Run = { abort: new AbortController(), attempts: 0 };
+      this.run = run;
+      const first = deferred<void>();
+      void this.supervise(run, first);
+      await first.promise;
     } catch (error) {
-      this.isRunning = false;
       // Mirrors stop()'s pool teardown so a failed guard doesn't leak connections — callers
       // await start() rejections and then discard the runtime.
-      await this.closePool();
+      this.run = null;
+      const store = this.store;
+      this.store = null;
+      await store?.end();
       throw error;
     }
   }
@@ -422,15 +480,15 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       listener();
     }
 
-    this.isRunning = false;
-    this.clearReconnectTimer();
-    await this.releaseSnapshotBaseline();
+    const run = this.run;
+    this.run = null;
+    run?.abort.abort(); // closes the socket via supervise()'s abort hook, wakes a backoff sleep
 
-    const rep = this.replication;
-    this.replication = null;
-    rep?.end();
+    await this.releasePin();
 
-    await this.closePool();
+    const store = this.store;
+    this.store = null;
+    await store?.end();
 
     this.logInfo('[WAL Listener] Stopped');
   }
@@ -444,24 +502,13 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
    * unmet precondition.
    */
   async provision(): Promise<void> {
-    this.initializeDatabaseServices();
+    this.store ??= new PulseStore(this.config.databaseUrl, this.eventsSchema);
     try {
       await this.reconcile();
     } finally {
-      await this.closePool();
-    }
-  }
-
-  private initializeDatabaseServices(): void {
-    this.store ??= new PulseStore(this.config.databaseUrl, this.eventsSchema);
-  }
-
-  private async closePool(): Promise<void> {
-    const store = this.store;
-    this.store = null;
-
-    if (store) {
-      await store.end();
+      const store = this.store;
+      this.store = null;
+      await store?.end();
     }
   }
 
@@ -679,68 +726,97 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     this.eventsEpochs = epochs;
   }
 
-  private onReplicationStart(): void {
-    if (!this.isRunning) return;
-    this.logInfo('[WAL Listener] Replication started');
-    if (this.everConnected) {
-      for (const listener of [...this.reconnectListeners]) {
-        listener();
+  // The linear supervisor loop: one connection attempt per iteration, `try/catch/finally` in
+  // statement order instead of a callback ring. `signal.aborted` is the single successor to the
+  // three superseded-connection guards the old code needed — exactly one connection exists per
+  // iteration, so there is nothing left to supersede.
+  private async supervise(run: Run, first: { promise: Promise<void>; resolve: () => void }) {
+    const { signal } = run.abort;
+    // Per-run, not per-instance (documented delta a): a stopped-then-restarted runtime fires no
+    // reconnect edge on its first connect.
+    let everConnected = false;
+
+    while (!signal.aborted) {
+      let rep: ReplicationConnection | undefined;
+      // minipg's parked next() only stops when the socket closes — end() is the only thing
+      // that wakes a pending pull, so stop() must reach here via the abort signal, never by
+      // awaiting supervise() itself.
+      const kill = () => rep?.end();
+      try {
+        rep = await replication(this.config.databaseUrl);
+        signal.addEventListener('abort', kill);
+
+        const { slot, from } = this.pullEnabled
+          ? await this.resolveSlot(rep) // recovery lives INSIDE the try — never consumes a retry
+          : await this.createTempSlot(rep);
+
+        this.logInfo(`[WAL Listener] Subscribing to slot '${slot}'`);
+        const iterator = rep.start({
+          slot,
+          publications: [this.publicationName],
+          from,
+          statusIntervalMs: 1000,
+          idleAck: true,
+          messages: false,
+        });
+
+        const round = everConnected
+          ? Promise.allSettled([...this.reconnectListeners].map((listener) => listener(this.pin)))
+          : Promise.resolve([]);
+        if (this.pin) this.pin.round = round;
+        void round.then(() => this.releasePin());
+
+        everConnected = true;
+        first.resolve();
+        this.logInfo('[WAL Listener] Replication started');
+
+        await this.stream(rep, iterator, run); // returns on clean end too — falls into retry below
+      } catch (error) {
+        if (signal.aborted) return;
+        this.logError('[WAL Listener] Replication error:', error);
+      } finally {
+        signal.removeEventListener('abort', kill);
+        rep?.end();
+      }
+
+      if (signal.aborted) return;
+
+      if (run.attempts >= RECONNECT_MAX_RETRIES) {
+        first.resolve();
+        this.giveUp();
+        return;
+      }
+
+      run.attempts += 1;
+      first.resolve(); // first-connect failure still resolves start() (today's behavior)
+      this.logInfo(
+        `[WAL Listener] Reconnecting (attempt ${run.attempts}/${RECONNECT_MAX_RETRIES})`,
+      );
+      await abortableSleep(backoffDelay(run.attempts), signal);
+    }
+  }
+
+  // The terminal path: reachable only once run.attempts exhausts RECONNECT_MAX_RETRIES.
+  private giveUp(): void {
+    this.logError('[WAL Listener] Max reconnection attempts reached. Giving up.');
+    const terminalError = new Error(
+      `WAL replication failed permanently after ${RECONNECT_MAX_RETRIES} reconnect attempts`,
+    );
+    for (const listener of [...this.terminalErrorListeners]) {
+      try {
+        listener(terminalError);
+      } catch (err) {
+        this.logError('[WAL Listener] onTerminalError listener error:', err);
       }
     }
-    this.everConnected = true;
-    this.reconnectAttempts = 0;
+    void this.stop();
   }
 
-  // Branches every (re)connect on slot state, through ONE shared code path for boot and
-  // mid-run reconnect (LOCKED backfill/resume spec, STATE.md §Decisions, D-02): resolveSlotStartup
-  // resumes an intact+continuous slot from confirmed_flush, or routes to recoverSlot()'s full
-  // recovery machine. Slot-state resolution runs inside a successful connectReplication()
-  // attempt, never the failure path — a recreate never consumes a reconnect retry (research Q4).
-  private async connectReplication(): Promise<void> {
-    try {
-      const rep = await replication(this.config.databaseUrl);
-      this.replication = rep;
-
-      // pull:false (D-01): a fresh session-scoped, randomized-suffix slot on every (re)connect,
-      // never persisted — a crashed process can never leak a WAL-retaining slot.
-      const slotName = this.pullEnabled
-        ? this.slotName
-        : `${this.slotName}_${randomBytes(4).toString('hex')}`;
-
-      const { from } = await this.resolveSlotStartup(rep, slotName);
-
-      this.logInfo(`[WAL Listener] Subscribing to slot '${slotName}'`);
-      const iterator = rep.start({
-        slot: slotName,
-        publications: [this.publicationName],
-        from,
-        statusIntervalMs: 1000,
-        idleAck: true,
-        messages: false,
-      });
-
-      this.onReplicationStart();
-      void this.runReplicationLoop(rep, iterator);
-    } catch (error) {
-      this.logError('[WAL Listener] Connection error:', error);
-      await this.handleDisconnect(this.replication);
-    }
-  }
-
-  // The shared slot-state branch (D-02): pull:false always recreates (D-01 — no continuity to
-  // check, a temporary slot never survives past its own connection). pull:true resumes an
-  // intact slot whose durably-persisted events-lsn covers its confirmed_flush position;
-  // anything else (missing row, wal_status 'lost', no/behind watermark — covers first boot,
-  // max_slot_wal_keep_size invalidation, failover, and a manual drop) recreates via recoverSlot().
-  private async resolveSlotStartup(
-    rep: ReplicationConnection,
-    slotName: string,
-  ): Promise<{ from: string | undefined }> {
-    if (!this.pullEnabled) {
-      const consistentPoint = await this.recoverSlot(rep, slotName);
-      return { from: consistentPoint };
-    }
-
+  // pull:true only — the resume-vs-recover decision table. The intact-slot resume branch stays
+  // structurally dead in production (the persisted watermark is the commit record's own LSN,
+  // and ack always advances confirmed_flush past it); it exists for the case Postgres itself
+  // guards against below and as documentation of intent. Tests reach it via seeded watermarks.
+  private async resolveSlot(rep: ReplicationConnection): Promise<{ slot: string; from?: string }> {
     const adminDb = this.getPulseStore().getDb();
     const result = await adminDb.execute<{
       slot_name: string;
@@ -749,73 +825,101 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       wal_status: string | null;
       confirmed_flush_lsn: string | null;
     }>(
-      sql`SELECT slot_name, active, active_pid, wal_status, confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name = ${slotName}`,
+      sql`SELECT slot_name, active, active_pid, wal_status, confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name = ${this.slotName}`,
     );
     const slot = result.rows[0];
-    const intact = slot !== undefined && slot.wal_status !== 'lost';
 
-    const watermark = intact ? await this.getPulseStore().getStreamWatermark(slotName) : null;
-    const continuous =
-      intact &&
-      watermark !== null &&
-      !!slot?.confirmed_flush_lsn &&
-      lsnFromString(watermark) >= lsnFromString(slot.confirmed_flush_lsn);
+    if (!slot || slot.wal_status === 'lost') {
+      return { slot: this.slotName, from: await this.recoverSlot(rep) };
+    }
 
-    if (!intact || !continuous || !slot) {
-      const consistentPoint = await this.recoverSlot(rep, slotName);
-      return { from: consistentPoint };
+    const watermark = await this.getPulseStore().getStreamWatermark(this.slotName);
+    // The null guard on confirmed_flush_lsn is load-bearing: lsnFromString throws on null, and
+    // null must route to recovery, not a caught exception that would burn a reconnect retry.
+    if (
+      watermark === null ||
+      !slot.confirmed_flush_lsn ||
+      lsnFromString(watermark) < lsnFromString(slot.confirmed_flush_lsn)
+    ) {
+      return { slot: this.slotName, from: await this.recoverSlot(rep) };
     }
 
     if (slot.active && slot.active_pid) {
       this.logInfo(
-        `[WAL Listener] Terminating stale connection on slot '${slotName}' (PID ${slot.active_pid})`,
+        `[WAL Listener] Terminating stale connection on slot '${this.slotName}' (PID ${slot.active_pid})`,
       );
-      await this.evictWalsender(slotName);
+      await this.evictWalsender(this.slotName);
     }
 
-    this.logInfo(`[WAL Listener] Replication slot '${slotName}' ready`);
+    await this.ensureBaselines();
+
+    this.logInfo(`[WAL Listener] Replication slot '${this.slotName}' ready`);
     this.lastPersistedCommitLsn = watermark;
-    return { from: undefined }; // server resumes from the slot's confirmed_flush position
+    return { slot: this.slotName, from: undefined }; // server resumes from confirmed_flush
   }
 
-  // Full recovery machine (D-02/D-03): drop-if-present any broken persistent slot, recreate with
-  // an exported snapshot, rotate-and-seed the events tables from it (pull:true only), and open
-  // the embedded re-baseline pin from the SAME snapshot when live collections exist (Task 2) —
-  // all before the caller issues rep.start(), because the export dies on this connection's next
-  // command (replication.d.ts). Returns the consistentPoint the caller starts from.
-  private async recoverSlot(rep: ReplicationConnection, slotName: string): Promise<string> {
-    await this.releaseSnapshotBaseline();
+  // Full recovery machine (pull:true only now): drop any broken persistent slot, recreate with
+  // an exported snapshot, rotate-and-seed the events tables from it, and open the embedded
+  // re-baseline pin from the SAME snapshot when live collections exist — all before the caller
+  // issues rep.start(), because the export dies on this connection's next command.
+  private async recoverSlot(rep: ReplicationConnection): Promise<string> {
+    await this.releasePin(); // two pins never coexist
 
-    await this.evictWalsender(slotName);
-    await this.dropSlotWithRetry(slotName);
+    await this.evictWalsender(this.slotName);
+    await this.dropSlotWithRetry(this.slotName);
 
-    const { consistentPoint, snapshot } = await rep.createSlot(slotName, {
-      temporary: !this.pullEnabled,
+    const { consistentPoint, snapshot } = await rep.createSlot(this.slotName, {
+      temporary: false,
       snapshot: 'export',
     });
     if (!snapshot) {
       throw new Error(
-        `createSlot('${slotName}', { snapshot: 'export' }) returned no exported snapshot name`,
+        `createSlot('${this.slotName}', { snapshot: 'export' }) returned no exported snapshot name`,
       );
     }
 
-    if (this.pullEnabled) {
-      await this.rotateAndSeedEvents(snapshot, consistentPoint);
-    }
+    await this.rotateAndSeedEvents(snapshot, consistentPoint);
 
     // Live collections only exist mid-run (the embedded factory requires a running runtime, so
-    // there are none at boot — research Q4).
+    // there are none at boot).
     if (this.reconnectListeners.size > 0) {
-      await this.openRebaselinePin(snapshot, consistentPoint);
+      await this.openPin(snapshot, consistentPoint);
     }
 
-    // Operators must see this (D-02): a recreate resets events/baselines. Name the slot, never
+    // Operators must see this: a recreate resets events/baselines. Name the slot, never
     // databaseUrl (V7 — info disclosure).
     this.logError(
-      `[WAL Listener] Replication slot '${slotName}' was missing or invalidated and has been recreated`,
+      `[WAL Listener] Replication slot '${this.slotName}' was missing or invalidated and has been recreated`,
     );
 
     return consistentPoint;
+  }
+
+  // pull:false (D-01): a fresh session-scoped, randomized-suffix temporary slot on every
+  // (re)connect, never persisted — a crashed process can never leak a WAL-retaining slot. Never
+  // threads the pull:true recovery machine (no continuity to check for a slot that never
+  // survives past its own connection).
+  private async createTempSlot(
+    rep: ReplicationConnection,
+  ): Promise<{ slot: string; from: string }> {
+    await this.releasePin();
+
+    const slot = `${this.slotName}_${randomBytes(4).toString('hex')}`;
+    const { consistentPoint, snapshot } = await rep.createSlot(slot, {
+      temporary: true,
+      snapshot: 'export',
+    });
+    if (this.reconnectListeners.size > 0) {
+      if (!snapshot) {
+        throw new Error(
+          `createSlot('${slot}', { snapshot: 'export' }) returned no exported snapshot name`,
+        );
+      }
+      await this.openPin(snapshot, consistentPoint);
+    }
+
+    this.logInfo(`[WAL Listener] Created temporary slot '${slot}'`);
+    return { slot, from: consistentPoint };
   }
 
   // Poll-retry a slot drop: the previous owning backend's "active" flag can lag its actual
@@ -874,13 +978,11 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   }
 
   // D-03: one pinned repeatable-read admin transaction rotates every registered events table's
-  // epoch, truncates it, and seeds it from the exported snapshot ($op:'snapshot', A5) — the
-  // sole write path outside reconcile()/the WAL loop; sdk.ts pull handlers stay strictly
-  // read-only (D-03 invariant).
+  // epoch, truncates it, and seeds it from the exported snapshot — the sole write path outside
+  // reconcile()/the WAL loop; sdk.ts pull handlers stay strictly read-only (D-03 invariant).
   private async rotateAndSeedEvents(snapshotName: string, consistentPoint: string): Promise<void> {
     assertSnapshotName(snapshotName);
     const adminDb = this.getPulseStore().getDb();
-    const pulseStore = this.getPulseStore();
     const metaTable = sql`${sql.identifier(this.eventsSchema)}.${sql.identifier('pulse_meta')}`;
     const streamTable = sql`${sql.identifier(this.eventsSchema)}.${sql.identifier('pulse_stream')}`;
 
@@ -913,18 +1015,17 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
           await tx.execute(sql`TRUNCATE TABLE ${eventsIdentifier}`);
 
-          const [baselineRow] = await tx
-            .select()
-            .from(sourceTable)
-            .orderBy(desc(pulseQuery.pkColumn))
-            .limit(1);
-
-          // Skip when the source is empty, exactly as ensureBaselines does today.
-          await pulseStore.createBaselineSnapshot(
-            eventsTable,
-            pulseQuery.pkColumn.name,
-            baselineRow ? toSqlKeyedRow(sourceTable, baselineRow) : null,
+          await this.seedBaseline(
+            async () => {
+              const [row] = await tx
+                .select()
+                .from(sourceTable)
+                .orderBy(desc(pulseQuery.pkColumn))
+                .limit(1);
+              return row;
+            },
             tx,
+            { sourceTable, pkColumnName: pulseQuery.pkColumn.name, eventsTable },
           );
         }
 
@@ -943,132 +1044,131 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     this.lastPersistedCommitLsn = consistentPoint;
   }
 
-  // Task 2: pin the exported snapshot on its own admin transaction for live embedded
-  // collections, BEFORE rep.start() — the same eager-pin-then-start construction as minipg's
-  // own backfill(). Parks on a deferred release so the transaction (and its snapshot) survives
-  // past this function returning; readCollectionBaseline consumes it via this.snapshotBaseline.
-  private async openRebaselinePin(snapshotName: string, consistentPoint: string): Promise<void> {
-    assertSnapshotName(snapshotName);
-    const adminDb = this.getPulseStore().getDb();
+  // Checked-out-connection pin: a dedicated admin connection running BEGIN READ ONLY + SET
+  // TRANSACTION SNAPSHOT sequentially, so a setup failure is an ordinary rejection (release()
+  // then rethrow) instead of the old parked-deferred hang class. Must be called BEFORE the
+  // caller issues rep.start() — the exported snapshot dies on this connection's next command.
+  private async openPin(snapshot: string, watermark: string): Promise<void> {
+    assertSnapshotName(snapshot);
+    const { client, release } = await this.getPulseStore().checkout();
 
-    let resolveReady: ((tx: PulseStoreTxHandle) => void) | undefined;
-    let rejectReady: ((error: unknown) => void) | undefined;
-    const ready = new Promise<PulseStoreTxHandle>((resolve, reject) => {
-      resolveReady = resolve;
-      rejectReady = reject;
-    });
-    let resolveParked: (() => void) | undefined;
-    const parked = new Promise<void>((resolve) => {
-      resolveParked = resolve;
-    });
-
-    const txDone = adminDb
-      .transaction(
-        async (tx) => {
-          await tx.execute(sql.raw(`SET TRANSACTION SNAPSHOT '${snapshotName}'`));
-          resolveReady?.(tx);
-          await parked;
-        },
-        { isolationLevel: 'repeatable read' },
-      )
-      .catch((error) => {
-        this.logError('[WAL Listener] Re-baseline pin transaction ended with an error:', error);
-        // No-op once resolveReady has already fired; unblocks the waiter on setup failure.
-        rejectReady?.(error);
-      });
-
-    const tx = await ready;
-
-    const pin: SnapshotBaseline = {
-      db: tx,
-      watermark: consistentPoint,
-      inFlight: 0,
-      windowExpired: false,
-      releaseTimer: setTimeout(() => {
-        pin.windowExpired = true;
-        void this.maybeReleaseSnapshotBaseline(pin);
-      }, REBASELINE_PIN_WINDOW_MS),
-      finalize: () => resolveParked?.(),
-      txDone,
-    };
-    this.snapshotBaseline = pin;
-  }
-
-  // Releases the pin once BOTH the window has closed AND no readCollectionBaseline call is
-  // mid-flight against it — never indefinitely (T-19-12). Awaits the transaction's actual
-  // rollback so a caller chaining off this never races the pin's connection still winding down.
-  private async maybeReleaseSnapshotBaseline(pin: SnapshotBaseline): Promise<void> {
-    if (this.snapshotBaseline !== pin || pin.inFlight > 0 || !pin.windowExpired) {
-      return;
+    try {
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      await client.query(`SET TRANSACTION SNAPSHOT '${snapshot}'`);
+    } catch (error) {
+      release();
+      throw error;
     }
-    this.snapshotBaseline = null;
-    clearTimeout(pin.releaseTimer);
-    pin.finalize();
-    await pin.txDone;
+
+    const close = once(async () => {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // Connection may already be dead — release() below still runs.
+      } finally {
+        release();
+      }
+    });
+
+    const pin: BaselinePin = {
+      db: drizzle({ client }),
+      watermark,
+      round: Promise.resolve(),
+      close,
+    };
+    this.pin = pin;
+
+    // Backstop, armed at creation (covers rep.start() throwing before any reconnect round
+    // fires) — identity-guarded so a stale backstop from a superseded pin can never release a
+    // newer one.
+    setTimeout(() => {
+      if (this.pin === pin) void this.releasePin();
+    }, REBASELINE_PIN_WINDOW_MS);
   }
 
-  // Forces an active pin closed regardless of window/inFlight — stop() and a subsequent
-  // recoverSlot() must never let two pins coexist or leak one past teardown. Awaits the actual
-  // rollback before returning: closing the pool (stop()) or opening a new pin (recoverSlot())
-  // right after must never race this pin's connection still winding down.
-  private async releaseSnapshotBaseline(): Promise<void> {
-    const pin = this.snapshotBaseline;
+  // One release path: linear, never rolls back under a still-in-flight read. stop(),
+  // recoverSlot(), createTempSlot(), the round-settled hook, and the backstop all route here.
+  private async releasePin(): Promise<void> {
+    const pin = this.pin;
     if (!pin) return;
-    this.snapshotBaseline = null;
-    clearTimeout(pin.releaseTimer);
-    pin.finalize();
-    await pin.txDone;
+    this.pin = null;
+    await pin.round; // a baseline SELECT outliving the pin window still completes
+    await pin.close();
   }
 
-  // The tight for-await loop: minipg's internal read loop only advances while a next() pull is
-  // pending, so this never parks between pulls — persisting inside the commit branch is fine
-  // (it's still driven by the same next() call), background work between pulls is not.
-  private async runReplicationLoop(
+  // One local per connection (`tx`) replaces the old currentCommitLsn + pending fields — this
+  // also closes the stale-buffer-across-reconnect quirk for free. A clean iterator end simply
+  // returns; the supervisor's loop tail supplies the reconnect (the CopyDone fix stays closed).
+  private async stream(
     rep: ReplicationConnection,
     iterator: AsyncGenerator<ReplicationEvent>,
+    run: Run,
   ): Promise<void> {
-    try {
-      for await (const ev of iterator) {
-        if (ev.kind === 'begin') {
-          this.currentCommitLsn = ev.finalLsn;
-          this.pending = [];
-          continue;
-        }
-        if (ev.kind === 'insert' || ev.kind === 'update' || ev.kind === 'delete') {
-          this.bufferWalEvent(ev);
-          continue;
-        }
-        if (ev.kind === 'commit') {
-          await this.handleCommit(rep, ev);
-        }
-        // relation/truncate/message: ignored
-      }
-    } catch (error) {
-      if (this.replication !== rep) return; // superseded by a newer connection — expected
-      this.logError('[WAL Listener] Replication error:', error);
-      await this.handleDisconnect(rep);
-      return;
-    }
+    let tx: { commitLsn: string; events: PendingWalEvent[] } | null = null;
 
-    if (this.replication !== rep) return; // superseded; the old connection's stream ended cleanly
-    this.logInfo(`[WAL Listener] Stream for slot '${this.slotName}' ended cleanly; reconnecting`);
-    await this.handleDisconnect(rep);
+    for await (const ev of iterator) {
+      if (ev.kind === 'begin') {
+        tx = { commitLsn: ev.finalLsn, events: [] };
+        continue;
+      }
+      if (ev.kind === 'insert' || ev.kind === 'update' || ev.kind === 'delete') {
+        if (!tx) {
+          // pgoutput streams transactions whole (begin always precedes its row events), so this
+          // is a protocol anomaly, not routine — there is no per-message LSN to fall back to.
+          this.logError(
+            `[WAL Listener] Protocol anomaly: no tracked begin.finalLsn for ${ev.schema}.${ev.table}; skipping event`,
+          );
+          continue;
+        }
+        await this.decodeInto(tx.events, ev);
+        continue;
+      }
+      if (ev.kind !== 'commit') continue; // relation/truncate/message: ignored
+
+      const t = tx;
+      tx = null;
+
+      if (
+        !t ||
+        (this.lastPersistedCommitLsn !== null &&
+          lsnFromString(t.commitLsn) <= lsnFromString(this.lastPersistedCommitLsn))
+      ) {
+        // No begin was observed, or this is a replayed transaction (at-least-once reconnect)
+        // already durably persisted — skip persist AND the tap emits.
+        rep.ack(ev.endLsn);
+        continue;
+      }
+
+      if (this.pullEnabled) {
+        await this.getPulseStore().persistCommit(t.events, this.slotName, t.commitLsn);
+        this.lastPersistedCommitLsn = t.commitLsn;
+      }
+
+      // Reset only after real progress, not right after rep.start() — an instantly-clean-ending
+      // server (zero commits per connection) must still exhaust run.attempts and reach the
+      // terminal path instead of reconnecting forever (WR-02).
+      run.attempts = 0;
+
+      for (const event of t.events) {
+        this.walEventEmitter.emit(
+          event.tableQualifiedName,
+          event.op,
+          event.row,
+          event.oldRow,
+          t.commitLsn,
+        );
+      }
+
+      // endLsn, never lsn — idleAck's gate tracks endLsn, and only after persist resolves.
+      rep.ack(ev.endLsn);
+    }
   }
 
-  private bufferWalEvent(
+  private async decodeInto(
+    events: PendingWalEvent[],
     ev: Extract<ReplicationEvent, { kind: 'insert' | 'update' | 'delete' }>,
-  ): void {
+  ): Promise<void> {
     const tableQualifiedName = `${ev.schema}.${ev.table}`;
-
-    if (this.currentCommitLsn === null) {
-      // pgoutput streams transactions whole (begin always precedes its row events), so this is
-      // a protocol anomaly, not routine — there is no per-message LSN to fall back to under
-      // minipg. Skip the event entirely; a later re-baseline recovers it.
-      this.logError(
-        `[WAL Listener] Protocol anomaly: no tracked begin.finalLsn for ${tableQualifiedName}; skipping event`,
-      );
-      return;
-    }
 
     const metadata = this.sourceTableMetadata.get(tableQualifiedName);
     if (!metadata) {
@@ -1125,19 +1225,19 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     if (ev.kind === 'update' && oldPk != null && pkChanged) {
       // pk-changing UPDATE (BUG-02): a single update entry keyed by the new pk leaves every
       // consumer holding a ghost row under the old pk. Synthesize delete(oldPk) then
-      // insert(newPk) — delete MUST precede insert since handleCommit fans out this.pending in
-      // order (per-index snapshots for the events table, emit order for the tap).
+      // insert(newPk) — delete MUST precede insert since stream()'s commit case fans out
+      // `events` in order (per-index snapshots for the events table, emit order for the tap).
       const base = {
         eventsTable: metadata.eventsTable,
         pkColumnName: metadata.pkColumnName,
         tableQualifiedName,
       };
-      this.pending.push({ ...base, op: 'delete', pkValue: oldPk, row: {}, oldRow });
-      this.pending.push({ ...base, op: 'insert', pkValue, row, oldRow: null });
+      events.push({ ...base, op: 'delete', pkValue: oldPk, row: {}, oldRow });
+      events.push({ ...base, op: 'insert', pkValue, row, oldRow: null });
       return;
     }
 
-    this.pending.push({
+    events.push({
       eventsTable: metadata.eventsTable,
       pkColumnName: metadata.pkColumnName,
       pkValue,
@@ -1146,119 +1246,6 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       oldRow,
       tableQualifiedName,
     });
-  }
-
-  private async handleCommit(
-    rep: ReplicationConnection,
-    ev: Extract<ReplicationEvent, { kind: 'commit' }>,
-  ): Promise<void> {
-    const commitLsn = this.currentCommitLsn;
-    const pending = this.pending;
-    this.currentCommitLsn = null;
-    this.pending = [];
-
-    if (commitLsn === null) {
-      // No begin was observed for this transaction (see bufferWalEvent) — nothing was buffered
-      // to persist.
-      rep.ack(ev.endLsn);
-      return;
-    }
-
-    if (!this.pullEnabled) {
-      // No events tables, no persistence, no replay-dedupe concern (D-01's temporary slot never
-      // survives a reconnect) — emit taps directly; tap consumers key off lsn since Phase 18.
-      pending.forEach((event) => {
-        this.walEventEmitter.emit(
-          event.tableQualifiedName,
-          event.op,
-          event.row,
-          event.oldRow,
-          commitLsn,
-        );
-      });
-      rep.ack(ev.endLsn);
-      return;
-    }
-
-    if (
-      this.lastPersistedCommitLsn !== null &&
-      lsnFromString(commitLsn) <= lsnFromString(this.lastPersistedCommitLsn)
-    ) {
-      // Replayed transaction (at-least-once reconnect) — already durably persisted; skip persist
-      // AND the tap emits.
-      rep.ack(ev.endLsn);
-      return;
-    }
-
-    await this.getPulseStore().persistCommit(pending, this.slotName, commitLsn);
-    this.lastPersistedCommitLsn = commitLsn;
-
-    pending.forEach((event) => {
-      this.walEventEmitter.emit(
-        event.tableQualifiedName,
-        event.op,
-        event.row,
-        event.oldRow,
-        commitLsn,
-      );
-    });
-
-    // endLsn, never lsn — idleAck's gate tracks endLsn, and only after persist resolves.
-    rep.ack(ev.endLsn);
-  }
-
-  private async handleDisconnect(rep: ReplicationConnection | null): Promise<void> {
-    if (rep && this.replication === rep) {
-      this.replication = null;
-    }
-    rep?.end();
-
-    if (!this.isRunning) {
-      return;
-    }
-
-    this.clearReconnectTimer();
-
-    if (this.reconnectAttempts >= RECONNECT_MAX_RETRIES) {
-      this.logError('[WAL Listener] Max reconnection attempts reached. Giving up.');
-      const terminalError = new Error(
-        `WAL replication failed permanently after ${RECONNECT_MAX_RETRIES} reconnect attempts`,
-      );
-      for (const listener of [...this.terminalErrorListeners]) {
-        try {
-          listener(terminalError);
-        } catch (err) {
-          this.logError('[WAL Listener] onTerminalError listener error:', err);
-        }
-      }
-      void this.stop();
-      return;
-    }
-
-    const exponentialDelay = RECONNECT_BASE_DELAY_MS * 2 ** this.reconnectAttempts;
-    const jitter = Math.random() * 1000;
-    const delay = Math.min(exponentialDelay + jitter, RECONNECT_MAX_DELAY_MS);
-
-    this.reconnectAttempts += 1;
-    this.logInfo(
-      `[WAL Listener] Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts}/${RECONNECT_MAX_RETRIES})`,
-    );
-
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      if (this.isRunning) {
-        void this.connectReplication();
-      }
-    }, delay);
-  }
-
-  private clearReconnectTimer(): void {
-    if (!this.reconnectTimer) {
-      return;
-    }
-
-    clearTimeout(this.reconnectTimer);
-    this.reconnectTimer = null;
   }
 
   private getPulseStore(): PulseStore {
