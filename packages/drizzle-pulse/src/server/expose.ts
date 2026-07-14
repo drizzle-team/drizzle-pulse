@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { desc, getTableUniqueName, sql } from 'drizzle-orm';
 import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
 import {
@@ -39,17 +39,26 @@ export type ExposeConfig = {
   databaseUrl: string;
   /**
    * The app's own drizzle connection; baseline and query reads run on it to keep its session
-   * context (RLS, search_path). node-postgres pools must set `types` to deliver
-   * date/timestamp/timestamptz/interval/point as raw text (postgres-js does so natively).
+   * context (RLS, search_path).
    */
   sourceDb: PulseSourceDb;
-  eventsSchema?: string;
-  wal?: ExposeWalConfig;
   /**
-   * Max events a single pull may replay before it falls back to a full reset instead of
-   * streaming an unbounded batch. Defaults to {@link DEFAULT_PULL_EVENT_LIMIT} (1000).
+   * HTTP pull protocol. `true` serves it with defaults; an object serves it configured;
+   * `false` runs embedded-only — no events tables provisioned or written, `runtime.handlers`
+   * unavailable.
    */
-  pullEventLimit?: number;
+  pull:
+    | boolean
+    | {
+        /** Schema for the `__events_*` tables (default {@link DEFAULT_EVENTS_SCHEMA}). */
+        eventsSchema?: string;
+        /**
+         * Max events a single pull may replay before it falls back to a full reset instead of
+         * streaming an unbounded batch. Defaults to {@link DEFAULT_PULL_EVENT_LIMIT} (1000).
+         */
+        eventLimit?: number;
+      };
+  wal?: ExposeWalConfig;
   logLevel?: LogLevel;
 };
 
@@ -91,6 +100,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   readonly publicationName: string;
   readonly slotName: string;
   private readonly eventsSchema: string;
+  // `pull: false` runs embedded-only: no events tables, no persistence, handlers unavailable.
+  private readonly pullEnabled: boolean;
   // Populated by reconcile(): events-table name -> current epoch (uuid, rotated on every DDL
   // recreate). Handlers read it via getEpochForQuery to mint/validate cursor tokens.
   private eventsEpochs = new Map<string, string>();
@@ -150,7 +161,10 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     const wal = this.config.wal ?? {};
     this.publicationName = wal.publicationName ?? DEFAULT_PUBLICATION_NAME;
     this.slotName = wal.slotName ?? DEFAULT_SLOT_NAME;
-    this.eventsSchema = this.config.eventsSchema ?? DEFAULT_EVENTS_SCHEMA;
+    this.pullEnabled = this.config.pull !== false;
+    this.eventsSchema =
+      (typeof this.config.pull === 'object' ? this.config.pull.eventsSchema : undefined) ??
+      DEFAULT_EVENTS_SCHEMA;
 
     this.sourceTableMetadata = new Map();
     // Two different source tables can produce the same events-table name (the `_`→`__`
@@ -197,11 +211,17 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       () => this.getPulseStore(),
       (queryName: string) => this.getEventsTableForQuery(queryName),
       (queryName: string) => this.getEpochForQuery(queryName),
-      this.config.pullEventLimit ?? DEFAULT_PULL_EVENT_LIMIT,
+      (typeof this.config.pull === 'object' ? this.config.pull.eventLimit : undefined) ??
+        DEFAULT_PULL_EVENT_LIMIT,
     );
   }
 
   get handlers() {
+    if (!this.pullEnabled) {
+      throw new Error(
+        'pull is disabled (pull: false) — HTTP handlers are unavailable on an embedded-only runtime',
+      );
+    }
     return this.requestHandler;
   }
 
@@ -300,15 +320,18 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       await this.reconcile();
 
       this.isRunning = true;
-      await this.ensureBaselines();
 
-      let maxSnapshot = 0;
-      const service = this.getPulseStore();
-      for (const meta of this.sourceTableMetadata.values()) {
-        const snap = await service.getLatestSnapshot(meta.eventsTable);
-        maxSnapshot = Math.max(maxSnapshot, snap);
+      if (this.pullEnabled) {
+        await this.ensureBaselines();
+
+        let maxSnapshot = 0;
+        const service = this.getPulseStore();
+        for (const meta of this.sourceTableMetadata.values()) {
+          const snap = await service.getLatestSnapshot(meta.eventsTable);
+          maxSnapshot = Math.max(maxSnapshot, snap);
+        }
+        this.lastPersistedSnapshot = maxSnapshot;
       }
-      this.lastPersistedSnapshot = maxSnapshot;
 
       await this.connectReplication();
     } catch (error) {
@@ -508,71 +531,82 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         }
       }
 
-      await tx.execute(sql`CREATE SCHEMA IF NOT EXISTS ${schema}`);
-      await tx.execute(
-        sql`CREATE TABLE IF NOT EXISTS ${metaTable} (table_name text PRIMARY KEY, ddl_hash text NOT NULL, epoch uuid NOT NULL)`,
-      );
-      // Durable commit-LSN dedupe watermark (research Open Question 1): survives a full process
-      // restart so resuming an intact slot doesn't re-persist minipg's at-least-once replay tail.
-      await tx.execute(
-        sql`CREATE TABLE IF NOT EXISTS ${streamTable} (slot_name text PRIMARY KEY, last_lsn text NOT NULL)`,
-      );
-
-      const metaResult = await tx.execute<{
-        table_name: string;
-        ddl_hash: string;
-        epoch: string;
-      }>(sql`SELECT table_name, ddl_hash, epoch FROM ${metaTable}`);
-      const metaByName = new Map(metaResult.rows.map((row) => [row.table_name, row] as const));
-
-      const physicalResult = await tx.execute<{ relname: string }>(
-        sql`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ${eventsSchema} AND c.relkind IN ('r', 'p')`,
-      );
-      const physical = new Set(physicalResult.rows.map((row) => row.relname));
-
-      const desired = new Set<string>();
+      // pull:false runs embedded-only: the events schema, pulse_meta/pulse_stream bookkeeping,
+      // and events tables themselves are never provisioned or written — only the WAL
+      // prerequisites above (REPLICA IDENTITY FULL, publication) are needed for the tap.
       const epochByName = new Map<string, string>();
-
-      for (const meta of this.sourceTableMetadata.values()) {
-        const eventsName = getTableConfig(meta.eventsTable).name;
-        desired.add(eventsName);
-
-        const statements = emitEventsTableDdl(meta.sourceTable, { eventsSchema });
-        const ddlHash = createHash('sha256').update(statements.join('\n')).digest('hex');
-
-        const existing = metaByName.get(eventsName);
-        if (existing && existing.ddl_hash === ddlHash && physical.has(eventsName)) {
-          epochByName.set(eventsName, existing.epoch);
-          continue;
-        }
-
-        for (const statement of statements) {
-          await tx.execute(sql.raw(statement));
-        }
-        const upsert = await tx.execute<{ epoch: string }>(
-          sql`INSERT INTO ${metaTable} (table_name, ddl_hash, epoch) VALUES (${eventsName}, ${ddlHash}, gen_random_uuid()) ON CONFLICT (table_name) DO UPDATE SET ddl_hash = excluded.ddl_hash, epoch = gen_random_uuid() RETURNING epoch`,
+      if (this.pullEnabled) {
+        await tx.execute(sql`CREATE SCHEMA IF NOT EXISTS ${schema}`);
+        await tx.execute(
+          sql`CREATE TABLE IF NOT EXISTS ${metaTable} (table_name text PRIMARY KEY, ddl_hash text NOT NULL, epoch uuid NOT NULL)`,
         );
-        const epoch = upsert.rows[0]?.epoch;
-        if (!epoch) {
-          throw new Error(`pulse_meta upsert for "${eventsName}" returned no epoch`);
-        }
-        epochByName.set(eventsName, epoch);
-      }
-
-      // Orphans: a meta row with no registered source drops its table + row; a physical table
-      // with neither a meta row nor a registered source is left alone (warn only — it may be
-      // an unrelated table hand-created in the events schema).
-      for (const row of metaByName.values()) {
-        if (desired.has(row.table_name)) continue;
-        await tx.execute(sql`DROP TABLE IF EXISTS ${schema}.${sql.identifier(row.table_name)}`);
-        await tx.execute(sql`DELETE FROM ${metaTable} WHERE table_name = ${row.table_name}`);
-      }
-      for (const relname of physical) {
-        if (relname === 'pulse_meta' || relname === 'pulse_stream' || desired.has(relname) || metaByName.has(relname))
-          continue;
-        this.logWarn(
-          `[reconcile] table "${eventsSchema}.${relname}" shares the events schema but has no pulse_meta row; leaving it untouched`,
+        // Durable commit-LSN dedupe watermark (research Open Question 1): survives a full
+        // process restart so resuming an intact slot doesn't re-persist minipg's at-least-once
+        // replay tail.
+        await tx.execute(
+          sql`CREATE TABLE IF NOT EXISTS ${streamTable} (slot_name text PRIMARY KEY, last_lsn text NOT NULL)`,
         );
+
+        const metaResult = await tx.execute<{
+          table_name: string;
+          ddl_hash: string;
+          epoch: string;
+        }>(sql`SELECT table_name, ddl_hash, epoch FROM ${metaTable}`);
+        const metaByName = new Map(metaResult.rows.map((row) => [row.table_name, row] as const));
+
+        const physicalResult = await tx.execute<{ relname: string }>(
+          sql`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ${eventsSchema} AND c.relkind IN ('r', 'p')`,
+        );
+        const physical = new Set(physicalResult.rows.map((row) => row.relname));
+
+        const desired = new Set<string>();
+
+        for (const meta of this.sourceTableMetadata.values()) {
+          const eventsName = getTableConfig(meta.eventsTable).name;
+          desired.add(eventsName);
+
+          const statements = emitEventsTableDdl(meta.sourceTable, { eventsSchema });
+          const ddlHash = createHash('sha256').update(statements.join('\n')).digest('hex');
+
+          const existing = metaByName.get(eventsName);
+          if (existing && existing.ddl_hash === ddlHash && physical.has(eventsName)) {
+            epochByName.set(eventsName, existing.epoch);
+            continue;
+          }
+
+          for (const statement of statements) {
+            await tx.execute(sql.raw(statement));
+          }
+          const upsert = await tx.execute<{ epoch: string }>(
+            sql`INSERT INTO ${metaTable} (table_name, ddl_hash, epoch) VALUES (${eventsName}, ${ddlHash}, gen_random_uuid()) ON CONFLICT (table_name) DO UPDATE SET ddl_hash = excluded.ddl_hash, epoch = gen_random_uuid() RETURNING epoch`,
+          );
+          const epoch = upsert.rows[0]?.epoch;
+          if (!epoch) {
+            throw new Error(`pulse_meta upsert for "${eventsName}" returned no epoch`);
+          }
+          epochByName.set(eventsName, epoch);
+        }
+
+        // Orphans: a meta row with no registered source drops its table + row; a physical table
+        // with neither a meta row nor a registered source is left alone (warn only — it may be
+        // an unrelated table hand-created in the events schema).
+        for (const row of metaByName.values()) {
+          if (desired.has(row.table_name)) continue;
+          await tx.execute(sql`DROP TABLE IF EXISTS ${schema}.${sql.identifier(row.table_name)}`);
+          await tx.execute(sql`DELETE FROM ${metaTable} WHERE table_name = ${row.table_name}`);
+        }
+        for (const relname of physical) {
+          if (
+            relname === 'pulse_meta' ||
+            relname === 'pulse_stream' ||
+            desired.has(relname) ||
+            metaByName.has(relname)
+          )
+            continue;
+          this.logWarn(
+            `[reconcile] table "${eventsSchema}.${relname}" shares the events schema but has no pulse_meta row; leaving it untouched`,
+          );
+        }
       }
 
       return epochByName;
@@ -603,37 +637,50 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       const rep = await replication(this.config.databaseUrl);
       this.replication = rep;
 
-      const slotName = this.slotName;
-      const result = await adminDb.execute<{
-        slot_name: string;
-        active: boolean;
-        active_pid: number | null;
-      }>(
-        sql`SELECT slot_name, active, active_pid FROM pg_replication_slots WHERE slot_name = ${slotName}`,
-      );
-
       let from: string | undefined;
-      if (result.rows.length > 0) {
-        const slot = result.rows[0];
-        if (slot?.active && slot.active_pid) {
-          this.logInfo(
-            `[WAL Listener] Terminating stale connection on slot '${slotName}' (PID ${slot.active_pid})`,
-          );
-          await adminDb.execute(sql`SELECT pg_terminate_backend(${slot.active_pid})`);
-          await new Promise((resolve) => setTimeout(resolve, 500));
-        }
+      let slotName: string;
 
-        this.logInfo(`[WAL Listener] Replication slot '${slotName}' ready`);
-        from = undefined; // server resumes from the slot's confirmed_flush position
-        this.lastPersistedCommitLsn = await this.getPulseStore().getStreamWatermark(slotName);
+      if (this.pullEnabled) {
+        slotName = this.slotName;
+        const result = await adminDb.execute<{
+          slot_name: string;
+          active: boolean;
+          active_pid: number | null;
+        }>(
+          sql`SELECT slot_name, active, active_pid FROM pg_replication_slots WHERE slot_name = ${slotName}`,
+        );
+
+        if (result.rows.length > 0) {
+          const slot = result.rows[0];
+          if (slot?.active && slot.active_pid) {
+            this.logInfo(
+              `[WAL Listener] Terminating stale connection on slot '${slotName}' (PID ${slot.active_pid})`,
+            );
+            await adminDb.execute(sql`SELECT pg_terminate_backend(${slot.active_pid})`);
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+
+          this.logInfo(`[WAL Listener] Replication slot '${slotName}' ready`);
+          from = undefined; // server resumes from the slot's confirmed_flush position
+          this.lastPersistedCommitLsn = await this.getPulseStore().getStreamWatermark(slotName);
+        } else {
+          this.logInfo(`[WAL Listener] Creating replication slot '${slotName}'`);
+          const { consistentPoint } = await rep.createSlot(slotName, {
+            temporary: false,
+            snapshot: 'export',
+          });
+          from = consistentPoint;
+          this.lastPersistedCommitLsn = null;
+        }
       } else {
-        this.logInfo(`[WAL Listener] Creating replication slot '${slotName}'`);
-        const { consistentPoint } = await rep.createSlot(slotName, {
-          temporary: false,
-          snapshot: 'export',
-        });
+        // Embedded-only (D-01): a fresh session-scoped slot on every (re)connect, never
+        // persisted — a crashed process can never leak a WAL-retaining slot. There is no
+        // replay-dedupe concern (the slot never survives past this connection), so no
+        // pg_replication_slots lookup or watermark load is needed.
+        slotName = `${this.slotName}_${randomBytes(4).toString('hex')}`;
+        this.logInfo(`[WAL Listener] Creating temporary replication slot '${slotName}'`);
+        const { consistentPoint } = await rep.createSlot(slotName, { temporary: true });
         from = consistentPoint;
-        this.lastPersistedCommitLsn = null;
       }
 
       this.logInfo(`[WAL Listener] Subscribing to slot '${slotName}'`);
@@ -769,6 +816,24 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     if (commitLsn === null) {
       // No begin was observed for this transaction (see bufferWalEvent) — nothing was buffered
       // to persist.
+      rep.ack(ev.endLsn);
+      return;
+    }
+
+    if (!this.pullEnabled) {
+      // No events tables, no persistence, no replay-dedupe concern (D-01's temporary slot never
+      // survives a reconnect) — emit taps directly with $snapshot: 0; tap consumers key off lsn
+      // since Phase 18.
+      pending.forEach((event) => {
+        this.walEventEmitter.emit(
+          event.tableQualifiedName,
+          event.op,
+          event.row,
+          event.oldRow,
+          0,
+          commitLsn,
+        );
+      });
       rep.ack(ev.endLsn);
       return;
     }

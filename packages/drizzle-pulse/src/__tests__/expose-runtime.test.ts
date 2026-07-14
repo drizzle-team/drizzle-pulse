@@ -20,6 +20,7 @@ describe('wal config resolution', () => {
     const runtime = new PulseRuntime(emptyRegistry as any, {
       databaseUrl: 'postgresql://user:pass@localhost/test',
       sourceDb: {} as PulseSourceDb,
+      pull: true,
     });
 
     expect(runtime.publicationName).toBe('drizzle_pulse');

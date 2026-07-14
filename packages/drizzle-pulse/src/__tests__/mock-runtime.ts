@@ -123,12 +123,17 @@ export function makeMockRuntime(opts: MockRuntimeOptions = {}) {
 
 // Construct a real PulseRuntime with an empty registry (no DB required).
 export function makePulseRuntime(
-  opts: { databaseUrl?: string; sourceDb?: PulseSourceDb } = {},
+  opts: {
+    databaseUrl?: string;
+    sourceDb?: PulseSourceDb;
+    pull?: boolean | { eventsSchema?: string; eventLimit?: number };
+  } = {},
 ): PulseRuntime<any> {
   const emptyRegistry = createPulseRegistry({});
   return new PulseRuntime(emptyRegistry as any, {
     databaseUrl: opts.databaseUrl ?? 'postgresql://user:pass@localhost/test',
     sourceDb: opts.sourceDb ?? ({} as PulseSourceDb),
+    pull: opts.pull ?? true,
     wal: { publicationName: 'test_pub', slotName: 'test_slot' },
   });
 }

@@ -119,6 +119,7 @@ describe('Startup reconcile (self-provisioning)', () => {
       const runtime = expose(registry, {
         databaseUrl: ctx.databaseUrl,
         sourceDb: drizzle({ client: sourceSql }),
+        pull: true,
         wal: { publicationName, slotName },
         logLevel: LogLevel.Error,
       });
@@ -151,6 +152,7 @@ describe('Startup reconcile (self-provisioning)', () => {
       const runtime = expose(registry, {
         databaseUrl: ctx.databaseUrl,
         sourceDb: drizzle({ client: sourceSql }),
+        pull: true,
         logLevel: LogLevel.Error,
       });
 
@@ -178,6 +180,7 @@ describe('Startup reconcile (self-provisioning)', () => {
       const runtime = expose(registry, {
         databaseUrl: ctx.databaseUrl,
         sourceDb: drizzle({ client: sourceSql }),
+        pull: true,
         wal: { publicationName, slotName },
       });
 
@@ -223,6 +226,7 @@ describe('Startup reconcile (self-provisioning)', () => {
       const runtime = expose(registry, {
         databaseUrl: ctx.databaseUrl,
         sourceDb: drizzle({ client: sourceSql }),
+        pull: true,
         wal: { publicationName, slotName },
         logLevel: LogLevel.Error,
       });

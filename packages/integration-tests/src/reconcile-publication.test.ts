@@ -70,6 +70,7 @@ function makeRuntime(s: Scenario, label: string, tables: 'orders' | 'both') {
   return expose(registry, {
     databaseUrl: s.databaseUrl,
     sourceDb: drizzle({ client: s.sourceSql }),
+    pull: true,
     wal: { publicationName: `pulse_pub_${label}`, slotName: `pulse_slot_${label}` },
     logLevel: LogLevel.Error,
   });

@@ -50,6 +50,7 @@ async function setupHealthyScenario(label: string, logLevel: LogLevel = LogLevel
   const runtime = expose(registry, {
     databaseUrl,
     sourceDb: drizzle({ client: sourceSql }),
+    pull: true,
     wal: { publicationName: `reconcile_pub_${label}`, slotName: `reconcile_slot_${label}` },
     logLevel,
   });

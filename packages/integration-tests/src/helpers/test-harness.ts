@@ -299,6 +299,7 @@ function createTestRuntime<TQueries extends AnyQueries>(
   const runtime = expose(registry, {
     databaseUrl,
     sourceDb,
+    pull: true,
     wal: { publicationName, slotName },
     logLevel: LogLevel.Error,
   });

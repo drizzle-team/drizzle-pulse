@@ -199,7 +199,7 @@ function createRouterHarness(params?: {
   registry?: PulseRegistry<AnyPulseBuilders>;
   eventsTable?: Parameters<typeof buildEventsTable>[0];
   epoch?: string | undefined;
-  pullEventLimit?: number;
+  pull?: { eventLimit?: number };
 }) {
   const registry = params?.registry ?? createRegistry();
   const eventsSourceTable = params?.eventsTable ?? ordersTable;
@@ -216,7 +216,7 @@ function createRouterHarness(params?: {
     () => pulseStore,
     () => buildEventsTable(eventsSourceTable),
     () => epoch,
-    params?.pullEventLimit,
+    params?.pull?.eventLimit,
   );
 
   const router = createPulseRouter(requestHandler, { userId: null });
@@ -464,7 +464,7 @@ describe('pull event cap', () => {
       latestSnapshot: 9,
       // 3 raw events, cap of 2 → over the cap.
       events: [{ $op: 'insert' }, { $op: 'insert' }, { $op: 'insert' }],
-      pullEventLimit: 2,
+      pull: { eventLimit: 2 },
     });
 
     const { body } = await pull(router, [
@@ -604,6 +604,7 @@ describe('expose() rejects events-table name collisions', () => {
       expose(registry, {
         databaseUrl: 'postgresql://unused',
         sourceDb: createPulseSourceDbMock(() => []),
+        pull: true,
       }),
     ).toThrow(/a_\.b and a\._b both derive the same events-table name drizzle_pulse\.a___b/);
   });
