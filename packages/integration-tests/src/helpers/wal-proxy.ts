@@ -17,11 +17,14 @@ export function startWalProxy(targetHost: string, targetPort: number) {
     client.on('error', () => {});
     upstream.on('error', () => {});
 
-    let classified = false;
+    // Classify only from the connection's first chunk (the StartupMessage) — later chunks on
+    // an admin-pool connection can coincidentally contain the byte sequence "replication" (e.g.
+    // a query against pg_replication_slots) and must not be allowed to steal activeClient.
+    let sawFirstChunk = false;
     client.on('data', (chunk) => {
-      if (!classified && chunk.includes('replication')) {
-        classified = true;
-        activeClient = client;
+      if (!sawFirstChunk) {
+        sawFirstChunk = true;
+        if (chunk.includes('replication')) activeClient = client;
       }
       upstream.write(chunk);
     });
