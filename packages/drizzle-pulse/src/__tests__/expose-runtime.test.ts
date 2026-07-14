@@ -71,3 +71,30 @@ describe('start() failure rolls back to a restartable state', () => {
     expect(runtime.isRunning).toBe(true);
   });
 });
+
+describe('openRebaselinePin', () => {
+  test('a failing SET TRANSACTION SNAPSHOT rejects instead of hanging start()/reconnect forever', async () => {
+    const runtime = makePulseRuntime({
+      databaseUrl: 'postgresql://user:pass@localhost/test',
+    }) as any;
+
+    runtime.getPulseStore = () => ({
+      getDb: () => ({
+        transaction: async (fn: (tx: unknown) => Promise<void>) => {
+          // Mirrors the real adminDb: the callback's SET TRANSACTION SNAPSHOT throws before
+          // resolveReady is ever called.
+          const tx = {
+            execute: async () => {
+              throw new Error('invalid snapshot identifier');
+            },
+          };
+          return fn(tx);
+        },
+      }),
+    });
+
+    await expect(
+      runtime.openRebaselinePin('00000000-0000-0000-0000-000000000000', '0/100'),
+    ).rejects.toThrow('invalid snapshot identifier');
+  });
+});

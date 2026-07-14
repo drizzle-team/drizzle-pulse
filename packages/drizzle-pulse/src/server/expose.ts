@@ -943,8 +943,10 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     const adminDb = this.getPulseStore().getDb();
 
     let resolveReady: ((tx: PulseStoreTxHandle) => void) | undefined;
-    const ready = new Promise<PulseStoreTxHandle>((resolve) => {
+    let rejectReady: ((error: unknown) => void) | undefined;
+    const ready = new Promise<PulseStoreTxHandle>((resolve, reject) => {
       resolveReady = resolve;
+      rejectReady = reject;
     });
     let resolveParked: (() => void) | undefined;
     const parked = new Promise<void>((resolve) => {
@@ -962,6 +964,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       )
       .catch((error) => {
         this.logError('[WAL Listener] Re-baseline pin transaction ended with an error:', error);
+        // No-op once resolveReady has already fired; unblocks the waiter on setup failure.
+        rejectReady?.(error);
       });
 
     const tx = await ready;
