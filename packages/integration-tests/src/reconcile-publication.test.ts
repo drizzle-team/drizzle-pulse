@@ -256,4 +256,28 @@ describe('reconcile publication + replica identity self-provisioning', () => {
       await teardown(s);
     }
   });
+
+  test('pull:false: provision() rejects REPLICA IDENTITY NOTHING and non-pk USING INDEX', async () => {
+    const s = await setupBareScenario('identguard');
+    try {
+      await s.pool.query('ALTER TABLE "orders" REPLICA IDENTITY NOTHING');
+      await expect(makeRuntime(s, 'identguard', 'orders', false).provision()).rejects.toThrow(
+        /REPLICA IDENTITY NOTHING/,
+      );
+
+      await s.pool.query('CREATE UNIQUE INDEX "orders_status_uq" ON "orders" ("status")');
+      await s.pool.query(
+        'ALTER TABLE "orders" REPLICA IDENTITY USING INDEX "orders_status_uq"',
+      );
+      await expect(makeRuntime(s, 'identguard2', 'orders', false).provision()).rejects.toThrow(
+        /USING INDEX/,
+      );
+
+      await s.pool.query('ALTER TABLE "orders" REPLICA IDENTITY USING INDEX "orders_pkey"');
+      // pk index: allowed, no throw.
+      await makeRuntime(s, 'identguard3', 'orders', false).provision();
+    } finally {
+      await teardown(s);
+    }
+  });
 });
