@@ -35,7 +35,7 @@ platform-imports purity test).
 | `src/pulse-table.ts` | collection entity: `pulse(table)` → `PulseTable`; lazy PK validation at `.query()` time; value-imports `drizzle-orm/pg-core` (`getTableConfig`) — the sole client-unreachable pg-core exemption in the purity test |
 | `src/shared/` | protocol request/response types, filter AST helpers, PK utilities, `pulse-merge-core.ts` (merge state machine reused by HTTP `PulseQuery` and embedded `PulseCollection`) |
 | `src/client/create-client.ts` | proxy-based typed HTTP client + `PullClient` (batched auto-poll, default 1s, `pollIntervalMs: 0` disables) |
-| `src/client/transport.ts` | `PulseQueryTransport` interface (`subscribe`/`pull`/`loadMore`) + `createHttpTransport` (fetch+superjson); decouples `PulseQuery` from how requests travel |
+| `src/client/transport.ts` | `createHttpTransport` (fetch+superjson) + the `PulseHttpTransport` inferred type — the HTTP client's single transport (the old `PulseQueryTransport` interface was deleted with the embedded direct transport) |
 | `src/client/pulse-query.ts` | framework-agnostic subscribe/poll/load-more state machine (`PulseQuery`); `destroy()` stops polling — the client holds no server-side state to release |
 | `src/client/superjson.ts` | response deserialization helper |
 | `src/client/react/use-pulse-query.ts` | `usePulseQuery` wrapper around `PulseQuery` |
