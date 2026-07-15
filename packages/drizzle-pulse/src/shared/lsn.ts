@@ -11,8 +11,8 @@
 
 // ponytail: hand-rolled and staying that way — this module is value-imported by the embedded
 // entrypoint, which the platform-imports guard bans minipg from reaching. Server-side modules
-// (e.g. expose.ts) adopted minipg's own lsnFromString in Phase 19; this shared module
-// intentionally never will, for platform purity.
+// (e.g. expose.ts) use minipg's own lsnFromString instead; this shared module serves the
+// client/shared paths and intentionally never will, for platform purity.
 
 /**
  * Precondition: `lsn` matches the Postgres wire form "hex/hex". Throws on any other shape —

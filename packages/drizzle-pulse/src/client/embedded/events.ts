@@ -6,7 +6,7 @@ import type { PulseEvent } from '../../shared/pulse-events.js';
 import type { PulseAuthContext, QueryDescriptor } from '../../types.js';
 import { buildTapEvent, type TapRow } from './tap-events.js';
 
-// Must stay free of merge-core/collection value imports (SPLIT-06): there is no baseline and
+// Must stay free of merge-core/collection value imports: there is no baseline and
 // no state to reconcile here, only a WHERE-filtered tap. Value imports limited to ./tap-events.js
 // and bare drizzle-orm; platform-imports.test.ts enforces purity across the embedded graph.
 
@@ -44,7 +44,7 @@ export type EmbeddedPulseEvents<TQueries extends AnyPulseBuilders> = {
 };
 
 // ---------------------------------------------------------------------------
-// createPulseEvents factory — stateless, per-event WAL subscription (SPLIT-06).
+// createPulseEvents factory — stateless, per-event WAL subscription.
 // ---------------------------------------------------------------------------
 
 export function createPulseEvents<TQueries extends AnyPulseBuilders>(

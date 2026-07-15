@@ -9,8 +9,8 @@ export interface RangedMergeCoreOptions {
 }
 
 // HTTP-only variant: adds load-more (appendRows) and the range-window insert gate on top of
-// the full-set base. The embedded client never constructs this class — keeping it out of
-// embedded's import graph is what SPLIT-01/SPLIT-05 enforce.
+// the full-set base. The embedded client never constructs this class — embedded's import graph
+// must stay lean, enforced by platform-imports.test.ts.
 export class RangedPulseMergeCore<
   TRow extends Record<string, unknown> & { $pk: unknown },
 > extends PulseMergeCore<TRow> {

@@ -104,7 +104,7 @@ function pkValuesEqual(a: unknown, b: unknown): boolean {
   return false;
 }
 
-// D-04: no reconnect tuning knobs — fixed internal defaults, same values as the prior
+// No reconnect tuning knobs — fixed internal defaults, same values as the prior
 // config-driven defaults.
 const RECONNECT_MAX_RETRIES = 10;
 const RECONNECT_BASE_DELAY_MS = 1000;
@@ -115,8 +115,8 @@ const DEFAULT_SLOT_NAME = 'drizzle_pulse';
 
 const WAL_LOG_PREFIX = '[WAL Listener] ';
 
-// D-04: no knobs — fixed window a live collection's reconnect-debounce round comfortably fits
-// inside; a collection materialized after it just takes the Phase 18 watermark handshake.
+// No knobs — fixed window a live collection's reconnect-debounce round comfortably fits
+// inside; a collection materialized after it just takes the watermark handshake.
 const REBASELINE_PIN_WINDOW_MS = 5000;
 
 // One connection lifecycle attempt: aborting closes the socket (the only way to stop a parked
@@ -145,7 +145,7 @@ function getPgErrorCode(error: unknown): string | undefined {
   );
 }
 
-// T-19-10 (defense-in-depth): the exported snapshot name comes from Postgres itself, but `SET
+// Defense-in-depth: the exported snapshot name comes from Postgres itself, but `SET
 // TRANSACTION SNAPSHOT` cannot take a bind parameter — validate its charset before it is ever
 // interpolated into a raw SQL string.
 function assertSnapshotName(name: string): void {
@@ -273,7 +273,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   }
 
   // Fires once replication gives up permanently (reconnect attempts exhausted) — the runtime
-  // then stops, so onStop also fires right after (D-04: terminal error, then teardown).
+  // then stops, so onStop also fires right after (terminal error, then teardown).
   onTerminalError(listener: (error: Error) => void): () => void {
     this.terminalErrorListeners.add(listener);
     return () => this.terminalErrorListeners.delete(listener);
@@ -957,7 +957,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     return consistentPoint;
   }
 
-  // pull:false (D-01): a fresh session-scoped, randomized-suffix temporary slot on every
+  // pull:false: a fresh session-scoped, randomized-suffix temporary slot on every
   // (re)connect, never persisted — a crashed process can never leak a WAL-retaining slot. Never
   // threads the pull:true recovery machine (no continuity to check for a slot that never
   // survives past its own connection).
@@ -1039,9 +1039,9 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     }
   }
 
-  // D-03: one pinned repeatable-read admin transaction rotates every registered events table's
+  // One pinned repeatable-read admin transaction rotates every registered events table's
   // epoch, truncates it, and seeds it from the exported snapshot — the sole write path outside
-  // reconcile()/the WAL loop; sdk.ts pull handlers stay strictly read-only (D-03 invariant).
+  // reconcile()/the WAL loop; sdk.ts pull handlers stay strictly read-only.
   private async rotateAndSeedEvents(snapshotName: string, consistentPoint: string): Promise<void> {
     assertSnapshotName(snapshotName);
     const adminDb = this.getPulseStore().getDb();
@@ -1208,7 +1208,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
       // Reset only after real progress, not right after rep.start() — an instantly-clean-ending
       // server (zero commits per connection) must still exhaust run.attempts and reach the
-      // terminal path instead of reconnecting forever (WR-02).
+      // terminal path instead of reconnecting forever.
       run.attempts = 0;
 
       // A fill-miss reads as "row deleted" in SQL (zero rows), which is indistinguishable from
@@ -1372,7 +1372,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
   // One pk-SELECT of exactly the omitted TOASTed columns, on the admin pool — required for
   // correctness under a non-full identity (see decodeInto), not an optimization. No cache, no
-  // batcher, no retries (D-04): read-your-latest is the accepted consistency model, same as the
+  // batcher, no retries: read-your-latest is the accepted consistency model, same as the
   // baseline MVCC race — any later change arrives explicitly in a later WAL event.
   private async fillUnchangedByPk(
     metadata: SourceTableMetadata,
