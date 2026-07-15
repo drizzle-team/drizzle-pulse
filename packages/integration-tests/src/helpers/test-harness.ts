@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
+import type { PgTable } from 'drizzle-orm/pg-core';
 import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import type { QueryDescriptor } from 'drizzle-pulse';
@@ -19,10 +19,23 @@ import postgres from 'postgres';
 import SuperJSON from 'superjson';
 import { z } from 'zod';
 import type { ProcessDbOperationsOptions } from './db-helpers.js';
-import { insertTestUser, processDbOperations } from './db-helpers.js';
+import {
+  eventsTableIdent,
+  insertTestUser,
+  processDbOperations,
+  waitFor,
+  waitForEventsForFixture,
+  waitForProcessedEventsForFixture,
+} from './db-helpers.js';
 
 // Re-export shared helpers so downstream tests can import from one place
-export { processDbOperations, insertTestUser };
+export {
+  insertTestUser,
+  processDbOperations,
+  waitFor,
+  waitForEventsForFixture,
+  waitForProcessedEventsForFixture,
+};
 
 const DEFAULT_DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/postgres';
 const TEST_DATABASE_PREFIX = 'drizzle_pulse_test';
@@ -370,8 +383,7 @@ export async function setupTestSuiteForFixture<
       throw new Error('cleanupBetweenTests() called on a torn-down test suite context');
     }
 
-    const eventsTableConfig = getTableConfig(fixture.eventsTable);
-    const eventsTable = `"${eventsTableConfig.schema ?? 'public'}"."${eventsTableConfig.name}"`;
+    const eventsTable = eventsTableIdent(fixture);
     const tableList = fixture.cleanupTables.map((t) => `"${t}"`).join(', ');
     await testPool.query(`TRUNCATE TABLE ${tableList} RESTART IDENTITY CASCADE`);
     await testPool.query(`TRUNCATE TABLE ${eventsTable} RESTART IDENTITY`);
@@ -417,55 +429,6 @@ export async function setupTestSuiteForFixture<
     teardown,
     cleanupBetweenTests,
   };
-}
-
-export async function waitForEventsForFixture(
-  fixture: IntegrationTestFixture,
-  pool: Pool,
-  sinceSnapshot: number,
-  expectedCount: number,
-  opts?: { timeoutMs?: number; pollIntervalMs?: number },
-): Promise<HarnessEvent[]> {
-  const eventsTableConfig = getTableConfig(fixture.eventsTable);
-  const eventsTable = `"${eventsTableConfig.schema ?? 'public'}"."${eventsTableConfig.name}"`;
-  const timeoutMs = opts?.timeoutMs ?? 5000;
-  const pollIntervalMs = opts?.pollIntervalMs ?? 50;
-  const start = Date.now();
-
-  while (Date.now() - start < timeoutMs) {
-    const { rows } = await pool.query<HarnessEvent>(
-      `
-        SELECT "$snapshot"::int AS snapshot, id AS pk, "$op" AS op, "$timestamp"::text AS timestamp
-        FROM ${eventsTable}
-        WHERE "$snapshot" > $1
-          AND "$op" <> 'snapshot'
-        ORDER BY "$snapshot" ASC
-      `,
-      [sinceSnapshot],
-    );
-
-    if (rows.length >= expectedCount) {
-      return rows;
-    }
-
-    await new Promise<void>((resolve) => {
-      setTimeout(resolve, pollIntervalMs);
-    });
-  }
-
-  const { rows } = await pool.query<{ count: string }>(
-    `
-      SELECT COUNT(*)::text AS count
-      FROM "${eventsTableConfig.schema ?? 'public'}"."${eventsTableConfig.name}"
-      WHERE "$snapshot" > $1
-        AND "$op" <> 'snapshot'
-    `,
-    [sinceSnapshot],
-  );
-  const actual = Number(rows[0]?.count ?? '0');
-  throw new Error(
-    `Timeout: expected ${expectedCount} events after snapshot ${sinceSnapshot}, got ${actual} in ${timeoutMs}ms`,
-  );
 }
 
 function parseSuperJsonResponse(raw: string): PlainRecord {

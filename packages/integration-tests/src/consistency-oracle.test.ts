@@ -16,6 +16,7 @@ import {
   createRouterFetchAdapter,
   insertTestUser,
   setupTestSuiteForFixture,
+  waitFor,
   waitForEventsForFixture,
 } from './helpers/test-harness.js';
 
@@ -30,18 +31,8 @@ import {
 // ---------------------------------------------------------------------------
 
 const ORACLE_TEST_TIMEOUT_MS = 300_000;
-
-async function waitFor(
-  predicate: () => boolean,
-  timeoutMs = 5000,
-  pollIntervalMs = 50,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error(`waitFor timed out after ${timeoutMs}ms`);
-    await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
-  }
-}
+// This suite's own default differs from waitFor()'s canonical 8000ms/50ms — pass it explicitly.
+const ORACLE_WAIT_FOR_TIMEOUT_MS = 5000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -134,7 +125,7 @@ describe('Consistency Oracle (SPLIT-04)', () => {
         .returning({ id: orders.id });
 
       const collection = await collectionPromise;
-      await waitFor(() => collection.list().length === 2);
+      await waitFor(() => collection.list().length === 2, ORACLE_WAIT_FOR_TIMEOUT_MS);
 
       const truth = await groundTruth();
       expect(sortById(collection.list().map(normalizeRow))).toEqual(truth);
@@ -158,7 +149,7 @@ describe('Consistency Oracle (SPLIT-04)', () => {
       await waitFor(() => {
         const row = collection.list().find((r) => r.id === seed!.id);
         return row !== undefined && row.price === 999;
-      });
+      }, ORACLE_WAIT_FOR_TIMEOUT_MS);
 
       const truth = await groundTruth();
       expect(truth).toHaveLength(1);
@@ -180,7 +171,7 @@ describe('Consistency Oracle (SPLIT-04)', () => {
       await db.delete(orders).where(eq(orders.id, seed!.id));
 
       const collection = await collectionPromise;
-      await waitFor(() => collection.list().length === 0);
+      await waitFor(() => collection.list().length === 0, ORACLE_WAIT_FOR_TIMEOUT_MS);
 
       const truth = await groundTruth();
       expect(truth).toHaveLength(0);

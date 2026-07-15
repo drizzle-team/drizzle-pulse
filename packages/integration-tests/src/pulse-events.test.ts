@@ -5,30 +5,17 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createPulseEvents } from 'drizzle-pulse/client/embedded';
 import { createPulseRegistry } from 'drizzle-pulse/server';
-import type { Pool } from 'pg';
 import { fullOrdersFixture } from './fixtures/full-orders/index.js';
 import type {
   HarnessProcessDbOperations,
   RuntimeOf,
   TestSuiteResult,
 } from './helpers/test-harness.js';
-import { insertTestUser, setupTestSuiteForFixture } from './helpers/test-harness.js';
+import { insertTestUser, setupTestSuiteForFixture, waitFor } from './helpers/test-harness.js';
 
-// ---------------------------------------------------------------------------
-// Bounded async poller — avoids fixed sleeps while bounding test duration.
-// ---------------------------------------------------------------------------
-
-async function waitFor(
-  predicate: () => boolean,
-  timeoutMs = 2000,
-  pollIntervalMs = 20,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error(`waitFor timed out after ${timeoutMs}ms`);
-    await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
-  }
-}
+// This suite's own defaults differ from waitFor()'s canonical 8000ms/50ms — pass them explicitly.
+const EVENTS_WAIT_FOR_TIMEOUT_MS = 2000;
+const EVENTS_WAIT_FOR_POLL_INTERVAL_MS = 20;
 
 const LSN_PATTERN = /^[0-9A-Fa-f]+\/[0-9A-Fa-f]+$/;
 
@@ -48,7 +35,6 @@ describe('createPulseEvents', () => {
   const { orders } = fixture.tables;
 
   let suite: TestSuiteResult;
-  let pool: Pool;
   let db: PostgresJsDatabase;
   let runtime!: RuntimeOf<typeof registry>;
   let processDbOperations: HarnessProcessDbOperations;
@@ -75,7 +61,6 @@ describe('createPulseEvents', () => {
 
   beforeAll(async () => {
     suite = await setupTestSuiteForFixture(fixture, registry);
-    pool = suite.pool;
     db = suite.db;
     runtime = suite.runtime;
     processDbOperations = suite.processDbOperations;
@@ -106,7 +91,11 @@ describe('createPulseEvents', () => {
     ]);
     const [inserted] = r1[0] as Array<{ id: number }>;
 
-    await waitFor(() => log.length === 1);
+    await waitFor(
+      () => log.length === 1,
+      EVENTS_WAIT_FOR_TIMEOUT_MS,
+      EVENTS_WAIT_FOR_POLL_INTERVAL_MS,
+    );
     expect(log[0]!.event.op).toBe('insert');
     expect(log[0]!.event.row.id).toBe(inserted!.id);
     expect(log[0]!.event.pk).toBe(inserted!.id);
@@ -116,7 +105,11 @@ describe('createPulseEvents', () => {
     await processDbOperations([
       db.update(orders).set({ status: 'completed' }).where(eq(orders.id, inserted!.id)),
     ]);
-    await waitFor(() => log.length === 2);
+    await waitFor(
+      () => log.length === 2,
+      EVENTS_WAIT_FOR_TIMEOUT_MS,
+      EVENTS_WAIT_FOR_POLL_INTERVAL_MS,
+    );
     expect(log[1]!.event.op).toBe('update');
     expect(log[1]!.event.matchesNew).toBe(false);
     expect(log[1]!.event.old_row.id).toBe(inserted!.id);
@@ -129,11 +122,19 @@ describe('createPulseEvents', () => {
         .returning(),
     ]);
     const [toDelete] = r2[0] as Array<{ id: number }>;
-    await waitFor(() => log.length === 3);
+    await waitFor(
+      () => log.length === 3,
+      EVENTS_WAIT_FOR_TIMEOUT_MS,
+      EVENTS_WAIT_FOR_POLL_INTERVAL_MS,
+    );
     expect(log[2]!.event.op).toBe('insert');
 
     await processDbOperations([db.delete(orders).where(eq(orders.id, toDelete!.id))]);
-    await waitFor(() => log.length === 4);
+    await waitFor(
+      () => log.length === 4,
+      EVENTS_WAIT_FOR_TIMEOUT_MS,
+      EVENTS_WAIT_FOR_POLL_INTERVAL_MS,
+    );
     expect(log[3]!.event.op).toBe('delete');
     expect(log[3]!.event.pk).toBe(toDelete!.id);
 
@@ -152,14 +153,22 @@ describe('createPulseEvents', () => {
         .insert(orders)
         .values({ driverId: 1, pickup: 'C1', dropoff: 'C1', price: 10, status: 'accepted' }),
     ]);
-    await waitFor(() => log.length === 1);
+    await waitFor(
+      () => log.length === 1,
+      EVENTS_WAIT_FOR_TIMEOUT_MS,
+      EVENTS_WAIT_FOR_POLL_INTERVAL_MS,
+    );
 
     await processDbOperations([
       db
         .insert(orders)
         .values({ driverId: 1, pickup: 'C2', dropoff: 'C2', price: 20, status: 'accepted' }),
     ]);
-    await waitFor(() => log.length === 2);
+    await waitFor(
+      () => log.length === 2,
+      EVENTS_WAIT_FOR_TIMEOUT_MS,
+      EVENTS_WAIT_FOR_POLL_INTERVAL_MS,
+    );
 
     // Multi-row single transaction: both events share one lsn.
     await processDbOperations([
@@ -168,7 +177,11 @@ describe('createPulseEvents', () => {
         { driverId: 1, pickup: 'TxB', dropoff: 'TxB', price: 40, status: 'accepted' },
       ]),
     ]);
-    await waitFor(() => log.length === 4);
+    await waitFor(
+      () => log.length === 4,
+      EVENTS_WAIT_FOR_TIMEOUT_MS,
+      EVENTS_WAIT_FOR_POLL_INTERVAL_MS,
+    );
 
     expect(log.map((e) => e.op)).toEqual(['insert', 'insert', 'insert', 'insert']);
     for (const entry of log) {
@@ -202,7 +215,11 @@ describe('createPulseEvents', () => {
         .insert(orders)
         .values({ driverId: 1, pickup: 'New', dropoff: 'New', price: 20, status: 'accepted' }),
     ]);
-    await waitFor(() => log.length === 1);
+    await waitFor(
+      () => log.length === 1,
+      EVENTS_WAIT_FOR_TIMEOUT_MS,
+      EVENTS_WAIT_FOR_POLL_INTERVAL_MS,
+    );
     expect(log).toEqual([{ op: 'insert' }]);
 
     unsub();
@@ -248,7 +265,11 @@ describe('createPulseEvents', () => {
         status: 'accepted',
       }),
     ]);
-    await waitFor(() => callCount === 1);
+    await waitFor(
+      () => callCount === 1,
+      EVENTS_WAIT_FOR_TIMEOUT_MS,
+      EVENTS_WAIT_FOR_POLL_INTERVAL_MS,
+    );
 
     unsub();
 
@@ -289,13 +310,11 @@ describe('createPulseEvents lifecycle', () => {
   const lcRegistry = createPulseRegistry({ ordersByStatusLC });
 
   let lcSuite: TestSuiteResult;
-  let lcPool: Pool;
   let lcDb: PostgresJsDatabase;
   let lcRuntime!: RuntimeOf<typeof lcRegistry>;
 
   beforeAll(async () => {
     lcSuite = await setupTestSuiteForFixture(lifecycleFixture, lcRegistry);
-    lcPool = lcSuite.pool;
     lcDb = lcSuite.db;
     lcRuntime = lcSuite.runtime;
   });

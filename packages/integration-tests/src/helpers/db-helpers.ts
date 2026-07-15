@@ -17,6 +17,163 @@ export type ProcessDbOperationsOptions = {
   mode?: 'sequential' | 'concurrent';
 };
 
+/** The single home for the quoted `"schema"."table"` events-table identifier (was copied 4x). */
+export function eventsTableIdent(fixture: FixtureWithEventsTable): string {
+  const eventsTableConfig = getTableConfig(fixture.eventsTable);
+  return `"${eventsTableConfig.schema ?? 'public'}"."${eventsTableConfig.name}"`;
+}
+
+async function getCurrentSnapshotForFixture(
+  fixture: FixtureWithEventsTable,
+  pool: Pool,
+): Promise<number> {
+  const { rows } = await pool.query<{ max_snapshot: string }>(
+    `SELECT COALESCE(MAX("$snapshot"), 0)::text AS max_snapshot FROM ${eventsTableIdent(fixture)}`,
+  );
+  return Number(rows[0]?.max_snapshot ?? '0');
+}
+
+export type WaitForEventsPredicate = 'rowCount' | 'maxSnapshot';
+
+export type WaitForEventsOptions = {
+  predicate?: WaitForEventsPredicate;
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+};
+
+const WAIT_FOR_EVENTS_DEFAULT_TIMEOUT_MS: Record<WaitForEventsPredicate, number> = {
+  rowCount: 5000,
+  maxSnapshot: 15000,
+};
+
+/**
+ * The one events-table poller, merging `rowCount` (row count vs. expectedCount) and
+ * `maxSnapshot` (max `$snapshot` vs. sinceSnapshot + expectedCount) predicates.
+ *
+ * `maxSnapshot` probes with an UNFILTERED max-snapshot query rather than deriving the max from
+ * the filtered row fetch below — baseline `$op='snapshot'` rows consume snapshot numbers without
+ * ever satisfying the `$op <> 'snapshot'` filter, so a filtered-only probe hangs forever.
+ */
+export async function waitForEvents(
+  fixture: FixtureWithEventsTable,
+  pool: Pool,
+  sinceSnapshot: number,
+  expectedCount: number,
+  opts?: WaitForEventsOptions,
+): Promise<HarnessEvent[]> {
+  const predicate = opts?.predicate ?? 'rowCount';
+  const timeoutMs = opts?.timeoutMs ?? WAIT_FOR_EVENTS_DEFAULT_TIMEOUT_MS[predicate];
+  const pollIntervalMs = opts?.pollIntervalMs ?? 50;
+  const eventsTable = eventsTableIdent(fixture);
+  const start = Date.now();
+
+  const fetchFilteredRows = () =>
+    pool.query<HarnessEvent>(
+      `
+        SELECT "$snapshot"::int AS snapshot, id AS pk, "$op" AS op, "$timestamp"::text AS timestamp
+        FROM ${eventsTable}
+        WHERE "$snapshot" > $1
+          AND "$op" <> 'snapshot'
+        ORDER BY "$snapshot" ASC
+      `,
+      [sinceSnapshot],
+    );
+
+  if (predicate === 'rowCount') {
+    while (Date.now() - start < timeoutMs) {
+      const { rows } = await fetchFilteredRows();
+
+      if (rows.length >= expectedCount) {
+        return rows;
+      }
+
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, pollIntervalMs);
+      });
+    }
+
+    const { rows } = await pool.query<{ count: string }>(
+      `
+        SELECT COUNT(*)::text AS count
+        FROM ${eventsTable}
+        WHERE "$snapshot" > $1
+          AND "$op" <> 'snapshot'
+      `,
+      [sinceSnapshot],
+    );
+    const actual = Number(rows[0]?.count ?? '0');
+    throw new Error(
+      `Timeout: expected ${expectedCount} events after snapshot ${sinceSnapshot}, got ${actual} in ${timeoutMs}ms`,
+    );
+  }
+
+  const targetSnapshot = sinceSnapshot + expectedCount;
+
+  while (Date.now() - start < timeoutMs) {
+    const currentSnapshot = await getCurrentSnapshotForFixture(fixture, pool);
+
+    if (currentSnapshot >= targetSnapshot) {
+      const { rows } = await fetchFilteredRows();
+      return rows;
+    }
+
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, pollIntervalMs);
+    });
+  }
+
+  const actualSnapshot = await getCurrentSnapshotForFixture(fixture, pool);
+
+  throw new Error(
+    `Timeout: expected snapshot to reach at least ${targetSnapshot} after ${expectedCount} processed events, got ${actualSnapshot} in ${timeoutMs}ms`,
+  );
+}
+
+/** Legacy row-count-predicate poller, now a thin delegation to {@link waitForEvents}. */
+export async function waitForEventsForFixture(
+  fixture: FixtureWithEventsTable,
+  pool: Pool,
+  sinceSnapshot: number,
+  expectedCount: number,
+  opts?: { timeoutMs?: number; pollIntervalMs?: number },
+): Promise<HarnessEvent[]> {
+  return waitForEvents(fixture, pool, sinceSnapshot, expectedCount, {
+    ...opts,
+    predicate: 'rowCount',
+  });
+}
+
+/** Legacy max-snapshot-predicate poller, now a thin delegation to {@link waitForEvents}. */
+export async function waitForProcessedEventsForFixture(
+  fixture: FixtureWithEventsTable,
+  pool: Pool,
+  sinceSnapshot: number,
+  expectedEventCount: number,
+  opts?: { timeoutMs?: number; pollIntervalMs?: number },
+): Promise<HarnessEvent[]> {
+  return waitForEvents(fixture, pool, sinceSnapshot, expectedEventCount, {
+    ...opts,
+    predicate: 'maxSnapshot',
+  });
+}
+
+/** The one canonical bounded async predicate poller, replacing 7 per-suite copies. */
+export async function waitFor(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs = 8000,
+  pollIntervalMs = 50,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await predicate())) {
+    if (Date.now() >= deadline) {
+      throw new Error(`waitFor timed out after ${timeoutMs}ms`);
+    }
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, pollIntervalMs);
+    });
+  }
+}
+
 export async function processDbOperations<
   const TOperations extends ReadonlyArray<DbEventOperation>,
 >(
@@ -53,67 +210,6 @@ export async function processDbOperations<
   );
 
   return { events, results };
-}
-
-async function getCurrentSnapshotForFixture(
-  fixture: FixtureWithEventsTable,
-  pool: Pool,
-): Promise<number> {
-  const eventsTableConfig = getTableConfig(fixture.eventsTable);
-  const eventsTable = `"${eventsTableConfig.schema ?? 'public'}"."${eventsTableConfig.name}"`;
-  const { rows } = await pool.query<{ max_snapshot: string }>(
-    `SELECT COALESCE(MAX("$snapshot"), 0)::text AS max_snapshot FROM ${eventsTable}`,
-  );
-  return Number(rows[0]?.max_snapshot ?? '0');
-}
-
-async function waitForProcessedEventsForFixture(
-  fixture: FixtureWithEventsTable,
-  pool: Pool,
-  sinceSnapshot: number,
-  expectedEventCount: number,
-  opts?: { timeoutMs?: number; pollIntervalMs?: number },
-): Promise<HarnessEvent[]> {
-  const eventsTableConfig = getTableConfig(fixture.eventsTable);
-  const eventsTable = `"${eventsTableConfig.schema ?? 'public'}"."${eventsTableConfig.name}"`;
-  const timeoutMs = opts?.timeoutMs ?? 15000;
-  const pollIntervalMs = opts?.pollIntervalMs ?? 50;
-  const targetSnapshot = sinceSnapshot + expectedEventCount;
-  const start = Date.now();
-
-  while (Date.now() - start < timeoutMs) {
-    const { rows: snapshotRows } = await pool.query<{ max_snapshot: string }>(
-      `SELECT COALESCE(MAX("$snapshot"), 0)::text AS max_snapshot FROM ${eventsTable}`,
-    );
-    const currentSnapshot = Number(snapshotRows[0]?.max_snapshot ?? '0');
-
-    if (currentSnapshot >= targetSnapshot) {
-      const { rows } = await pool.query<HarnessEvent>(
-        `
-          SELECT "$snapshot"::int AS snapshot, id AS pk, "$op" AS op, "$timestamp"::text AS timestamp
-          FROM ${eventsTable}
-          WHERE "$snapshot" > $1
-            AND "$op" <> 'snapshot'
-          ORDER BY "$snapshot" ASC
-        `,
-        [sinceSnapshot],
-      );
-      return rows;
-    }
-
-    await new Promise<void>((resolve) => {
-      setTimeout(resolve, pollIntervalMs);
-    });
-  }
-
-  const { rows } = await pool.query<{ max_snapshot: string }>(
-    `SELECT COALESCE(MAX("$snapshot"), 0)::text AS max_snapshot FROM ${eventsTable}`,
-  );
-  const actualSnapshot = Number(rows[0]?.max_snapshot ?? '0');
-
-  throw new Error(
-    `Timeout: expected snapshot to reach at least ${targetSnapshot} after ${expectedEventCount} processed events, got ${actualSnapshot} in ${timeoutMs}ms`,
-  );
 }
 
 /**

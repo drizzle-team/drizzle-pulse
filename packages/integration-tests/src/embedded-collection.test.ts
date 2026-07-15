@@ -5,7 +5,6 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createPulseClient } from 'drizzle-pulse/client/embedded';
 import { createPulseRegistry } from 'drizzle-pulse/server';
-import type { Pool } from 'pg';
 import { fullOrdersFixture } from './fixtures/full-orders/index.js';
 import { pgDataTypesFixture } from './fixtures/pg-data-types/index.js';
 import { pgDataTypeInsertValues } from './fixtures/pg-data-types/inventory.js';
@@ -14,22 +13,14 @@ import type {
   RuntimeOf,
   TestSuiteResult,
 } from './helpers/test-harness.js';
-import { insertTestUser, setupTestSuiteForFixture } from './helpers/test-harness.js';
+import { insertTestUser, setupTestSuiteForFixture, waitFor } from './helpers/test-harness.js';
 
 // Change delivery is tap-direct (WAL listener -> in-process WalEventEmitter -> merge core),
 // not a poll — state converges a scheduling beat after processDbOperations resolves because
 // the tap payload still has to flow through pgoutput, so poll for it rather than assert sync.
-async function waitFor(
-  predicate: () => boolean,
-  timeoutMs = 2000,
-  pollIntervalMs = 20,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error(`waitFor timed out after ${timeoutMs}ms`);
-    await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
-  }
-}
+// This suite's own defaults differ from waitFor()'s canonical 8000ms/50ms — pass them explicitly.
+const COLLECTION_WAIT_FOR_TIMEOUT_MS = 2000;
+const COLLECTION_WAIT_FOR_POLL_INTERVAL_MS = 20;
 
 // pg wire LSN form is "hex/hex" (e.g. "0/16B2D30") — assert the shape without importing the
 // library's own shared/lsn.ts, so this test stays independent of the implementation it proves.
@@ -48,7 +39,6 @@ function parseLsnForAssertions(lsn: string): bigint {
 
 describe('Embedded Collection', () => {
   let suite: TestSuiteResult;
-  let pool: Pool;
   let db: PostgresJsDatabase;
   let runtime!: RuntimeOf<typeof registry>;
   let processDbOperations: HarnessProcessDbOperations;
@@ -71,7 +61,6 @@ describe('Embedded Collection', () => {
 
   beforeAll(async () => {
     suite = await setupTestSuiteForFixture(fixture, registry);
-    pool = suite.pool;
     db = suite.db;
     runtime = suite.runtime;
     processDbOperations = suite.processDbOperations;
@@ -107,7 +96,11 @@ describe('Embedded Collection', () => {
     const [raceInserted] = results[0] as Array<{ id: number }>;
 
     const collection = await collectionPromise;
-    await waitFor(() => collection.list().length === 2);
+    await waitFor(
+      () => collection.list().length === 2,
+      COLLECTION_WAIT_FOR_TIMEOUT_MS,
+      COLLECTION_WAIT_FOR_POLL_INTERVAL_MS,
+    );
 
     const ids = collection.list().map((r) => r.id as number);
     expect(new Set(ids).size).toBe(2); // no duplicate of the race-inserted row
@@ -135,7 +128,11 @@ describe('Embedded Collection', () => {
     ]);
     const [inserted] = r1[0] as Array<{ id: number }>;
 
-    await waitFor(() => changes.length === 1);
+    await waitFor(
+      () => changes.length === 1,
+      COLLECTION_WAIT_FOR_TIMEOUT_MS,
+      COLLECTION_WAIT_FOR_POLL_INTERVAL_MS,
+    );
     expect(changes[0]!.events[0]!.op).toBe('insert');
     expect(changes[0]!.lsn).toMatch(LSN_PATTERN);
     expect(changes[0]!.state).toBe(collection.list());
@@ -146,7 +143,11 @@ describe('Embedded Collection', () => {
       db.update(orders).set({ status: 'completed' }).where(eq(orders.id, inserted!.id)),
     ]);
 
-    await waitFor(() => changes.length === 2);
+    await waitFor(
+      () => changes.length === 2,
+      COLLECTION_WAIT_FOR_TIMEOUT_MS,
+      COLLECTION_WAIT_FOR_POLL_INTERVAL_MS,
+    );
     const updateEvt = changes[1]!.events[0];
     expect(updateEvt.op).toBe('update');
     expect(updateEvt.matchesNew).toBe(false);
@@ -163,14 +164,22 @@ describe('Embedded Collection', () => {
     ]);
     const [toDelete] = r2[0] as Array<{ id: number }>;
 
-    await waitFor(() => changes.length === 3);
+    await waitFor(
+      () => changes.length === 3,
+      COLLECTION_WAIT_FOR_TIMEOUT_MS,
+      COLLECTION_WAIT_FOR_POLL_INTERVAL_MS,
+    );
     expect(changes[2]!.events[0]!.op).toBe('insert');
     expect(changes[2]!.lsn).toMatch(LSN_PATTERN);
     expect(collection.list()).toHaveLength(1);
 
     await processDbOperations([db.delete(orders).where(eq(orders.id, toDelete!.id))]);
 
-    await waitFor(() => changes.length === 4);
+    await waitFor(
+      () => changes.length === 4,
+      COLLECTION_WAIT_FOR_TIMEOUT_MS,
+      COLLECTION_WAIT_FOR_POLL_INTERVAL_MS,
+    );
     expect(changes[3]!.events[0]!.op).toBe('delete');
     expect(changes[3]!.lsn).toMatch(LSN_PATTERN);
     expect(collection.list()).toHaveLength(0);
@@ -203,7 +212,11 @@ describe('Embedded Collection', () => {
       ]),
     ]);
 
-    await waitFor(() => collection.list().length === 2);
+    await waitFor(
+      () => collection.list().length === 2,
+      COLLECTION_WAIT_FOR_TIMEOUT_MS,
+      COLLECTION_WAIT_FOR_POLL_INTERVAL_MS,
+    );
     expect(changes.length).toBeGreaterThanOrEqual(2);
 
     for (const change of changes) {
@@ -229,7 +242,11 @@ describe('Embedded Collection', () => {
         .insert(orders)
         .values({ driverId: 1, pickup: 'U1', dropoff: 'U1', price: 10, status: 'accepted' }),
     ]);
-    await waitFor(() => collection.list().length === 1);
+    await waitFor(
+      () => collection.list().length === 1,
+      COLLECTION_WAIT_FOR_TIMEOUT_MS,
+      COLLECTION_WAIT_FOR_POLL_INTERVAL_MS,
+    );
     expect(callCount).toBe(1);
 
     unsubscribe();
@@ -239,7 +256,11 @@ describe('Embedded Collection', () => {
         .insert(orders)
         .values({ driverId: 1, pickup: 'U2', dropoff: 'U2', price: 20, status: 'accepted' }),
     ]);
-    await waitFor(() => collection.list().length === 2);
+    await waitFor(
+      () => collection.list().length === 2,
+      COLLECTION_WAIT_FOR_TIMEOUT_MS,
+      COLLECTION_WAIT_FOR_POLL_INTERVAL_MS,
+    );
     expect(callCount).toBe(1); // detached listener saw nothing further
 
     collection.dispose();
@@ -271,13 +292,11 @@ describe('Embedded Collection lifecycle', () => {
   const lcRegistry = createPulseRegistry({ ordersByStatusLC });
 
   let lcSuite: TestSuiteResult;
-  let lcPool: Pool;
   let lcDb: PostgresJsDatabase;
   let lcRuntime!: RuntimeOf<typeof lcRegistry>;
 
   beforeAll(async () => {
     lcSuite = await setupTestSuiteForFixture(lifecycleFixture, lcRegistry);
-    lcPool = lcSuite.pool;
     lcDb = lcSuite.db;
     lcRuntime = lcSuite.runtime;
   });
@@ -323,7 +342,6 @@ describe('Embedded Collection lifecycle', () => {
 
 describe('Embedded Collection — PG Data Types (WAL normalization)', () => {
   let suite: TestSuiteResult;
-  let pool: Pool;
   let db: PostgresJsDatabase;
   let runtime!: RuntimeOf<typeof registry>;
   let processDbOperations: HarnessProcessDbOperations;
@@ -336,7 +354,6 @@ describe('Embedded Collection — PG Data Types (WAL normalization)', () => {
 
   beforeAll(async () => {
     suite = await setupTestSuiteForFixture(fixture, registry);
-    pool = suite.pool;
     db = suite.db;
     runtime = suite.runtime;
     processDbOperations = suite.processDbOperations;
@@ -357,7 +374,11 @@ describe('Embedded Collection — PG Data Types (WAL normalization)', () => {
 
     await processDbOperations([db.insert(pgDataTypes).values(pgDataTypeInsertValues)]);
 
-    await waitFor(() => collection.list().length === 1);
+    await waitFor(
+      () => collection.list().length === 1,
+      COLLECTION_WAIT_FOR_TIMEOUT_MS,
+      COLLECTION_WAIT_FOR_POLL_INTERVAL_MS,
+    );
 
     expect(collection.list()).toEqual([expect.objectContaining({ ...pgDataTypeInsertValues })]);
 

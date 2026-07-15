@@ -5,7 +5,6 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createPulseClient } from 'drizzle-pulse/client';
 import { createPulseRegistry } from 'drizzle-pulse/server';
-import type { Pool } from 'pg';
 import { fullOrdersFixture } from './fixtures/full-orders/index.js';
 import { minimalOrdersFixture } from './fixtures/minimal-orders/index.js';
 import { pgDataTypesFixture } from './fixtures/pg-data-types/index.js';
@@ -20,7 +19,6 @@ import { insertTestUser, setupTestSuiteForFixture } from './helpers/test-harness
 describe('Client State', () => {
   describe('Full-Orders Fixture', () => {
     let suite: TestSuiteResult;
-    let pool: Pool;
     let db: PostgresJsDatabase;
     let processDbOperations: HarnessProcessDbOperations;
     let initTestQuery: HarnessInitTestQuery;
@@ -41,7 +39,6 @@ describe('Client State', () => {
 
     beforeAll(async () => {
       suite = await setupTestSuiteForFixture(fixture, registry);
-      pool = suite.pool;
       db = suite.db;
       processDbOperations = suite.processDbOperations;
       initTestQuery = suite.initTestQuery;
@@ -453,7 +450,6 @@ describe('Client State', () => {
 
   describe('Minimal-Orders Fixture', () => {
     let suite: TestSuiteResult;
-    let pool: Pool;
     let db: PostgresJsDatabase;
     let processDbOperations: HarnessProcessDbOperations;
     let initTestQuery: HarnessInitTestQuery;
@@ -470,7 +466,6 @@ describe('Client State', () => {
 
     beforeAll(async () => {
       suite = await setupTestSuiteForFixture(fixture, registry);
-      pool = suite.pool;
       db = suite.db;
       processDbOperations = suite.processDbOperations;
       initTestQuery = suite.initTestQuery;
@@ -566,7 +561,6 @@ describe('Client State', () => {
 
   describe('PG Data Types Fixture', () => {
     let suite: TestSuiteResult;
-    let pool: Pool;
     let db: PostgresJsDatabase;
     let processDbOperations: HarnessProcessDbOperations;
     let initTestQuery: HarnessInitTestQuery;
@@ -578,7 +572,6 @@ describe('Client State', () => {
 
     beforeAll(async () => {
       suite = await setupTestSuiteForFixture(fixture, registry);
-      pool = suite.pool;
       db = suite.db;
       processDbOperations = suite.processDbOperations;
       initTestQuery = suite.initTestQuery;
