@@ -1,6 +1,7 @@
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 import type { PullClient } from './client/create-client.js';
 import type { PulseQueryTransport } from './client/transport.js';
+import type { PulseEvent } from './shared/pulse-events.js';
 
 /** Column filter operators */
 export type ColumnOperators<V> = {
@@ -129,24 +130,4 @@ export class QueryDescriptor<TResult> {
 // Server-side wire events carried in a pull response (raw rows keyed by SQL name). Distinct
 // from the client-facing PulseEvent in shared/pulse-events.ts, which is generic over the
 // query's decoded result shape.
-export type PulseWireInsertEvent = {
-  op: 'insert';
-  row: Record<string, unknown>;
-  pk: unknown;
-};
-
-export type PulseWireUpdateEvent = {
-  op: 'update';
-  row: Record<string, unknown>;
-  old_row: Record<string, unknown>;
-  pk: unknown;
-  matchesNew: boolean;
-};
-
-export type PulseWireDeleteEvent = {
-  op: 'delete';
-  old_row: Record<string, unknown>;
-  pk: unknown;
-};
-
-export type PulseWireEvent = PulseWireInsertEvent | PulseWireUpdateEvent | PulseWireDeleteEvent;
+export type PulseWireEvent = PulseEvent<Record<string, unknown>>;

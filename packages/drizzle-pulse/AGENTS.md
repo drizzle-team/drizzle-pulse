@@ -30,8 +30,8 @@ the platform-imports purity test).
 
 | Path | Purpose |
 |------|---------|
-| `src/index.ts` | root barrel: exports `pulse`, `PulseTable`, and the public protocol/event/query **types** only |
-| `src/types.ts` | shared public types such as `QueryDescriptor`, `ResolvedPulseQuery`, `WhereClause`, `PullResponse`, `LoadMoreResponse`, `PulseAuthContext` |
+| `src/index.ts` | root barrel: `pulse`, `PulseTable`, `QueryDescriptor` (values) plus the `ColumnOperators`/`WhereCondition` **types** only — the full protocol/wire/query type family lives on `./server` instead |
+| `src/types.ts` | shared public types such as `QueryDescriptor`, `ResolvedPulseQuery`, `WhereClause`, `PullResponse`, `LoadMoreResponse`, `PulseAuthContext`, `PulseWireEvent` (a `PulseEvent<Record<string, unknown>>` alias) |
 | `src/pulse-table.ts` | collection entity: `pulse(table)` → `PulseTable`; lazy PK validation at `.query()` time; value-imports `drizzle-orm/pg-core` (`getTableConfig`) — the sole client-unreachable pg-core exemption in the purity test |
 | `src/shared/` | protocol request/response types, filter AST helpers, PK utilities, `pulse-merge-core.ts` (merge state machine reused by HTTP `PulseQuery` and embedded `PulseCollection`) |
 | `src/client/create-client.ts` | proxy-based typed HTTP client + `PullClient` (batched auto-poll, default 1s, `pollIntervalMs: 0` disables) |
@@ -130,11 +130,7 @@ Embedded (in-process, tap-direct):
 // drizzle-pulse (root)
 pulse, PulseTable
 QueryDescriptor
-type ColumnOperators, ResolvedPulseQuery, WhereClause, WhereCondition
-type PulseWireEvent, PulseWireInsertEvent, PulseWireUpdateEvent, PulseWireDeleteEvent
-type SubscribeRequest, SubscribeResponse, PullRequest, PullSubscriptionRequest
-type PullResponse, PullIncrementalResponse, PullResetResponse, PullResponseError, PullResponseErrorResult
-type LoadMoreRequest, LoadMoreResponse
+type ColumnOperators, WhereCondition
 
 // drizzle-pulse/server
 expose, PulseRuntime, LogLevel, type ExposeConfig, WalListenerConfig
@@ -145,7 +141,11 @@ buildSelectQuery
 PulseStore
 serializeResponse
 applyColumnFilter, type PulseClientContract, PulseQueryContext, WithPk, ColumnsSelection, ...
-type PulseAuthContext
+type PulseAuthContext, ResolvedPulseQuery, WhereClause
+type PulseWireEvent
+type SubscribeRequest, SubscribeResponse, PullRequest, PullSubscriptionRequest
+type PullResponse, PullIncrementalResponse, PullResetResponse, PullResponseError, PullResponseErrorResult
+type LoadMoreRequest, LoadMoreResponse
 
 // drizzle-pulse/server/hono
 createPulseHonoRouter, type PulseHonoHandlers

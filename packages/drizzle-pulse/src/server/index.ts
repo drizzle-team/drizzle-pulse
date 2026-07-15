@@ -12,11 +12,18 @@ export type {
 
 export type {
   LoadMoreRequest,
+  LoadMoreResponse,
+  PullIncrementalResponse,
   PullRequest,
+  PullResetResponse,
+  PullResponse,
+  PullResponseError,
+  PullResponseErrorResult,
+  PullSubscriptionRequest,
   SubscribeRequest,
   SubscribeResponse,
 } from '../shared/protocol-types.js';
-export type { PulseAuthContext } from '../types.js';
+export type { PulseAuthContext, PulseWireEvent } from '../types.js';
 // Events-table convention
 export {
   buildEventsTable,
