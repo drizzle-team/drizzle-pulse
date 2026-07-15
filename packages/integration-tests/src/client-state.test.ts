@@ -10,16 +10,16 @@ import { fullOrdersFixture } from './fixtures/full-orders/index.js';
 import { minimalOrdersFixture } from './fixtures/minimal-orders/index.js';
 import { pgDataTypesFixture } from './fixtures/pg-data-types/index.js';
 import { pgDataTypeInsertValues } from './fixtures/pg-data-types/inventory.js';
-import type { HarnessInitTestQuery, HarnessProcessDbOperations } from './helpers/test-harness.js';
-import {
-  cleanupBetweenTestsForFixture,
-  insertTestUser,
-  setupTestSuiteForFixture,
-  teardownTestSuiteForFixture,
+import type {
+  HarnessInitTestQuery,
+  HarnessProcessDbOperations,
+  TestSuiteResult,
 } from './helpers/test-harness.js';
+import { insertTestUser, setupTestSuiteForFixture } from './helpers/test-harness.js';
 
 describe('Client State', () => {
   describe('Full-Orders Fixture', () => {
+    let suite: TestSuiteResult;
     let pool: Pool;
     let db: PostgresJsDatabase;
     let processDbOperations: HarnessProcessDbOperations;
@@ -40,19 +40,19 @@ describe('Client State', () => {
     const client = createPulseClient<typeof registry.$client>({ url: 'http://localhost' });
 
     beforeAll(async () => {
-      const setup = await setupTestSuiteForFixture(fixture, registry);
-      pool = setup.pool;
-      db = setup.db;
-      processDbOperations = setup.processDbOperations;
-      initTestQuery = setup.initTestQuery;
+      suite = await setupTestSuiteForFixture(fixture, registry);
+      pool = suite.pool;
+      db = suite.db;
+      processDbOperations = suite.processDbOperations;
+      initTestQuery = suite.initTestQuery;
     });
 
     afterAll(async () => {
-      await teardownTestSuiteForFixture(fixture, registry);
+      await suite?.teardown();
     });
 
     beforeEach(async () => {
-      await cleanupBetweenTestsForFixture(fixture, pool);
+      await suite?.cleanupBetweenTests();
       await insertTestUser(db, `driver_${randomUUID().slice(0, 8)}`);
     });
 
@@ -452,6 +452,7 @@ describe('Client State', () => {
   });
 
   describe('Minimal-Orders Fixture', () => {
+    let suite: TestSuiteResult;
     let pool: Pool;
     let db: PostgresJsDatabase;
     let processDbOperations: HarnessProcessDbOperations;
@@ -468,19 +469,19 @@ describe('Client State', () => {
     const client = createPulseClient<typeof registry.$client>({ url: 'http://localhost' });
 
     beforeAll(async () => {
-      const setup = await setupTestSuiteForFixture(fixture, registry);
-      pool = setup.pool;
-      db = setup.db;
-      processDbOperations = setup.processDbOperations;
-      initTestQuery = setup.initTestQuery;
+      suite = await setupTestSuiteForFixture(fixture, registry);
+      pool = suite.pool;
+      db = suite.db;
+      processDbOperations = suite.processDbOperations;
+      initTestQuery = suite.initTestQuery;
     });
 
     afterAll(async () => {
-      await teardownTestSuiteForFixture(fixture, registry);
+      await suite?.teardown();
     });
 
     beforeEach(async () => {
-      await cleanupBetweenTestsForFixture(fixture, pool);
+      await suite?.cleanupBetweenTests();
     });
 
     test('null driverId insert: minimal schema allows null FK', async () => {
@@ -564,6 +565,7 @@ describe('Client State', () => {
   });
 
   describe('PG Data Types Fixture', () => {
+    let suite: TestSuiteResult;
     let pool: Pool;
     let db: PostgresJsDatabase;
     let processDbOperations: HarnessProcessDbOperations;
@@ -575,19 +577,19 @@ describe('Client State', () => {
     const registry = createPulseRegistry({ allPgDataTypes: allPgDataTypesWithEvents });
 
     beforeAll(async () => {
-      const setup = await setupTestSuiteForFixture(fixture, registry);
-      pool = setup.pool;
-      db = setup.db;
-      processDbOperations = setup.processDbOperations;
-      initTestQuery = setup.initTestQuery;
+      suite = await setupTestSuiteForFixture(fixture, registry);
+      pool = suite.pool;
+      db = suite.db;
+      processDbOperations = suite.processDbOperations;
+      initTestQuery = suite.initTestQuery;
     });
 
     afterAll(async () => {
-      await teardownTestSuiteForFixture(fixture, registry);
+      await suite?.teardown();
     });
 
     beforeEach(async () => {
-      await cleanupBetweenTestsForFixture(fixture, pool);
+      await suite?.cleanupBetweenTests();
     });
 
     test('subscribe returns every pg data type with runtime-normalized client state', async () => {

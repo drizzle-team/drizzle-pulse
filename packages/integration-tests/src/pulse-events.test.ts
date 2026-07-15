@@ -7,13 +7,12 @@ import { createPulseEvents } from 'drizzle-pulse/client/embedded';
 import { createPulseRegistry } from 'drizzle-pulse/server';
 import type { Pool } from 'pg';
 import { fullOrdersFixture } from './fixtures/full-orders/index.js';
-import type { HarnessProcessDbOperations, RuntimeOf } from './helpers/test-harness.js';
-import {
-  cleanupBetweenTestsForFixture,
-  insertTestUser,
-  setupTestSuiteForFixture,
-  teardownTestSuiteForFixture,
+import type {
+  HarnessProcessDbOperations,
+  RuntimeOf,
+  TestSuiteResult,
 } from './helpers/test-harness.js';
+import { insertTestUser, setupTestSuiteForFixture } from './helpers/test-harness.js';
 
 // ---------------------------------------------------------------------------
 // Bounded async poller — avoids fixed sleeps while bounding test duration.
@@ -45,9 +44,10 @@ function parseLsnForAssertions(lsn: string): bigint {
 // ---------------------------------------------------------------------------
 
 describe('createPulseEvents', () => {
-  const fixture = { ...fullOrdersFixture, variantName: 'pulse-events' as const };
+  const fixture = fullOrdersFixture;
   const { orders } = fixture.tables;
 
+  let suite: TestSuiteResult;
   let pool: Pool;
   let db: PostgresJsDatabase;
   let runtime!: RuntimeOf<typeof registry>;
@@ -74,19 +74,19 @@ describe('createPulseEvents', () => {
   });
 
   beforeAll(async () => {
-    const setup = await setupTestSuiteForFixture(fixture, registry);
-    pool = setup.pool;
-    db = setup.db;
-    runtime = setup.runtime;
-    processDbOperations = setup.processDbOperations;
+    suite = await setupTestSuiteForFixture(fixture, registry);
+    pool = suite.pool;
+    db = suite.db;
+    runtime = suite.runtime;
+    processDbOperations = suite.processDbOperations;
   });
 
   afterAll(async () => {
-    await teardownTestSuiteForFixture(fixture, registry);
+    await suite?.teardown();
   });
 
   beforeEach(async () => {
-    await cleanupBetweenTestsForFixture(fixture, pool);
+    await suite?.cleanupBetweenTests();
     await insertTestUser(db, `driver_${randomUUID().slice(0, 8)}`);
   });
 
@@ -274,12 +274,12 @@ describe('createPulseEvents', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Lifecycle suite — separate variantName so runtime.stop() can be exercised in-test
-// without tearing down the suites above.
+// Lifecycle suite — separate registry/runtime so runtime.stop() can be exercised
+// in-test without tearing down the suites above.
 // ---------------------------------------------------------------------------
 
 describe('createPulseEvents lifecycle', () => {
-  const lifecycleFixture = { ...fullOrdersFixture, variantName: 'pulse-events-lifecycle' as const };
+  const lifecycleFixture = fullOrdersFixture;
   const { orders } = lifecycleFixture.tables;
 
   const ordersByStatusLC = pulse(orders)
@@ -288,23 +288,24 @@ describe('createPulseEvents lifecycle', () => {
     .query((ctx) => ctx.query({ status: ctx.args.status }));
   const lcRegistry = createPulseRegistry({ ordersByStatusLC });
 
+  let lcSuite: TestSuiteResult;
   let lcPool: Pool;
   let lcDb: PostgresJsDatabase;
   let lcRuntime!: RuntimeOf<typeof lcRegistry>;
 
   beforeAll(async () => {
-    const setup = await setupTestSuiteForFixture(lifecycleFixture, lcRegistry);
-    lcPool = setup.pool;
-    lcDb = setup.db;
-    lcRuntime = setup.runtime;
+    lcSuite = await setupTestSuiteForFixture(lifecycleFixture, lcRegistry);
+    lcPool = lcSuite.pool;
+    lcDb = lcSuite.db;
+    lcRuntime = lcSuite.runtime;
   });
 
   afterAll(async () => {
-    await teardownTestSuiteForFixture(lifecycleFixture, lcRegistry);
+    await lcSuite?.teardown();
   });
 
   beforeEach(async () => {
-    await cleanupBetweenTestsForFixture(lifecycleFixture, lcPool);
+    await lcSuite?.cleanupBetweenTests();
     await insertTestUser(lcDb, `driver_${randomUUID().slice(0, 8)}`);
   });
 

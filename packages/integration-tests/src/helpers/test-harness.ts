@@ -60,33 +60,6 @@ export type RuntimeOf<TRegistry extends PulseRegistry<AnyQueries>> =
     ? PulseRuntime<TQueries> & { sourceSql: ReturnType<typeof postgres> }
     : never;
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type TestSuiteContext<
-  TFixture extends IntegrationTestFixture,
-  TQueries extends AnyQueries = any,
-> = {
-  fixture: TFixture;
-  databaseName: string;
-  databaseUrl: string;
-  publicationName: string;
-  slotName: string;
-  adminPool: Pool;
-  testPool: Pool;
-  runtime: TestRuntime<TQueries>;
-  router: Hono;
-  db: PostgresJsDatabase;
-  dbSql: ReturnType<typeof postgres>;
-  activeSuiteUsers: number;
-  runtimeStartupError: Error | null;
-};
-
-function isFixtureContext<TFixture extends IntegrationTestFixture>(
-  ctx: TestSuiteContext<IntegrationTestFixture>,
-  fixture: TFixture,
-): ctx is TestSuiteContext<TFixture, any> {
-  return ctx.fixture === fixture;
-}
-
 type DbEventOperation = PromiseLike<unknown>;
 type DbEventResults<TOperations extends ReadonlyArray<DbEventOperation>> = {
   [TIndex in keyof TOperations]: Awaited<TOperations[TIndex]>;
@@ -152,29 +125,6 @@ const pullResponseSchema = z.object({
   reset: z.boolean().optional(),
   reason: z.string().optional(),
 });
-
-const suiteContexts = new Map<string, TestSuiteContext<IntegrationTestFixture>>();
-
-// Per-registry-object identity token so contexts never collide across registries with
-// identical query names.
-const registryIdentities = new WeakMap<PulseRegistry<any>, string>();
-let nextRegistryIdentity = 0;
-
-function getRegistryIdentity(registry: PulseRegistry<any>): string {
-  const existing = registryIdentities.get(registry);
-  if (existing !== undefined) {
-    return existing;
-  }
-
-  const identity = `r${nextRegistryIdentity++}`;
-  registryIdentities.set(registry, identity);
-  return identity;
-}
-
-function getSuiteContextKey(fixture: IntegrationTestFixture, registry: PulseRegistry<any>): string {
-  const queryNames = registry.getQueryNames().slice().sort().join(',');
-  return `${fixture.variantName}::${queryNames}::${getRegistryIdentity(registry)}`;
-}
 
 export function baseDatabaseUrl(): string {
   return process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL;
@@ -335,61 +285,12 @@ export type TestSuiteResult<
   fixture: TFixture;
   processDbOperations: HarnessProcessDbOperations;
   initTestQuery: HarnessInitTestQuery;
+  // Idempotent — the epoch-restart failure path (a test that tears down and re-establishes a
+  // suite mid-file) can end up calling this twice on the same stale context, so a second call
+  // must be a harmless no-op rather than a double-release error.
+  teardown: () => Promise<void>;
+  cleanupBetweenTests: () => Promise<void>;
 };
-
-function createFixtureLocalProcessDbOperations(
-  ctx: TestSuiteContext<IntegrationTestFixture>,
-): HarnessProcessDbOperations {
-  return async function processFixtureDbOperations<
-    const TOperations extends ReadonlyArray<DbEventOperation>,
-  >(
-    operations: TOperations,
-    options?: ProcessDbOperationsOptions,
-  ): Promise<{ events: HarnessEvent[]; results: HarnessDbEventResults<TOperations> }> {
-    return processDbOperations(ctx.fixture, ctx.testPool, operations, options);
-  };
-}
-
-function createFixtureLocalInitTestQuery(
-  ctx: TestSuiteContext<IntegrationTestFixture>,
-): HarnessInitTestQuery {
-  const fetchImpl = createRouterFetchAdapter(ctx.router);
-
-  return async function initTestQuery<T extends PulseRow>(
-    descriptor: QueryDescriptor<T>,
-  ): Promise<PulseQuery<T>> {
-    const client = createPulseClient<{
-      [queryName: string]: (args?: Record<string, unknown>) => QueryDescriptor<T>;
-    }>({ url: 'http://localhost', fetchImpl, pollIntervalMs: 0 });
-    const descriptorFactory = client[descriptor.queryName];
-    if (typeof descriptorFactory !== 'function') {
-      throw new Error(`Missing client query factory for ${descriptor.queryName}`);
-    }
-
-    const query = new PulseQuery(descriptorFactory(descriptor.args));
-    await query.subscribe();
-    return query;
-  };
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function toTestSuiteResult<
-  TFixture extends IntegrationTestFixture,
-  TQueries extends AnyQueries = any,
->(ctx: TestSuiteContext<TFixture, TQueries>): TestSuiteResult<TFixture, TQueries> {
-  return {
-    runtime: ctx.runtime,
-    router: ctx.router,
-    pool: ctx.testPool,
-    db: ctx.db,
-    databaseUrl: ctx.databaseUrl,
-    publicationName: ctx.publicationName,
-    slotName: ctx.slotName,
-    fixture: ctx.fixture,
-    processDbOperations: createFixtureLocalProcessDbOperations(ctx),
-    initTestQuery: createFixtureLocalInitTestQuery(ctx),
-  };
-}
 
 export async function setupTestSuiteForFixture<
   TFixture extends IntegrationTestFixture,
@@ -398,15 +299,6 @@ export async function setupTestSuiteForFixture<
   fixture: TFixture,
   registry: PulseRegistry<TQueries>,
 ): Promise<TestSuiteResult<TFixture, TQueries>> {
-  const contextKey = getSuiteContextKey(fixture, registry);
-  const existing = suiteContexts.get(contextKey);
-
-  if (existing && isFixtureContext(existing, fixture)) {
-    existing.activeSuiteUsers += 1;
-    // Assert TQueries at the cache boundary — `any` in the cache type is a storage convenience.
-    return toTestSuiteResult(existing) as TestSuiteResult<TFixture, TQueries>;
-  }
-
   const base = baseDatabaseUrl();
   const adminPool = createQuietPool(base);
   const databaseName = `${TEST_DATABASE_PREFIX}_${randomSuffix()}`;
@@ -438,94 +330,93 @@ export async function setupTestSuiteForFixture<
 
   const dbSql = createQuietPostgresClient(databaseUrl);
   const db = drizzle({ client: dbSql });
+  const router = createPulseRouter(runtime);
+  const fetchImpl = createRouterFetchAdapter(router);
 
-  const ctx: TestSuiteContext<TFixture, TQueries> = {
-    fixture,
-    databaseName,
+  let tornDown = false;
+
+  const teardown = async (): Promise<void> => {
+    if (tornDown) {
+      return;
+    }
+    tornDown = true;
+
+    await runtime.stop();
+    await testPool.query(`DROP PUBLICATION IF EXISTS ${runtime.publicationName}`);
+    await adminPool.query(
+      'SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1',
+      [runtime.slotName],
+    );
+
+    await testPool.end();
+    await runtime.sourceSql.end();
+    await dbSql.end();
+
+    await adminPool.query(
+      `
+        SELECT pg_terminate_backend(pid)
+        FROM pg_stat_activity
+        WHERE datname = $1
+          AND pid <> pg_backend_pid()
+      `,
+      [databaseName],
+    );
+    await adminPool.query(`DROP DATABASE IF EXISTS "${databaseName}"`);
+    await adminPool.end();
+  };
+
+  const cleanupBetweenTests = async (): Promise<void> => {
+    if (tornDown) {
+      throw new Error('cleanupBetweenTests() called on a torn-down test suite context');
+    }
+
+    const eventsTableConfig = getTableConfig(fixture.eventsTable);
+    const eventsTable = `"${eventsTableConfig.schema ?? 'public'}"."${eventsTableConfig.name}"`;
+    const tableList = fixture.cleanupTables.map((t) => `"${t}"`).join(', ');
+    await testPool.query(`TRUNCATE TABLE ${tableList} RESTART IDENTITY CASCADE`);
+    await testPool.query(`TRUNCATE TABLE ${eventsTable} RESTART IDENTITY`);
+    await runtime.ensureBaselines();
+  };
+
+  async function processFixtureDbOperations<
+    const TOperations extends ReadonlyArray<DbEventOperation>,
+  >(
+    operations: TOperations,
+    options?: ProcessDbOperationsOptions,
+  ): Promise<{ events: HarnessEvent[]; results: HarnessDbEventResults<TOperations> }> {
+    return processDbOperations(fixture, testPool, operations, options);
+  }
+
+  async function initTestQuery<T extends PulseRow>(
+    descriptor: QueryDescriptor<T>,
+  ): Promise<PulseQuery<T>> {
+    const client = createPulseClient<{
+      [queryName: string]: (args?: Record<string, unknown>) => QueryDescriptor<T>;
+    }>({ url: 'http://localhost', fetchImpl, pollIntervalMs: 0 });
+    const descriptorFactory = client[descriptor.queryName];
+    if (typeof descriptorFactory !== 'function') {
+      throw new Error(`Missing client query factory for ${descriptor.queryName}`);
+    }
+
+    const query = new PulseQuery(descriptorFactory(descriptor.args));
+    await query.subscribe();
+    return query;
+  }
+
+  return {
+    runtime,
+    router,
+    pool: testPool,
+    db,
     databaseUrl,
     publicationName: runtime.publicationName,
     slotName: runtime.slotName,
-    adminPool,
-    testPool,
-    runtime,
-    router: createPulseRouter(runtime),
-    db,
-    dbSql,
-    activeSuiteUsers: 1,
-    runtimeStartupError: null,
+    fixture,
+    processDbOperations: processFixtureDbOperations,
+    initTestQuery,
+    teardown,
+    cleanupBetweenTests,
   };
-  suiteContexts.set(contextKey, ctx);
-
-  return toTestSuiteResult(ctx);
-}
-
-export async function teardownTestSuiteForFixture<
-  TFixture extends IntegrationTestFixture,
-  TQueries extends AnyQueries,
->(fixture: TFixture, registry: PulseRegistry<TQueries>): Promise<void> {
-  // Keyed on the exact context setup used, so registries sharing a variantName don't
-  // decrement each other's ref count.
-  const contextKey = getSuiteContextKey(fixture, registry);
-  const ctx = suiteContexts.get(contextKey);
-  if (!ctx) {
-    return;
-  }
-
-  ctx.activeSuiteUsers = Math.max(ctx.activeSuiteUsers - 1, 0);
-  if (ctx.activeSuiteUsers > 0) {
-    return;
-  }
-
-  await ctx.runtime.stop();
-  await ctx.testPool.query(`DROP PUBLICATION IF EXISTS ${ctx.publicationName}`);
-  await ctx.adminPool.query(
-    'SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1',
-    [ctx.slotName],
-  );
-
-  await ctx.testPool.end();
-  await ctx.runtime.sourceSql.end();
-  await ctx.dbSql.end();
-
-  await ctx.adminPool.query(
-    `
-      SELECT pg_terminate_backend(pid)
-      FROM pg_stat_activity
-      WHERE datname = $1
-        AND pid <> pg_backend_pid()
-    `,
-    [ctx.databaseName],
-  );
-  await ctx.adminPool.query(`DROP DATABASE IF EXISTS "${ctx.databaseName}"`);
-  await ctx.adminPool.end();
-
-  suiteContexts.delete(contextKey);
-}
-
-export async function cleanupBetweenTestsForFixture(
-  fixture: IntegrationTestFixture,
-  pool?: Pool,
-): Promise<void> {
-  const matchingContexts = Array.from(suiteContexts.values()).filter(
-    (ctx) => ctx.fixture === fixture,
-  );
-  const ctx =
-    pool === undefined
-      ? matchingContexts[0]
-      : matchingContexts.find((candidate) => candidate.testPool === pool);
-  if (!ctx) {
-    throw new Error('cleanupBetweenTestsForFixture() requires setupTestSuiteForFixture() first');
-  }
-
-  const targetPool = pool ?? ctx.testPool;
-
-  const eventsTableConfig = getTableConfig(fixture.eventsTable);
-  const eventsTable = `"${eventsTableConfig.schema ?? 'public'}"."${eventsTableConfig.name}"`;
-  const tables = fixture.cleanupTables;
-  const tableList = tables.map((t) => `"${t}"`).join(', ');
-  await targetPool.query(`TRUNCATE TABLE ${tableList} RESTART IDENTITY CASCADE`);
-  await targetPool.query(`TRUNCATE TABLE ${eventsTable} RESTART IDENTITY`);
-  await ctx.runtime.ensureBaselines();
 }
 
 export async function waitForEventsForFixture(

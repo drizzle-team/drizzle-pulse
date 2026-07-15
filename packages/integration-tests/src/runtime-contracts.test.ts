@@ -8,19 +8,22 @@ import type { Hono } from 'hono';
 import type { Pool } from 'pg';
 import SuperJSON from 'superjson';
 import { fullOrdersFixture } from './fixtures/full-orders/index.js';
-import type { HarnessProcessDbOperations, RuntimeOf } from './helpers/test-harness.js';
+import type {
+  HarnessProcessDbOperations,
+  RuntimeOf,
+  TestSuiteResult,
+} from './helpers/test-harness.js';
 import {
-  cleanupBetweenTestsForFixture,
   createPulseRouterWithAuth,
   insertTestUser,
   pullClient,
   setupTestSuiteForFixture,
   subscribeClient,
-  teardownTestSuiteForFixture,
   waitForEventsForFixture,
 } from './helpers/test-harness.js';
 
 describe('Runtime Contracts', () => {
+  let suite: TestSuiteResult;
   let router: Hono;
   let pool: Pool;
   let db: PostgresJsDatabase;
@@ -49,20 +52,20 @@ describe('Runtime Contracts', () => {
   const registry = createPulseRegistry({ ordersByStatus, authScopedByStatus });
 
   beforeAll(async () => {
-    const setup = await setupTestSuiteForFixture(fixture, registry);
-    router = setup.router;
-    pool = setup.pool;
-    db = setup.db;
-    processDbOperations = setup.processDbOperations;
-    runtime = setup.runtime;
+    suite = await setupTestSuiteForFixture(fixture, registry);
+    router = suite.router;
+    pool = suite.pool;
+    db = suite.db;
+    processDbOperations = suite.processDbOperations;
+    runtime = suite.runtime;
   });
 
   afterAll(async () => {
-    await teardownTestSuiteForFixture(fixture, registry);
+    await suite?.teardown();
   });
 
   beforeEach(async () => {
-    await cleanupBetweenTestsForFixture(fixture, pool);
+    await suite?.cleanupBetweenTests();
     await insertTestUser(db, `driver_${randomUUID().slice(0, 8)}`);
   });
 
@@ -201,14 +204,16 @@ describe('Runtime Contracts', () => {
     const stale = await subscribeClient(router, 'ordersByStatus', { status: 'requested' });
 
     // Bounce the runtime: teardown drops the DB, setup reconciles a fresh events table and
-    // rotates its epoch — so `stale.token`'s epoch no longer matches.
-    await teardownTestSuiteForFixture(fixture, registry);
-    const restarted = await setupTestSuiteForFixture(fixture, registry);
-    router = restarted.router;
-    pool = restarted.pool;
-    db = restarted.db;
-    processDbOperations = restarted.processDbOperations;
-    runtime = restarted.runtime;
+    // rotates its epoch — so `stale.token`'s epoch no longer matches. `suite` is reassigned to
+    // the new context before this test returns; if setup below throws, `suite` still points at
+    // the already-torn-down context, and afterAll's teardown() call on it must be a no-op.
+    await suite?.teardown();
+    suite = await setupTestSuiteForFixture(fixture, registry);
+    router = suite.router;
+    pool = suite.pool;
+    db = suite.db;
+    processDbOperations = suite.processDbOperations;
+    runtime = suite.runtime;
     await insertTestUser(db, `driver_${randomUUID().slice(0, 8)}`);
 
     const pullResponse = await pullClient(router, stale);
@@ -339,9 +344,8 @@ describe('Runtime Contracts', () => {
 
   test('auth-scoped subscriptions keep subscribe, pull, and load-more tied to the same user', async () => {
     // Reuse the suite's existing runtime (from beforeAll) instead of calling
-    // setupTestSuiteForFixture() again — an extra call here acquired a second reference
-    // that this test never released, leaving activeSuiteUsers stuck above 0 after
-    // afterAll's single teardown call.
+    // setupTestSuiteForFixture() again — each call provisions its own ephemeral DB, so a
+    // second call here would leave an extra database/slot for this test alone to tear down.
     const driverOne = await insertTestUser(db, `auth_driver_${randomUUID().slice(0, 8)}`);
     const driverTwo = await insertTestUser(db, `auth_driver_${randomUUID().slice(0, 8)}`);
 

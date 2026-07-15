@@ -9,13 +9,12 @@ import type { Pool } from 'pg';
 import { fullOrdersFixture } from './fixtures/full-orders/index.js';
 import { pgDataTypesFixture } from './fixtures/pg-data-types/index.js';
 import { pgDataTypeInsertValues } from './fixtures/pg-data-types/inventory.js';
-import type { HarnessProcessDbOperations, RuntimeOf } from './helpers/test-harness.js';
-import {
-  cleanupBetweenTestsForFixture,
-  insertTestUser,
-  setupTestSuiteForFixture,
-  teardownTestSuiteForFixture,
+import type {
+  HarnessProcessDbOperations,
+  RuntimeOf,
+  TestSuiteResult,
 } from './helpers/test-harness.js';
+import { insertTestUser, setupTestSuiteForFixture } from './helpers/test-harness.js';
 
 // Change delivery is tap-direct (WAL listener -> in-process WalEventEmitter -> merge core),
 // not a poll — state converges a scheduling beat after processDbOperations resolves because
@@ -48,6 +47,7 @@ function parseLsnForAssertions(lsn: string): bigint {
 // ---------------------------------------------------------------------------
 
 describe('Embedded Collection', () => {
+  let suite: TestSuiteResult;
   let pool: Pool;
   let db: PostgresJsDatabase;
   let runtime!: RuntimeOf<typeof registry>;
@@ -70,19 +70,19 @@ describe('Embedded Collection', () => {
   const registry = createPulseRegistry({ ordersByStatus, ordersByStatusLimited });
 
   beforeAll(async () => {
-    const setup = await setupTestSuiteForFixture(fixture, registry);
-    pool = setup.pool;
-    db = setup.db;
-    runtime = setup.runtime;
-    processDbOperations = setup.processDbOperations;
+    suite = await setupTestSuiteForFixture(fixture, registry);
+    pool = suite.pool;
+    db = suite.db;
+    runtime = suite.runtime;
+    processDbOperations = suite.processDbOperations;
   });
 
   afterAll(async () => {
-    await teardownTestSuiteForFixture(fixture, registry);
+    await suite?.teardown();
   });
 
   beforeEach(async () => {
-    await cleanupBetweenTestsForFixture(fixture, pool);
+    await suite?.cleanupBetweenTests();
     await insertTestUser(db, `driver_${randomUUID().slice(0, 8)}`);
   });
 
@@ -256,11 +256,12 @@ describe('Embedded Collection', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Lifecycle suite — separate variantName so its runtime can be stopped in-test.
+// Lifecycle suite — separate registry/runtime so its runtime can be stopped in-test
+// without tearing down the suite above.
 // ---------------------------------------------------------------------------
 
 describe('Embedded Collection lifecycle', () => {
-  const lifecycleFixture = { ...fullOrdersFixture, variantName: 'embedded-lifecycle' as const };
+  const lifecycleFixture = fullOrdersFixture;
   const { orders } = lifecycleFixture.tables;
 
   const ordersByStatusLC = pulse(orders)
@@ -269,23 +270,24 @@ describe('Embedded Collection lifecycle', () => {
     .query((ctx) => ctx.query({ status: ctx.args.status }));
   const lcRegistry = createPulseRegistry({ ordersByStatusLC });
 
+  let lcSuite: TestSuiteResult;
   let lcPool: Pool;
   let lcDb: PostgresJsDatabase;
   let lcRuntime!: RuntimeOf<typeof lcRegistry>;
 
   beforeAll(async () => {
-    const setup = await setupTestSuiteForFixture(lifecycleFixture, lcRegistry);
-    lcPool = setup.pool;
-    lcDb = setup.db;
-    lcRuntime = setup.runtime;
+    lcSuite = await setupTestSuiteForFixture(lifecycleFixture, lcRegistry);
+    lcPool = lcSuite.pool;
+    lcDb = lcSuite.db;
+    lcRuntime = lcSuite.runtime;
   });
 
   afterAll(async () => {
-    await teardownTestSuiteForFixture(lifecycleFixture, lcRegistry);
+    await lcSuite?.teardown();
   });
 
   beforeEach(async () => {
-    await cleanupBetweenTestsForFixture(lifecycleFixture, lcPool);
+    await lcSuite?.cleanupBetweenTests();
     await insertTestUser(lcDb, `driver_${randomUUID().slice(0, 8)}`);
   });
 
@@ -320,6 +322,7 @@ describe('Embedded Collection lifecycle', () => {
 // ---------------------------------------------------------------------------
 
 describe('Embedded Collection — PG Data Types (WAL normalization)', () => {
+  let suite: TestSuiteResult;
   let pool: Pool;
   let db: PostgresJsDatabase;
   let runtime!: RuntimeOf<typeof registry>;
@@ -332,19 +335,19 @@ describe('Embedded Collection — PG Data Types (WAL normalization)', () => {
   const registry = createPulseRegistry({ allPgDataTypes });
 
   beforeAll(async () => {
-    const setup = await setupTestSuiteForFixture(fixture, registry);
-    pool = setup.pool;
-    db = setup.db;
-    runtime = setup.runtime;
-    processDbOperations = setup.processDbOperations;
+    suite = await setupTestSuiteForFixture(fixture, registry);
+    pool = suite.pool;
+    db = suite.db;
+    runtime = suite.runtime;
+    processDbOperations = suite.processDbOperations;
   });
 
   afterAll(async () => {
-    await teardownTestSuiteForFixture(fixture, registry);
+    await suite?.teardown();
   });
 
   beforeEach(async () => {
-    await cleanupBetweenTestsForFixture(fixture, pool);
+    await suite?.cleanupBetweenTests();
   });
 
   test('push delta rows carry every pg data type in its normalized JS shape', async () => {

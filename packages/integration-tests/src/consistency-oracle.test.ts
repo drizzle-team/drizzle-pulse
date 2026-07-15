@@ -11,13 +11,11 @@ import type { Hono } from 'hono';
 import type { Pool } from 'pg';
 import { fullOrdersFixture, type HarnessOrderStatus } from './fixtures/full-orders/index.js';
 import { makeOperationSequenceArb } from './helpers/order-ops-arbitrary.js';
-import type { RuntimeOf } from './helpers/test-harness.js';
+import type { RuntimeOf, TestSuiteResult } from './helpers/test-harness.js';
 import {
-  cleanupBetweenTestsForFixture,
   createRouterFetchAdapter,
   insertTestUser,
   setupTestSuiteForFixture,
-  teardownTestSuiteForFixture,
   waitForEventsForFixture,
 } from './helpers/test-harness.js';
 
@@ -65,9 +63,10 @@ function sortById(rows: ComparableRow[]): ComparableRow[] {
 }
 
 describe('Consistency Oracle (SPLIT-04)', () => {
-  const fixture = { ...fullOrdersFixture, variantName: 'consistency-oracle' as const };
+  const fixture = fullOrdersFixture;
   const { orders } = fixture.tables;
 
+  let suite: TestSuiteResult;
   let pool: Pool;
   let db: PostgresJsDatabase;
   let router: Hono;
@@ -96,19 +95,19 @@ describe('Consistency Oracle (SPLIT-04)', () => {
   }
 
   beforeAll(async () => {
-    const setup = await setupTestSuiteForFixture(fixture, registry);
-    pool = setup.pool;
-    db = setup.db;
-    router = setup.router;
-    runtime = setup.runtime;
+    suite = await setupTestSuiteForFixture(fixture, registry);
+    pool = suite.pool;
+    db = suite.db;
+    router = suite.router;
+    runtime = suite.runtime;
   });
 
   afterAll(async () => {
-    await teardownTestSuiteForFixture(fixture, registry);
+    await suite?.teardown();
   });
 
   beforeEach(async () => {
-    await cleanupBetweenTestsForFixture(fixture, pool);
+    await suite?.cleanupBetweenTests();
     await insertTestUser(db, `oracle_driver_${randomUUID().slice(0, 8)}`);
   });
 
@@ -205,7 +204,7 @@ describe('Consistency Oracle (SPLIT-04)', () => {
     async () => {
       await fc.assert(
         fc.asyncProperty(operationSequenceArb, async (sequence) => {
-          await cleanupBetweenTestsForFixture(fixture, pool);
+          await suite?.cleanupBetweenTests();
           const seededUser = await insertTestUser(db, `oracle_run_${randomUUID().slice(0, 8)}`);
 
           // Race the embedded baseline against the whole operation sequence: the collection

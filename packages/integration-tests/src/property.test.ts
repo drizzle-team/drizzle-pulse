@@ -11,16 +11,19 @@ import type { Pool } from 'pg';
 import { fullOrdersFixture, type HarnessOrderStatus } from './fixtures/full-orders/index.js';
 import type { GeneratedOperation as Operation } from './helpers/order-ops-arbitrary.js';
 import { makeOperationSequenceArb } from './helpers/order-ops-arbitrary.js';
-import type { HarnessEvent, HarnessProcessDbOperations } from './helpers/test-harness.js';
+import type {
+  HarnessEvent,
+  HarnessProcessDbOperations,
+  TestSuiteResult,
+} from './helpers/test-harness.js';
 import {
-  cleanupBetweenTestsForFixture,
   createRouterFetchAdapter,
   insertTestUser,
   setupTestSuiteForFixture,
-  teardownTestSuiteForFixture,
   waitForEventsForFixture,
 } from './helpers/test-harness.js';
 
+let suite: TestSuiteResult;
 let router: Hono;
 let pool: Pool;
 let db: PostgresJsDatabase;
@@ -86,7 +89,7 @@ async function executeSequence(
   sequence: ReadonlyArray<Operation>,
   propertyName: string,
 ): Promise<ExecutionResult> {
-  await cleanupBetweenTestsForFixture(fullOrdersFixture, pool);
+  await suite?.cleanupBetweenTests();
   const seededUser = await insertTestUser(db, `property_driver_${randomUUID().slice(0, 8)}`);
 
   // Create PulseQuery client bound to the Hono router (production runtime path)
@@ -205,15 +208,15 @@ async function executeSequence(
 
 describe('Property Invariants', () => {
   beforeAll(async () => {
-    const setup = await setupTestSuiteForFixture(fullOrdersFixture, registry);
-    router = setup.router;
-    pool = setup.pool;
-    db = setup.db;
-    runDbOperations = setup.processDbOperations;
+    suite = await setupTestSuiteForFixture(fullOrdersFixture, registry);
+    router = suite.router;
+    pool = suite.pool;
+    db = suite.db;
+    runDbOperations = suite.processDbOperations;
   });
 
   afterAll(async () => {
-    await teardownTestSuiteForFixture(fullOrdersFixture, registry);
+    await suite?.teardown();
   });
 
   test(
@@ -330,7 +333,7 @@ describe('Property Invariants', () => {
     async () => {
       await fc.assert(
         fc.asyncProperty(concurrentInsertCountArb, async (insertCount) => {
-          await cleanupBetweenTestsForFixture(fullOrdersFixture, pool);
+          await suite?.cleanupBetweenTests();
           const seededUser = await insertTestUser(
             db,
             `concurrent_property_driver_${randomUUID().slice(0, 8)}`,
