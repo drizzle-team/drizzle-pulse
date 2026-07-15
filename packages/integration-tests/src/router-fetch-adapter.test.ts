@@ -1,295 +1,137 @@
 /**
- * Task 2: Router Fetch Adapter Integration Test
+ * DB-free unit test for createRouterFetchAdapter (the 22-line fetch-compatible shim
+ * wrapping a Hono router). No database, slot, or WAL provisioning: the adapter is
+ * exercised against a stub in-process Hono echo app.
  *
- * Focused test to verify that createRouterFetchAdapter correctly converts Hono router
- * to a fetch-compatible interface that can be used by pulse clients.
+ * The subscribe/pull/PulseQuery DB round-trips this suite used to cover live on:
+ * runtime-contracts.test.ts (route contracts), client-state.test.ts, property.test.ts,
+ * and consistency-oracle.test.ts (PulseQuery-through-router paths) — all of them already
+ * go through createRouterFetchAdapter in production-shaped scenarios.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
-import { pulse } from 'drizzle-pulse';
-import { createPulseClient, PulseQuery } from 'drizzle-pulse/client';
-import { createPulseRegistry } from 'drizzle-pulse/server';
-import type { Hono } from 'hono';
-import type { Pool } from 'pg';
-import SuperJSON from 'superjson';
+import { describe, expect, test } from 'bun:test';
+import { Hono } from 'hono';
+import { createRouterFetchAdapter } from './helpers/test-harness.js';
 
-import { fullOrdersFixture } from './fixtures/full-orders/index.js';
-import type { HarnessProcessDbOperations } from './helpers/test-harness.js';
-import {
-  cleanupBetweenTestsForFixture,
-  createRouterFetchAdapter,
-  insertTestUser,
-  setupTestSuiteForFixture,
-  subscribeClient,
-  teardownTestSuiteForFixture,
-} from './helpers/test-harness.js';
-
-type SuiteContext = {
-  router: Hono;
-  pool: Pool;
-  db: PostgresJsDatabase;
-  databaseUrl: string;
-  processDbOperations: HarnessProcessDbOperations;
+type EchoBody = {
+  method: string;
+  path: string;
+  search: Record<string, string>;
+  headers: Record<string, string>;
+  body: string;
 };
 
-let ctx: SuiteContext;
-const ordersByStatus = pulse(fullOrdersFixture.tables.orders)
-  .args(fullOrdersFixture.schemas.ordersByStatusArgs)
-  .order('desc')
-  .limit(5)
-  .query((ctx) => ctx.query({ status: ctx.args.status }));
-const registry = createPulseRegistry({ ordersByStatus });
-
-describe('Router Fetch Adapter', () => {
-  beforeAll(async () => {
-    const result = await setupTestSuiteForFixture(fullOrdersFixture, registry);
-    ctx = {
-      router: result.router,
-      pool: result.pool,
-      db: result.db,
-      databaseUrl: result.databaseUrl,
-      processDbOperations: result.processDbOperations,
+function createEchoApp(): Hono {
+  const app = new Hono();
+  app.all('*', async (c) => {
+    const headers: Record<string, string> = {};
+    c.req.raw.headers.forEach((value, key) => {
+      headers[key] = value;
+    });
+    const echo: EchoBody = {
+      method: c.req.method,
+      path: c.req.path,
+      search: c.req.query(),
+      headers,
+      body: await c.req.text(),
     };
+    return c.json(echo);
+  });
+  return app;
+}
+
+async function echo(response: Response): Promise<EchoBody> {
+  return (await response.json()) as EchoBody;
+}
+
+describe('createRouterFetchAdapter', () => {
+  test('string-URL input reaches the app with the right method, path, and body', async () => {
+    const fetchImpl = createRouterFetchAdapter(createEchoApp());
+
+    const response = await fetchImpl('http://localhost/echo?x=1', {
+      method: 'POST',
+      body: 'hello',
+    });
+
+    const body = await echo(response);
+    expect(body.method).toBe('POST');
+    expect(body.path).toBe('/echo');
+    expect(body.search).toEqual({ x: '1' });
+    expect(body.body).toBe('hello');
   });
 
-  afterAll(async () => {
-    await teardownTestSuiteForFixture(fullOrdersFixture, registry);
+  test('URL-object input behaves identically to a string URL', async () => {
+    const fetchImpl = createRouterFetchAdapter(createEchoApp());
+
+    const response = await fetchImpl(new URL('http://localhost/echo?x=1'), {
+      method: 'POST',
+      body: 'hello',
+    });
+
+    const body = await echo(response);
+    expect(body.method).toBe('POST');
+    expect(body.path).toBe('/echo');
+    expect(body.search).toEqual({ x: '1' });
+    expect(body.body).toBe('hello');
   });
 
-  beforeEach(async () => {
-    await cleanupBetweenTestsForFixture(fullOrdersFixture, ctx.pool);
+  test('Request-object input carries its url, method, headers, and body through (previously untested)', async () => {
+    const fetchImpl = createRouterFetchAdapter(createEchoApp());
+    const request = new Request('http://localhost/echo?x=1', {
+      method: 'POST',
+      headers: { 'x-custom': 'from-request' },
+      body: 'request-body',
+    });
+
+    const response = await fetchImpl(request);
+
+    const body = await echo(response);
+    expect(body.method).toBe('POST');
+    expect(body.path).toBe('/echo');
+    expect(body.search).toEqual({ x: '1' });
+    expect(body.headers['x-custom']).toBe('from-request');
+    expect(body.body).toBe('request-body');
   });
 
-  test('Adapter wraps Hono router as fetch-compatible function', async () => {
-    const fetchImpl = createRouterFetchAdapter(ctx.router);
+  test('init overrides a Request input when both are provided', async () => {
+    const fetchImpl = createRouterFetchAdapter(createEchoApp());
+    const request = new Request('http://localhost/echo', {
+      method: 'POST',
+      headers: { 'x-custom': 'from-request' },
+      body: 'request-body',
+    });
 
-    // Verify the adapter has the fetch signature
-    expect(typeof fetchImpl).toBe('function');
+    const response = await fetchImpl(request, {
+      method: 'PUT',
+      headers: { 'x-custom': 'from-init' },
+      body: 'init-body',
+    });
+
+    const body = await echo(response);
+    expect(body.method).toBe('PUT');
+    expect(body.headers['x-custom']).toBe('from-init');
+    expect(body.body).toBe('init-body');
+  });
+
+  test('header normalization: plain-object and Headers-instance inputs both arrive usable', async () => {
+    const fetchImpl = createRouterFetchAdapter(createEchoApp());
+
+    const plainObjectResponse = await fetchImpl('http://localhost/echo', {
+      headers: { 'X-Test': 'plain-object' },
+    });
+    const plainObjectBody = await echo(plainObjectResponse);
+    expect(plainObjectBody.headers['x-test']).toBe('plain-object');
+
+    const headersInstanceResponse = await fetchImpl('http://localhost/echo', {
+      headers: new Headers({ 'X-Test': 'headers-instance' }),
+    });
+    const headersInstanceBody = await echo(headersInstanceResponse);
+    expect(headersInstanceBody.headers['x-test']).toBe('headers-instance');
+  });
+
+  test('preconnect is a callable no-op', () => {
+    const fetchImpl = createRouterFetchAdapter(createEchoApp());
     expect(typeof fetchImpl.preconnect).toBe('function');
-  });
-
-  test('Adapter can reach /subscribe route', async () => {
-    const fetchImpl = createRouterFetchAdapter(ctx.router);
-
-    // Make a direct fetch call through the adapter
-    const response = await fetchImpl('http://localhost/subscribe', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ queryName: 'ordersByStatus', args: { status: 'requested' } }),
-    });
-
-    expect(response.ok).toBe(true);
-    expect(response.status).toBe(200);
-
-    // Verify response is valid JSON
-    const text = await response.text();
-    expect(text.length).toBeGreaterThan(0);
-    const body = SuperJSON.parse<{
-      rows: unknown[];
-      snapshot: string;
-    }>(text);
-    expect(Array.isArray(body.rows)).toBe(true);
-    // snapshot is now an epoch:snapshot cursor token, not a bare number.
-    expect(typeof body.snapshot).toBe('string');
-    expect(body.snapshot).toContain(':');
-  });
-
-  test('Adapter can reach /pull route after insert event', async () => {
-    // Create a test user for the order
-    const user = await insertTestUser(ctx.db, `user_${Math.random().toString(36).slice(2)}`);
-
-    // First subscribe to get a cursor token
-    const subscribeResult = await subscribeClient(ctx.router, 'ordersByStatus', {
-      status: 'requested',
-    });
-
-    // Insert a matching order
-    const orderData = {
-      driverId: user.id,
-      pickup: 'Test Pickup',
-      dropoff: 'Test Dropoff',
-      price: 25,
-      status: 'requested' as const,
-    };
-
-    const inserted = await ctx.processDbOperations([
-      ctx.db
-        .insert(fullOrdersFixture.tables.orders)
-        .values({
-          driverId: orderData.driverId,
-          pickup: orderData.pickup,
-          dropoff: orderData.dropoff,
-          price: orderData.price,
-          status: orderData.status,
-        })
-        .returning(),
-    ]);
-    const order = inserted.results[0][0];
-    if (!order) {
-      throw new Error('insertOrder did not return a row');
-    }
-
-    // Now use the adapter to pull events
-    const fetchImpl = createRouterFetchAdapter(ctx.router);
-
-    const pullResponse = await fetchImpl('http://localhost/pull', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        subscriptions: [
-          {
-            key: 'k',
-            queryName: subscribeResult.queryName,
-            args: subscribeResult.args,
-            rangeStart: subscribeResult.rangeStart,
-            rangeEnd: subscribeResult.rangeEnd,
-            snapshot: subscribeResult.token,
-          },
-        ],
-      }),
-    });
-
-    expect(pullResponse.ok).toBe(true);
-    const text = await pullResponse.text();
-    const body = SuperJSON.parse<{
-      results: Record<string, { events?: unknown[]; snapshot?: string }>;
-    }>(text);
-    const result = body.results.k;
-    expect(result).toBeTruthy();
-    expect(Array.isArray(result?.events)).toBe(true);
-    // The pull echoes a cursor token (epoch:snapshot), not a bare number.
-    expect(typeof result?.snapshot).toBe('string');
-    expect(result?.snapshot).toContain(':');
-  });
-
-  test('Adapter handles header normalization (case-insensitive)', async () => {
-    const fetchImpl = createRouterFetchAdapter(ctx.router);
-
-    // Request with mixed-case headers
-    const response = await fetchImpl('http://localhost/subscribe', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ACCEPT: 'application/json',
-        accept: 'application/json', // Duplicate in different case
-      },
-      body: JSON.stringify({ queryName: 'ordersByStatus', args: { status: 'requested' } }),
-    });
-
-    expect(response.ok).toBe(true);
-  });
-
-  test('Adapter supports URL as string input (RequestInfo format)', async () => {
-    const fetchImpl = createRouterFetchAdapter(ctx.router);
-
-    // Call with URL as string (standard fetch API)
-    const response = await fetchImpl('http://localhost/subscribe', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ queryName: 'ordersByStatus', args: { status: 'requested' } }),
-    });
-
-    expect(response.ok).toBe(true);
-  });
-
-  test('Adapter supports URL object input (RequestInfo format)', async () => {
-    const fetchImpl = createRouterFetchAdapter(ctx.router);
-
-    // Call with URL object
-    const url = new URL('http://localhost/subscribe');
-    const response = await fetchImpl(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ queryName: 'ordersByStatus', args: { status: 'requested' } }),
-    });
-
-    expect(response.ok).toBe(true);
-  });
-
-  test('PulseQuery integration: adapter enables pulse subscribe/poll cycle', async () => {
-    // Create test user
-    const user = await insertTestUser(ctx.db, `user_${Math.random().toString(36).slice(2)}`);
-
-    // Create router-fetch adapter
-    const fetchImpl = createRouterFetchAdapter(ctx.router);
-
-    const client = createPulseClient<typeof registry.$client>({
-      url: 'http://localhost',
-      fetchImpl,
-    });
-    const core = new PulseQuery(client.ordersByStatus({ status: 'requested' }));
-
-    // Subscribe: should start with no orders
-    await core.subscribe();
-    const initialState = core.getState();
-    expect(initialState.isLoading).toBe(false);
-    expect(initialState.data.length).toBe(0);
-
-    // Insert first order
-    const orderData1 = {
-      driverId: user.id,
-      pickup: 'First Pickup',
-      dropoff: 'First Dropoff',
-      price: 50,
-      status: 'requested' as const,
-    };
-
-    const inserted1 = await ctx.processDbOperations([
-      ctx.db
-        .insert(fullOrdersFixture.tables.orders)
-        .values({
-          driverId: orderData1.driverId,
-          pickup: orderData1.pickup,
-          dropoff: orderData1.dropoff,
-          price: orderData1.price,
-          status: orderData1.status,
-        })
-        .returning(),
-    ]);
-    expect(inserted1.results[0]).toHaveLength(1);
-    const order1 = inserted1.results[0][0]!;
-
-    // Poll should get the first order
-    await core.poll();
-    const afterFirstPoll = core.getState();
-    expect(afterFirstPoll.data.length).toBeGreaterThanOrEqual(1);
-    const hasOrder1After1stPoll = afterFirstPoll.data.some(
-      (row) => 'id' in row && row.id === order1.id,
-    );
-    expect(hasOrder1After1stPoll).toBe(true);
-
-    // Insert second order
-    const orderData2 = {
-      driverId: user.id,
-      pickup: 'Second Pickup',
-      dropoff: 'Second Dropoff',
-      price: 75,
-      status: 'requested' as const,
-    };
-
-    const inserted2 = await ctx.processDbOperations([
-      ctx.db
-        .insert(fullOrdersFixture.tables.orders)
-        .values({
-          driverId: orderData2.driverId,
-          pickup: orderData2.pickup,
-          dropoff: orderData2.dropoff,
-          price: orderData2.price,
-          status: orderData2.status,
-        })
-        .returning(),
-    ]);
-    expect(inserted2.results[0]).toHaveLength(1);
-    const order2 = inserted2.results[0][0]!;
-
-    // Poll should get the second order
-    await core.poll();
-    const afterSecondPoll = core.getState();
-    expect(afterSecondPoll.data.length).toBeGreaterThanOrEqual(2);
-    const hasOrder1 = afterSecondPoll.data.some((row) => 'id' in row && row.id === order1.id);
-    const hasOrder2 = afterSecondPoll.data.some((row) => 'id' in row && row.id === order2.id);
-    expect(hasOrder1).toBe(true);
-    expect(hasOrder2).toBe(true);
+    expect(() => fetchImpl.preconnect('http://localhost')).not.toThrow();
   });
 });
