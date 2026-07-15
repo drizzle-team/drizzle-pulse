@@ -32,6 +32,7 @@ export {
 } from './events-table-resolver.js';
 export {
   type ExposeConfig,
+  type ExposeWalConfig,
   expose,
   LogLevel,
   PulseRuntime,

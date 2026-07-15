@@ -133,7 +133,7 @@ QueryDescriptor
 type ColumnOperators, WhereCondition
 
 // drizzle-pulse/server
-expose, PulseRuntime, LogLevel, type ExposeConfig, WalListenerConfig
+expose, PulseRuntime, LogLevel, type ExposeConfig, type ExposeWalConfig
 createPulseRegistry, PulseRegistry
 PulseBuilder, type AnyPulseBuilder, AnyQueries
 buildEventsTable, getEventsTableName, DEFAULT_EVENTS_SCHEMA
