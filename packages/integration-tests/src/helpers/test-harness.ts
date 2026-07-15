@@ -336,31 +336,48 @@ export async function setupTestSuiteForFixture<
   const fetchImpl = createRouterFetchAdapter(router);
 
   let tornDown = false;
+  let teardownPromise: Promise<void> | null = null;
 
-  const teardown = async (): Promise<void> => {
-    if (tornDown) {
-      return;
-    }
-    tornDown = true;
+  // A mid-teardown throw must leave teardown() retryable (not a permanent no-op), so the
+  // idempotency latch is a memoized in-flight promise cleared on failure, not a boolean flipped
+  // before any work runs.
+  const teardown = (): Promise<void> => {
+    teardownPromise ??= (async () => {
+      await runtime.stop();
+      await testPool.unsafe(`DROP PUBLICATION IF EXISTS ${runtime.publicationName}`);
+      // The previous owning backend's active flag can lag its actual termination by a beat
+      // (55006 object_in_use) — poll-retry like scenario.ts's drop() does.
+      await waitFor(async () => {
+        try {
+          await adminPool`SELECT pg_drop_replication_slot(${runtime.slotName})`;
+          return true;
+        } catch (error) {
+          const code = (error as { code?: string }).code;
+          if (code === '42704') return true; // undefined_object — already gone
+          if (code === '55006') return false; // object_in_use — walsender still attached, retry
+          throw error;
+        }
+      }, 5000);
 
-    await runtime.stop();
-    await testPool.unsafe(`DROP PUBLICATION IF EXISTS ${runtime.publicationName}`);
-    await adminPool`
-      SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = ${runtime.slotName}
-    `;
+      await testPool.end();
+      await runtime.sourceSql.end();
+      await dbSql.end();
 
-    await testPool.end();
-    await runtime.sourceSql.end();
-    await dbSql.end();
+      await adminPool`
+        SELECT pg_terminate_backend(pid)
+        FROM pg_stat_activity
+        WHERE datname = ${databaseName}
+          AND pid <> pg_backend_pid()
+      `;
+      await adminPool.unsafe(`DROP DATABASE IF EXISTS "${databaseName}"`);
+      await adminPool.end();
 
-    await adminPool`
-      SELECT pg_terminate_backend(pid)
-      FROM pg_stat_activity
-      WHERE datname = ${databaseName}
-        AND pid <> pg_backend_pid()
-    `;
-    await adminPool.unsafe(`DROP DATABASE IF EXISTS "${databaseName}"`);
-    await adminPool.end();
+      tornDown = true;
+    })().catch((error: unknown) => {
+      teardownPromise = null;
+      throw error;
+    });
+    return teardownPromise;
   };
 
   const cleanupBetweenTests = async (): Promise<void> => {
