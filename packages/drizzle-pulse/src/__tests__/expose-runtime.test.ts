@@ -96,9 +96,9 @@ describe('openPin', () => {
       }),
     });
 
-    await expect(
-      runtime.openPin('00000000-0000-0000-0000-000000000000', '0/100'),
-    ).rejects.toThrow('invalid snapshot identifier');
+    await expect(runtime.openPin('00000000-0000-0000-0000-000000000000', '0/100')).rejects.toThrow(
+      'invalid snapshot identifier',
+    );
 
     // The connection-leak case the old transaction-callback mock couldn't express: release()
     // must fire even though setup failed, or the checked-out connection leaks.

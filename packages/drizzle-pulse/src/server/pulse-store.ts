@@ -2,7 +2,7 @@ import { sql } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { getTableConfig } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/postgres';
-import { createPool, type Connection, type Pool } from 'minipg';
+import { type Connection, createPool, type Pool } from 'minipg';
 import type { PendingWalEvent } from './expose.js';
 
 type DbHandle = ReturnType<typeof drizzle>;

@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
-import postgres from 'postgres';
+import type postgres from 'postgres';
 import type { HarnessEvent } from './test-harness.js';
 
 type PostgresClient = ReturnType<typeof postgres>;
