@@ -54,6 +54,7 @@ const sourceDb = drizzle({ client: postgres(process.env.DATABASE_URL!) });
 const runtime = expose(registry, {
   databaseUrl: process.env.DATABASE_URL!, // must have wal_level=logical
   sourceDb,
+  pull: true,
 });
 
 await runtime.start(); // self-provisions its infrastructure (publication, events tables) inside
@@ -110,7 +111,7 @@ const ordersByStatus = pulse(orders)
   .query((ctx) => ctx.query({ status: ctx.args.status }));
 
 const registry = createPulseRegistry({ ordersByStatus });
-const runtime = expose(registry, { databaseUrl, sourceDb }); // publication/slot default to 'drizzle_pulse'
+const runtime = expose(registry, { databaseUrl, sourceDb, pull: true }); // publication/slot default to 'drizzle_pulse'
 await runtime.start();
 ```
 
