@@ -1,5 +1,4 @@
 import { describe, expect, test } from 'bun:test';
-import { entityKind } from 'drizzle-orm';
 import {
   boolean,
   integer,
@@ -11,7 +10,7 @@ import {
   varchar,
 } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
-import { getPulseTableConfig, isPulseTable, PulseTable, pulse } from '../pulse-table.js';
+import { PulseTable, pulse } from '../pulse-table.js';
 import { PulseBuilder } from '../server/pulse-builder.js';
 
 const testSchema = pgSchema('test');
@@ -63,31 +62,6 @@ const compositePkTable = testSchema.table(
   },
   (t) => [primaryKey({ columns: [t.leftId, t.rightId] })],
 );
-
-describe('pulse() / PulseTable brand and guards', () => {
-  test('isPulseTable() returns true for pulse(t) output', () => {
-    expect(isPulseTable(pulse(serialPkTable))).toBe(true);
-  });
-
-  test('isPulseTable() returns false for null, plain objects, and the raw drizzle table', () => {
-    expect(isPulseTable(null)).toBe(false);
-    expect(isPulseTable({})).toBe(false);
-    expect(isPulseTable(serialPkTable)).toBe(false);
-  });
-
-  test('isPulseTable() recognizes a cross-copy PulseTable by its drizzle entityKind tag', () => {
-    // A PulseTable from a duplicated package copy: is() matches the entityKind string up the
-    // prototype chain, not class identity — so a foreign constructor carrying the tag passes.
-    const foreign = Object.create({ constructor: { [entityKind]: 'PulseTable' } });
-    expect(isPulseTable(foreign)).toBe(true);
-  });
-
-  test('getPulseTableConfig() returns an object whose table is reference-equal to the input', () => {
-    const entity = pulse(serialPkTable);
-    const config = getPulseTableConfig(entity);
-    expect(config.table).toBe(serialPkTable);
-  });
-});
 
 describe('pulse() construct-unconditionally + lazy .query()-time PK validation', () => {
   test('pulse() does not throw for a table with no primary key', () => {

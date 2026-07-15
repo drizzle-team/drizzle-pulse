@@ -94,7 +94,7 @@ Derive queries from collections outside the schema file, register them, and expo
 - `PulseBuilder` — fluent builder returned by `.query()`: `.columns()`, `.args(zodSchema)`, `.query(ctx => WhereClause)`, `.order()`, `.limit()`, `.transform()`
 - Queries that read `ctx.args` in their `queryFn` MUST chain `.args(zodSchema)` first. Without a schema, `ctx.args` is always `{}` at runtime (the registry never forwards unvalidated client input as args) — reading `ctx.args` on a schemaless query silently sees no fields rather than attacker-controlled data.
 - `.columns()` must be called before `.transform()` in the chain — calling it after throws, rather than silently discarding the transform.
-- `createPulseRegistry(queries)` — collects builders into a `PulseRegistry`; rejects a bare `PulseTable` (queries must be derived via `.query()` first)
+- `createPulseRegistry(queries)` — collects builders into a `PulseRegistry`; queries must be `.query()` builder chains — passing a bare `PulseTable` is a compile-time type error via the `AnyPulseBuilders` constraint, not a runtime rejection
 - `expose(registry, config)` — returns a `PulseRuntime`; call `.start()` to self-provision infrastructure and connect WAL, `runtime.handlers.{subscribe,pull,loadMore}` to serve requests
 - `PulseRuntime` — WAL listener + request handlers; `.start()` / `.stop()`. The server is stateless: each pull re-resolves auth and validates its own opaque cursor token, so there's no per-subscription server state, no TTL, and no `unsubscribe` — a client simply stops pulling.
 - `PulseRuntime.provision()` — runs the same infrastructure reconciliation as `.start()` without opening the WAL stream, for split-role deploys (see "Provisioning & privileges" below)

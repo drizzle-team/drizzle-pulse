@@ -1,5 +1,5 @@
 import type { InferModelFromColumns, InferSelectModel } from 'drizzle-orm';
-import { entityKind, getColumns, getTableUniqueName, is } from 'drizzle-orm';
+import { getColumns, getTableUniqueName } from 'drizzle-orm';
 import { getTableConfig, type PgColumn, type PgTable } from 'drizzle-orm/pg-core';
 import type { z } from 'zod';
 import { PulseBuilder } from './server/pulse-builder.js';
@@ -71,8 +71,6 @@ export function getPulsePkColumn(table: PgTable): PgColumn {
 }
 
 export class PulseTable<TTable extends PgTable = PgTable> {
-  static readonly [entityKind]: string = 'PulseTable';
-
   constructor(readonly table: TTable) {}
 
   /**
@@ -151,14 +149,4 @@ export class PulseTable<TTable extends PgTable = PgTable> {
 
 export function pulse<TTable extends PgTable>(table: TTable): PulseTable<TTable> {
   return new PulseTable(table);
-}
-
-export function isPulseTable(value: unknown): value is PulseTable {
-  return is(value, PulseTable);
-}
-
-export function getPulseTableConfig<TTable extends PgTable>(
-  entity: PulseTable<TTable>,
-): { table: TTable } {
-  return { table: entity.table };
 }

@@ -32,7 +32,7 @@ the platform-imports purity test).
 |------|---------|
 | `src/index.ts` | root barrel: exports `pulse`, `PulseTable`, and the public protocol/event/query **types** only |
 | `src/types.ts` | shared public types such as `QueryDescriptor`, `ResolvedPulseQuery`, `WhereClause`, `PullResponse`, `LoadMoreResponse`, `PulseAuthContext` |
-| `src/pulse-table.ts` | collection entity: `pulse(table)` → `PulseTable`; internal `isPulseTable()`/`getPulseTableConfig()` (test-only now, no longer public); lazy PK validation at `.query()` time; value-imports `drizzle-orm/pg-core` (`getTableConfig`) — the sole client-unreachable pg-core exemption in the purity test |
+| `src/pulse-table.ts` | collection entity: `pulse(table)` → `PulseTable`; lazy PK validation at `.query()` time; value-imports `drizzle-orm/pg-core` (`getTableConfig`) — the sole client-unreachable pg-core exemption in the purity test |
 | `src/shared/` | protocol request/response types, filter AST helpers, PK utilities, `pulse-merge-core.ts` (merge state machine reused by HTTP `PulseQuery` and embedded `PulseCollection`) |
 | `src/client/create-client.ts` | proxy-based typed HTTP client + `PullClient` (batched auto-poll, default 1s, `pollIntervalMs: 0` disables) |
 | `src/client/transport.ts` | `PulseQueryTransport` interface (`subscribe`/`pull`/`loadMore`) + `createHttpTransport` (fetch+superjson); decouples `PulseQuery` from how requests travel |
@@ -43,7 +43,7 @@ the platform-imports purity test).
 | `src/client/embedded/tap-events.ts` | `buildTapEvent(payload, resolved)`: the single WAL-tap-payload → `PulseEvent` builder shared by collections and `createPulseEvents` (WHERE-filters inserts; updates/deletes are WHERE-filtered only when the old tuple is fully evaluable, else delivered with the row redacted to pk-only; value-imports only `shared/`) |
 | `src/client/embedded/events.ts` | `createPulseEvents(runtime)` → stateless per-event subscription: WHERE-filtered inserts, updates/deletes delivered by pk with `matchesNew` (redacted to pk-only when not evaluable), `(event, lsn)` callback, no baseline, no merge core, no per-subscription error surface |
 | `src/server/pulse-builder.ts` | immutable query builder (`.columns/.args/.order/.limit/.transform/.query`), seeded by `PulseTable.query(fn?)` |
-| `src/server/pulse-registry.ts` | registry finalization + `$client` phantom contract; rejects a bare `PulseTable`; defensive composite-PK re-check |
+| `src/server/pulse-registry.ts` | registry finalization + `$client` phantom contract; queries must be `.query()` builder chains — a bare `PulseTable` is a compile-time type error via `AnyPulseBuilders`, not a runtime rejection; defensive composite-PK re-check |
 | `src/server/pulse-projection.ts` | projection/response-shaping helpers split out to preserve platform purity for the embedded client entrypoint |
 | `src/server/events-table-resolver.ts` | convention resolver: synthesizes the events `PgTable` (`<schema>_<table>`, `_` escaped to `__`) from a source table by cloning each column via its public `toBuilder()` |
 | `src/server/events-table-ddl.ts` | internal `emitEventsTableDdl`: renders the recreate DDL (`CREATE SCHEMA`/`DROP TABLE`/`CREATE TABLE`) strictly from the resolver's output; `reconcile()` hashes its text to detect divergence (not a public export) |
@@ -82,7 +82,8 @@ Server (derive queries outside the schema file):
     → PulseBuilder (lazy PK validation here) → .args().order().limit().query(...)
 
   createPulseRegistry({ queryName })
-    → rejects a bare PulseTable; defensive composite-PK re-check
+    → queries must be .query() builder chains — a bare PulseTable is a compile-time type
+      error via AnyPulseBuilders; defensive composite-PK re-check
 
   expose(registry, config) → PulseRuntime
     → resolves each source table's events table via buildEventsTable (no hand-declared
@@ -168,8 +169,9 @@ type EmbeddedPulseEvents, PulseEventsCallback, PulseEventsOptions
 ```
 
 `buildEventsTable` moved off the root (its only cross-package consumer, drizzle-kit, is gone) and
-is now server-only. `isPulseTable`/`getPulseTableConfig` are no longer exported from any
-entrypoint.
+is now server-only. The kit-era `PulseTable` recognition helpers and its drizzle `entityKind`
+brand were deleted entirely (the cross-package recognition contract they supported has no
+remaining consumer).
 
 ## Import Rules
 

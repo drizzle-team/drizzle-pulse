@@ -1,5 +1,5 @@
 import { expectTypeOf } from 'bun:test';
-import { getPulseTableConfig, isPulseTable, pulse } from '../src/pulse-table.js';
+import { pulse } from '../src/pulse-table.js';
 import type { PulseBuilder } from '../src/server/pulse-builder.js';
 import { orders, statusSchema } from './fixtures.js';
 
@@ -67,10 +67,3 @@ void asBuilder;
 
 // @ts-expect-error pulse(table) takes exactly one argument
 pulse(orders, {});
-
-// isPulseTable narrows: after `if (isPulseTable(x))`, `getPulseTableConfig(x).table` type-checks.
-const maybeEntity: unknown = pulse(orders);
-if (isPulseTable(maybeEntity)) {
-  const { table } = getPulseTableConfig(maybeEntity);
-  expectTypeOf(table).not.toBeAny();
-}
