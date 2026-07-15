@@ -38,7 +38,9 @@ type Scenario = {
 // Creates a fresh database with the orders + extras source tables but NO publication and NO
 // replica identity — reconcile() must self-provision both.
 async function setupBareScenario(label: string): Promise<Scenario> {
-  const scenario = await createScenarioDb(`pulse_pub_${label}`, { ddl: BARE_ORDERS_AND_EXTRAS_DDL });
+  const scenario = await createScenarioDb(`pulse_pub_${label}`, {
+    ddl: BARE_ORDERS_AND_EXTRAS_DDL,
+  });
   const sourceSql = postgres(withQuietPostgresUrl(scenario.databaseUrl));
   return {
     databaseName: scenario.databaseName,
@@ -49,12 +51,7 @@ async function setupBareScenario(label: string): Promise<Scenario> {
   };
 }
 
-function makeRuntime(
-  s: Scenario,
-  label: string,
-  tables: 'orders' | 'both',
-  pull: boolean = true,
-) {
+function makeRuntime(s: Scenario, label: string, tables: 'orders' | 'both', pull = true) {
   const registry =
     tables === 'both'
       ? createPulseRegistry({ orders: pulse(orders).query(), extras: pulse(extras).query() })

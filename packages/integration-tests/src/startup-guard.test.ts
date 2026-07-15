@@ -53,7 +53,9 @@ async function publicationMembers(
   return rows.map((row) => row.qualified);
 }
 
-async function ordersReplicaIdentity(sql: GuardScenarioContext['sql']): Promise<string | undefined> {
+async function ordersReplicaIdentity(
+  sql: GuardScenarioContext['sql'],
+): Promise<string | undefined> {
   const rows = await sql.unsafe<{ relreplident: string }[]>(
     `SELECT c.relreplident FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname = 'orders'`,
   );

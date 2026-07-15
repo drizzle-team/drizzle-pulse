@@ -85,12 +85,16 @@ async function streamLastLsn(
 }
 
 async function snapshotRowCount(sql: HealthyScenario['sql']): Promise<number> {
-  const rows = await sql.unsafe(`SELECT 1 FROM drizzle_pulse.public_orders WHERE "$op" = 'snapshot'`);
+  const rows = await sql.unsafe(
+    `SELECT 1 FROM drizzle_pulse.public_orders WHERE "$op" = 'snapshot'`,
+  );
   return rows.length;
 }
 
 async function nonSnapshotEventCount(sql: HealthyScenario['sql']): Promise<number> {
-  const rows = await sql.unsafe(`SELECT 1 FROM drizzle_pulse.public_orders WHERE "$op" <> 'snapshot'`);
+  const rows = await sql.unsafe(
+    `SELECT 1 FROM drizzle_pulse.public_orders WHERE "$op" <> 'snapshot'`,
+  );
   return rows.length;
 }
 

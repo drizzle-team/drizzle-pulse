@@ -156,10 +156,9 @@ describe('Slot recovery (DRIVER-02): LOCKED backfill/resume auto-heal', () => {
       // A new slot row exists and the embedded collection converges to full source truth,
       // including the downtime row — the snapshot-anchored re-baseline is gapless.
       await waitFor(async () => {
-        const rows = await sql.unsafe(
-          `SELECT 1 FROM pg_replication_slots WHERE slot_name = $1`,
-          [slotName],
-        );
+        const rows = await sql.unsafe(`SELECT 1 FROM pg_replication_slots WHERE slot_name = $1`, [
+          slotName,
+        ]);
         return rows.length > 0;
       });
       await waitFor(() => collection.list().length === 2);
@@ -238,10 +237,9 @@ describe('Slot recovery (DRIVER-02): LOCKED backfill/resume auto-heal', () => {
       await second.runtime.start();
 
       await waitFor(async () => {
-        const rows = await sql.unsafe(
-          `SELECT 1 FROM pg_replication_slots WHERE slot_name = $1`,
-          [slotName],
-        );
+        const rows = await sql.unsafe(`SELECT 1 FROM pg_replication_slots WHERE slot_name = $1`, [
+          slotName,
+        ]);
         return rows.length > 0;
       });
 

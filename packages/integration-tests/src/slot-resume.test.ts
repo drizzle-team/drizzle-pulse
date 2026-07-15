@@ -99,7 +99,10 @@ async function nonSnapshotEventCount(
 // immediately after start() resolves races the loop's very first iteration. Waiting for the
 // slot to report `active` is a real, observable readiness condition (not a fixed sleep) that
 // closes that window before any test issues its first tracked write.
-async function waitForSlotActive(sql: ReturnType<typeof postgres>, slotName: string): Promise<void> {
+async function waitForSlotActive(
+  sql: ReturnType<typeof postgres>,
+  slotName: string,
+): Promise<void> {
   await waitFor(async () => {
     const rows = await sql.unsafe<{ active: boolean }[]>(
       `SELECT active FROM pg_replication_slots WHERE slot_name = $1`,
@@ -146,10 +149,10 @@ async function seedContinuousWatermark(
   if (!confirmedFlushLsn) {
     throw new Error(`no confirmed_flush_lsn found for slot '${slotName}'`);
   }
-  await sql.unsafe(
-    `UPDATE "drizzle_pulse"."pulse_stream" SET last_lsn = $2 WHERE slot_name = $1`,
-    [slotName, confirmedFlushLsn],
-  );
+  await sql.unsafe(`UPDATE "drizzle_pulse"."pulse_stream" SET last_lsn = $2 WHERE slot_name = $1`, [
+    slotName,
+    confirmedFlushLsn,
+  ]);
   return confirmedFlushLsn;
 }
 

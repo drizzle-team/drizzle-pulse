@@ -28,7 +28,12 @@ import { pgDataTypesFixture } from './fixtures/pg-data-types/index.js';
 import { pgDataTypeInsertValues } from './fixtures/pg-data-types/inventory.js';
 import { pgDataTypes } from './fixtures/pg-data-types/schema.js';
 import { createScenarioDb, waitFor } from './helpers/scenario.js';
-import { createPulseRouterWithAuth, randomSuffix, subscribeClient, withQuietPostgresUrl } from './helpers/test-harness.js';
+import {
+  createPulseRouterWithAuth,
+  randomSuffix,
+  subscribeClient,
+  withQuietPostgresUrl,
+} from './helpers/test-harness.js';
 
 const allPgDataTypes = pulse(pgDataTypes).query(() => null);
 
