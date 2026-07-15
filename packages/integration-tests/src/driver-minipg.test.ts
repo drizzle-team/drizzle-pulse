@@ -14,7 +14,7 @@
  * events-table row and embedded `list()`.
  */
 
-import { afterAll, describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 import { randomBytes } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
@@ -27,34 +27,8 @@ import { Pool } from 'pg';
 import { pgDataTypesFixture } from './fixtures/pg-data-types/index.js';
 import { pgDataTypeInsertValues } from './fixtures/pg-data-types/inventory.js';
 import { pgDataTypes } from './fixtures/pg-data-types/schema.js';
-import {
-  baseDatabaseUrl,
-  buildDatabaseUrl,
-  createPulseRouterWithAuth,
-  randomSuffix,
-  subscribeClient,
-  withQuietPostgresUrl,
-} from './helpers/test-harness.js';
-
-const adminPool = new Pool({ connectionString: withQuietPostgresUrl(baseDatabaseUrl()) });
-
-afterAll(async () => {
-  await adminPool.end();
-});
-
-// WAL tap delivery lags a scheduling beat behind the triggering statement — poll rather than
-// assert synchronously (Phase 18-06 idiom, mirrored across every WAL-driven integration test).
-async function waitFor(
-  predicate: () => boolean | Promise<boolean>,
-  timeoutMs = 5000,
-  pollIntervalMs = 25,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!(await predicate())) {
-    if (Date.now() >= deadline) throw new Error(`waitFor timed out after ${timeoutMs}ms`);
-    await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
-  }
-}
+import { createScenarioDb, waitFor } from './helpers/scenario.js';
+import { createPulseRouterWithAuth, randomSuffix, subscribeClient, withQuietPostgresUrl } from './helpers/test-harness.js';
 
 const allPgDataTypes = pulse(pgDataTypes).query(() => null);
 
@@ -63,11 +37,11 @@ function buildRegistry() {
 }
 
 async function setupScenario(label: string) {
-  const databaseName = `pulse_driverminipg_${label}_${randomSuffix()}`;
-  await adminPool.query(`CREATE DATABASE "${databaseName}"`);
-  const databaseUrl = buildDatabaseUrl(baseDatabaseUrl(), databaseName);
+  // The pg-data-types fixture needs a real migration folder, not a bare-DDL scaffold — scenario.ts
+  // only owns database create/drop admin plumbing here (`ddl: null`).
+  const scenario = await createScenarioDb(`pulse_driverminipg_${label}`, { ddl: null });
 
-  const migrationPool = new Pool({ connectionString: withQuietPostgresUrl(databaseUrl) });
+  const migrationPool = new Pool({ connectionString: withQuietPostgresUrl(scenario.databaseUrl) });
   try {
     await migrate(drizzle({ client: migrationPool }), {
       migrationsFolder: pgDataTypesFixture.migrationsPath,
@@ -78,7 +52,7 @@ async function setupScenario(label: string) {
 
   // The DRIVER-05 point under test: a plain node-postgres Pool — connectionString only, no
   // `types` override. See module doc.
-  const sourcePool = new Pool({ connectionString: withQuietPostgresUrl(databaseUrl) });
+  const sourcePool = new Pool({ connectionString: withQuietPostgresUrl(scenario.databaseUrl) });
   const sourceDb: NodePgDatabase = drizzle({ client: sourcePool });
 
   const publicationName = `driverminipg_pub_${label}_${randomSuffix()}`;
@@ -86,7 +60,7 @@ async function setupScenario(label: string) {
 
   const registry = buildRegistry();
   const runtime = expose(registry, {
-    databaseUrl,
+    databaseUrl: scenario.databaseUrl,
     sourceDb,
     pull: true,
     wal: { publicationName, slotName },
@@ -97,7 +71,7 @@ async function setupScenario(label: string) {
   const router = createPulseRouterWithAuth(runtime, { userId: null });
 
   return {
-    databaseName,
+    scenario,
     sourcePool,
     sourceDb,
     publicationName,
@@ -112,16 +86,8 @@ type Scenario = Awaited<ReturnType<typeof setupScenario>>;
 async function teardownScenario(s: Scenario): Promise<void> {
   await s.runtime.stop();
   await s.sourcePool.query(`DROP PUBLICATION IF EXISTS "${s.publicationName}"`);
-  await adminPool.query(
-    'SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1',
-    [s.slotName],
-  );
   await s.sourcePool.end();
-  await adminPool.query(
-    `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
-    [s.databaseName],
-  );
-  await adminPool.query(`DROP DATABASE IF EXISTS "${s.databaseName}"`);
+  await s.scenario.drop();
 }
 
 describe('a plain pg sourceDb coexisting with minipg replication (DRIVER-05 / DRIVER-04)', () => {

@@ -15,43 +15,18 @@
  * stays on the direct connection.
  */
 
-import { afterAll, describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createPulseClient } from 'drizzle-pulse/client/embedded';
 import { createPulseRegistry, expose, LogLevel } from 'drizzle-pulse/server';
-import type { Pool } from 'pg';
 import postgres from 'postgres';
 import { orders, ordersByStatusArgsSchema } from './fixtures/minimal-orders/schema.js';
-import {
-  baseDatabaseUrl,
-  buildDatabaseUrl,
-  createQuietPool,
-  randomSuffix,
-  withQuietPostgresUrl,
-} from './helpers/test-harness.js';
+import { createScenarioDb, waitFor } from './helpers/scenario.js';
+import { baseDatabaseUrl, randomSuffix, withQuietPostgresUrl } from './helpers/test-harness.js';
 import { proxiedDatabaseUrl, startWalProxy } from './helpers/wal-proxy.js';
 
-const adminPool = createQuietPool(baseDatabaseUrl());
-
-afterAll(async () => {
-  await adminPool.end();
-});
-
 const LSN_PATTERN = /^[0-9A-Fa-f]+\/[0-9A-Fa-f]+$/;
-
-// Bounded async poller — avoids fixed sleeps while bounding test duration.
-async function waitFor(
-  predicate: () => boolean | Promise<boolean>,
-  timeoutMs = 8000,
-  pollIntervalMs = 50,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!(await predicate())) {
-    if (Date.now() >= deadline) throw new Error(`waitFor timed out after ${timeoutMs}ms`);
-    await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
-  }
-}
 
 const ordersByStatus = pulse(orders)
   .args(ordersByStatusArgsSchema)
@@ -62,31 +37,13 @@ function buildRegistry() {
   return createPulseRegistry({ ordersByStatus });
 }
 
-async function createScenarioDatabase(label: string) {
-  const databaseName = `pulse_reconnrb_${label}_${randomSuffix()}`;
-  await adminPool.query(`CREATE DATABASE "${databaseName}"`);
-  const directUrl = buildDatabaseUrl(baseDatabaseUrl(), databaseName);
-  const pool = createQuietPool(directUrl);
-
-  // Deliberately absent: the publication AND REPLICA IDENTITY FULL — reconcile() self-
-  // provisions both at boot, same as every other self-managed scenario in this suite.
-  await pool.query(`
-    CREATE TABLE "orders" (
-      "id" serial PRIMARY KEY,
-      "driver_id" integer,
-      "status" text DEFAULT 'requested' NOT NULL,
-      "price" numeric NOT NULL,
-      "created_at" timestamp with time zone DEFAULT now() NOT NULL
-    )
-  `);
-
-  return { databaseName, directUrl, pool };
-}
-
-async function dropSlotWithRetry(pool: Pool, slotName: string): Promise<void> {
+async function dropSlotWithRetry(
+  sql: ReturnType<typeof postgres>,
+  slotName: string,
+): Promise<void> {
   await waitFor(async () => {
     try {
-      await pool.query(`SELECT pg_drop_replication_slot($1)`, [slotName]);
+      await sql.unsafe(`SELECT pg_drop_replication_slot($1)`, [slotName]);
       return true;
     } catch (e) {
       const code = (e as { code?: string }).code;
@@ -99,37 +56,20 @@ async function dropSlotWithRetry(pool: Pool, slotName: string): Promise<void> {
 
 // Terminates the walsender backing `slotName` then drops the slot, poll-retrying on 55006
 // (object_in_use — the "active" flag can lag the backend's actual termination by a beat).
-async function forceSlotLoss(pool: Pool, slotName: string): Promise<void> {
-  const { rows } = await pool.query<{ active_pid: number | null }>(
+async function forceSlotLoss(sql: ReturnType<typeof postgres>, slotName: string): Promise<void> {
+  const rows = await sql.unsafe<{ active_pid: number | null }[]>(
     `SELECT active_pid FROM pg_replication_slots WHERE slot_name = $1`,
     [slotName],
   );
   const activePid = rows[0]?.active_pid;
   if (activePid) {
-    await pool.query(`SELECT pg_terminate_backend($1)`, [activePid]);
+    await sql.unsafe(`SELECT pg_terminate_backend($1)`, [activePid]);
   }
-  await dropSlotWithRetry(pool, slotName);
+  await dropSlotWithRetry(sql, slotName);
 }
 
-async function dropScenarioDatabase(databaseName: string): Promise<void> {
-  await waitFor(async () => {
-    const { rows } = await adminPool.query(
-      `SELECT 1 FROM pg_replication_slots WHERE database = $1`,
-      [databaseName],
-    );
-    return rows.length === 0;
-  }).catch(() => {
-    // Best-effort: fall through to the terminate-and-drop below regardless.
-  });
-  await adminPool.query(
-    `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
-    [databaseName],
-  );
-  await adminPool.query(`DROP DATABASE IF EXISTS "${databaseName}"`);
-}
-
-async function eventsTableEpoch(pool: Pool): Promise<string | undefined> {
-  const { rows } = await pool.query<{ epoch: string }>(
+async function eventsTableEpoch(sql: ReturnType<typeof postgres>): Promise<string | undefined> {
+  const rows = await sql.unsafe<{ epoch: string }[]>(
     `SELECT epoch FROM "drizzle_pulse"."pulse_meta" WHERE table_name = 'public_orders'`,
   );
   return rows[0]?.epoch;
@@ -141,13 +81,15 @@ describe('Reconnect re-baseline (WAL-01, G7/G5)', () => {
     const proxy = startWalProxy(base.hostname, Number(base.port));
     const proxyPort = await proxy.listen();
 
-    const { databaseName, directUrl, pool } = await createScenarioDatabase('g7');
+    // Deliberately absent: the publication AND REPLICA IDENTITY FULL — reconcile() self-
+    // provisions both at boot, same as every other self-managed scenario in this suite.
+    const scenario = await createScenarioDb('pulse_reconnrb_g7');
     const publicationName = `reconnrb_g7_pub_${randomSuffix()}`;
     const slotName = `reconnrb_g7_slot_${randomSuffix()}`;
-    const sourceSql = postgres(withQuietPostgresUrl(directUrl));
+    const sourceSql = postgres(withQuietPostgresUrl(scenario.databaseUrl));
 
     const runtime = expose(buildRegistry(), {
-      databaseUrl: proxiedDatabaseUrl(directUrl, proxyPort),
+      databaseUrl: proxiedDatabaseUrl(scenario.databaseUrl, proxyPort),
       sourceDb: drizzle({ client: sourceSql }),
       pull: true,
       wal: { publicationName, slotName },
@@ -168,10 +110,10 @@ describe('Reconnect re-baseline (WAL-01, G7/G5)', () => {
       const changes: Array<{ events: readonly unknown[]; lsn: string }> = [];
       collection.onChange((c) => changes.push(c));
 
-      await pool.query(
+      await scenario.sql.unsafe(
         `INSERT INTO "orders" (driver_id, status, price) VALUES (1, 'accepted', 10)`,
       );
-      await pool.query(
+      await scenario.sql.unsafe(
         `INSERT INTO "orders" (driver_id, status, price) VALUES (2, 'accepted', 20)`,
       );
       await waitFor(() => collection.list().length === 2);
@@ -195,7 +137,7 @@ describe('Reconnect re-baseline (WAL-01, G7/G5)', () => {
       expect(new Set(collection.list().map((r) => r.id)).size).toBe(2);
 
       // The pipeline keeps delivering after the reconnect edge.
-      await pool.query(
+      await scenario.sql.unsafe(
         `INSERT INTO "orders" (driver_id, status, price) VALUES (3, 'accepted', 30)`,
       );
       await waitFor(() => collection.list().length === 3, 10000);
@@ -206,10 +148,9 @@ describe('Reconnect re-baseline (WAL-01, G7/G5)', () => {
     } finally {
       await runtime.stop();
       await sourceSql.end();
-      await dropSlotWithRetry(pool, slotName).catch(() => {});
-      await pool.end();
+      await dropSlotWithRetry(scenario.sql, slotName).catch(() => {});
       await proxy.close();
-      await dropScenarioDatabase(databaseName);
+      await scenario.drop();
     }
   });
 
@@ -218,13 +159,13 @@ describe('Reconnect re-baseline (WAL-01, G7/G5)', () => {
     const proxy = startWalProxy(base.hostname, Number(base.port));
     const proxyPort = await proxy.listen();
 
-    const { databaseName, directUrl, pool } = await createScenarioDatabase('g5');
+    const scenario = await createScenarioDb('pulse_reconnrb_g5');
     const publicationName = `reconnrb_g5_pub_${randomSuffix()}`;
     const slotName = `reconnrb_g5_slot_${randomSuffix()}`;
-    const sourceSql = postgres(withQuietPostgresUrl(directUrl));
+    const sourceSql = postgres(withQuietPostgresUrl(scenario.databaseUrl));
 
     const runtime = expose(buildRegistry(), {
-      databaseUrl: proxiedDatabaseUrl(directUrl, proxyPort),
+      databaseUrl: proxiedDatabaseUrl(scenario.databaseUrl, proxyPort),
       sourceDb: drizzle({ client: sourceSql }),
       pull: true,
       wal: { publicationName, slotName },
@@ -242,12 +183,12 @@ describe('Reconnect re-baseline (WAL-01, G7/G5)', () => {
       const client = createPulseClient(runtime);
       const collection = await client.ordersByStatus({ status: 'accepted' });
 
-      await pool.query(
+      await scenario.sql.unsafe(
         `INSERT INTO "orders" (driver_id, status, price) VALUES (1, 'accepted', 10)`,
       );
       await waitFor(() => collection.list().length === 1);
 
-      const epochBefore = await eventsTableEpoch(pool);
+      const epochBefore = await eventsTableEpoch(scenario.sql);
       expect(epochBefore).toBeDefined();
 
       // Arm the stall BEFORE forcing the recreate path. recoverSlot's sequence is
@@ -257,11 +198,11 @@ describe('Reconnect re-baseline (WAL-01, G7/G5)', () => {
       // running while the collection's baseline SELECT response is held.
       proxy.stallAdminOnStartReplication(6500);
 
-      await forceSlotLoss(pool, slotName);
+      await forceSlotLoss(scenario.sql, slotName);
       const tEdge = Date.now();
 
       // Downtime delta — the gap the pinned snapshot must cover.
-      await pool.query(
+      await scenario.sql.unsafe(
         `INSERT INTO "orders" (driver_id, status, price) VALUES (2, 'accepted', 20)`,
       );
 
@@ -275,14 +216,14 @@ describe('Reconnect re-baseline (WAL-01, G7/G5)', () => {
       // SELECT actually outlived REBASELINE_PIN_WINDOW_MS rather than completing inside it.
       expect(tConverged - tEdge).toBeGreaterThan(5000);
 
-      const epochAfter = await eventsTableEpoch(pool);
+      const epochAfter = await eventsTableEpoch(scenario.sql);
       expect(epochAfter).toBeDefined();
       expect(epochAfter).not.toBe(epochBefore);
 
       expect(terminalError).toBeNull();
 
       // Post-recovery delivery still arrives.
-      await pool.query(
+      await scenario.sql.unsafe(
         `INSERT INTO "orders" (driver_id, status, price) VALUES (3, 'accepted', 30)`,
       );
       await waitFor(() => collection.list().length === 3, 10000);
@@ -291,10 +232,9 @@ describe('Reconnect re-baseline (WAL-01, G7/G5)', () => {
     } finally {
       await runtime.stop();
       await sourceSql.end();
-      await dropSlotWithRetry(pool, slotName).catch(() => {});
-      await pool.end();
+      await dropSlotWithRetry(scenario.sql, slotName).catch(() => {});
       await proxy.close();
-      await dropScenarioDatabase(databaseName);
+      await scenario.drop();
     }
   });
 });

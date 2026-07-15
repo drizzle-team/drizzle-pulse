@@ -39,7 +39,9 @@ const SCENARIO_SUFFIX_PATTERN = /_[0-9a-f]{10}$/;
 
 export async function createScenarioDb(
   label: string,
-  opts: { ddl?: string } = {},
+  // `ddl: null` opts out of DDL application entirely — driver-minipg.test.ts owns its schema via
+  // a real migration folder (not a bare-DDL fixture) applied through its own pg Pool afterward.
+  opts: { ddl?: string | null } = {},
 ): Promise<ScenarioDb> {
   const base = baseDatabaseUrl();
   const databaseName = `${label}_${randomSuffix()}`;
@@ -60,7 +62,9 @@ export async function createScenarioDb(
 
   const databaseUrl = buildDatabaseUrl(base, databaseName);
   const sql = createQuietPostgresClient(databaseUrl);
-  await sql.unsafe(opts.ddl ?? BARE_ORDERS_DDL);
+  if (opts.ddl !== null) {
+    await sql.unsafe(opts.ddl ?? BARE_ORDERS_DDL);
+  }
 
   const drop = async (): Promise<void> => {
     if (!SCENARIO_SUFFIX_PATTERN.test(databaseName)) {

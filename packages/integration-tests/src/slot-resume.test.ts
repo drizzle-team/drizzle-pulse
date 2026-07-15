@@ -8,7 +8,7 @@
  * the SAME slot, which the shared cached harness cannot express.
  */
 
-import { afterAll, describe, expect, spyOn, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createPulseClient } from 'drizzle-pulse/client/embedded';
@@ -16,38 +16,16 @@ import { createPulseRegistry, expose, LogLevel } from 'drizzle-pulse/server';
 import { createPulseHonoRouter as createServerRouter } from 'drizzle-pulse/server/hono';
 import type { Hono } from 'hono';
 import { replication } from 'minipg';
-import type { Pool } from 'pg';
 import postgres from 'postgres';
 import { orders, ordersByStatusArgsSchema } from './fixtures/minimal-orders/schema.js';
+import { createScenarioDb, waitFor } from './helpers/scenario.js';
 import {
-  baseDatabaseUrl,
-  buildDatabaseUrl,
-  createQuietPool,
   type PullCursor,
   pullClient,
   randomSuffix,
   subscribeClient,
   withQuietPostgresUrl,
 } from './helpers/test-harness.js';
-
-const adminPool = createQuietPool(baseDatabaseUrl());
-
-afterAll(async () => {
-  await adminPool.end();
-});
-
-// Bounded async poller — avoids fixed sleeps while bounding test duration.
-async function waitFor(
-  predicate: () => boolean | Promise<boolean>,
-  timeoutMs = 10000,
-  pollIntervalMs = 50,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!(await predicate())) {
-    if (Date.now() >= deadline) throw new Error(`waitFor timed out after ${timeoutMs}ms`);
-    await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
-  }
-}
 
 const ordersByStatus = pulse(orders)
   .args(ordersByStatusArgsSchema)
@@ -56,28 +34,6 @@ const ordersByStatus = pulse(orders)
 
 function buildRegistry() {
   return createPulseRegistry({ ordersByStatus });
-}
-
-async function createScenarioDatabase(label: string) {
-  const databaseName = `pulse_slotresume_${label}_${randomSuffix()}`;
-  await adminPool.query(`CREATE DATABASE "${databaseName}"`);
-  const databaseUrl = buildDatabaseUrl(baseDatabaseUrl(), databaseName);
-  const pool = createQuietPool(databaseUrl);
-
-  // Deliberately absent: the publication AND REPLICA IDENTITY FULL — reconcile() self-
-  // provisions both at boot, same as every other self-managed scenario starting from a bare
-  // table.
-  await pool.query(`
-    CREATE TABLE "orders" (
-      "id" serial PRIMARY KEY,
-      "driver_id" integer,
-      "status" text DEFAULT 'requested' NOT NULL,
-      "price" numeric NOT NULL,
-      "created_at" timestamp with time zone DEFAULT now() NOT NULL
-    )
-  `);
-
-  return { databaseName, databaseUrl, pool };
 }
 
 function buildRuntime(databaseUrl: string, publicationName: string, slotName: string) {
@@ -95,10 +51,13 @@ function buildRuntime(databaseUrl: string, publicationName: string, slotName: st
   return { runtime, router, sourceSql };
 }
 
-async function dropSlotWithRetry(pool: Pool, slotName: string): Promise<void> {
+async function dropSlotWithRetry(
+  sql: ReturnType<typeof postgres>,
+  slotName: string,
+): Promise<void> {
   await waitFor(async () => {
     try {
-      await pool.query(`SELECT pg_drop_replication_slot($1)`, [slotName]);
+      await sql.unsafe(`SELECT pg_drop_replication_slot($1)`, [slotName]);
       return true;
     } catch (e) {
       const code = (e as { code?: string }).code;
@@ -109,40 +68,25 @@ async function dropSlotWithRetry(pool: Pool, slotName: string): Promise<void> {
   }, 5000);
 }
 
-async function dropScenarioDatabase(databaseName: string): Promise<void> {
-  // A just-dropped slot can still be settling — don't race DROP DATABASE against it.
-  await waitFor(async () => {
-    const { rows } = await adminPool.query(
-      `SELECT 1 FROM pg_replication_slots WHERE database = $1`,
-      [databaseName],
-    );
-    return rows.length === 0;
-  }).catch(() => {
-    // Best-effort: fall through to the terminate-and-drop below regardless.
-  });
-  await adminPool.query(
-    `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
-    [databaseName],
-  );
-  await adminPool.query(`DROP DATABASE IF EXISTS "${databaseName}"`);
-}
-
-async function eventsTableEpoch(pool: Pool): Promise<string | undefined> {
-  const { rows } = await pool.query<{ epoch: string }>(
+async function eventsTableEpoch(sql: ReturnType<typeof postgres>): Promise<string | undefined> {
+  const rows = await sql.unsafe<{ epoch: string }[]>(
     `SELECT epoch FROM "drizzle_pulse"."pulse_meta" WHERE table_name = 'public_orders'`,
   );
   return rows[0]?.epoch;
 }
 
-async function snapshotSeedCount(pool: Pool): Promise<number> {
-  const { rows } = await pool.query(
+async function snapshotSeedCount(sql: ReturnType<typeof postgres>): Promise<number> {
+  const rows = await sql.unsafe(
     `SELECT 1 FROM "drizzle_pulse"."public_orders" WHERE "$op" = 'snapshot'`,
   );
   return rows.length;
 }
 
-async function nonSnapshotEventCount(pool: Pool, pkValue: number): Promise<number> {
-  const { rows } = await pool.query(
+async function nonSnapshotEventCount(
+  sql: ReturnType<typeof postgres>,
+  pkValue: number,
+): Promise<number> {
+  const rows = await sql.unsafe(
     `SELECT 1 FROM "drizzle_pulse"."public_orders" WHERE "$op" <> 'snapshot' AND "id" = $1`,
     [pkValue],
   );
@@ -155,9 +99,9 @@ async function nonSnapshotEventCount(pool: Pool, pkValue: number): Promise<numbe
 // immediately after start() resolves races the loop's very first iteration. Waiting for the
 // slot to report `active` is a real, observable readiness condition (not a fixed sleep) that
 // closes that window before any test issues its first tracked write.
-async function waitForSlotActive(pool: Pool, slotName: string): Promise<void> {
+async function waitForSlotActive(sql: ReturnType<typeof postgres>, slotName: string): Promise<void> {
   await waitFor(async () => {
-    const { rows } = await pool.query<{ active: boolean }>(
+    const rows = await sql.unsafe<{ active: boolean }[]>(
       `SELECT active FROM pg_replication_slots WHERE slot_name = $1`,
       [slotName],
     );
@@ -165,8 +109,11 @@ async function waitForSlotActive(pool: Pool, slotName: string): Promise<void> {
   });
 }
 
-async function streamLastLsn(pool: Pool, slotName: string): Promise<string | undefined> {
-  const { rows } = await pool.query<{ last_lsn: string }>(
+async function streamLastLsn(
+  sql: ReturnType<typeof postgres>,
+  slotName: string,
+): Promise<string | undefined> {
+  const rows = await sql.unsafe<{ last_lsn: string }[]>(
     `SELECT last_lsn FROM "drizzle_pulse"."pulse_stream" WHERE slot_name = $1`,
     [slotName],
   );
@@ -187,8 +134,11 @@ async function streamLastLsn(pool: Pool, slotName: string): Promise<string | und
 // commit). Seeding the watermark to the observed confirmed_flush_lsn reproduces the precondition
 // resolveSlotStartup's gate checks for, exercising its real (unmodified) resume logic
 // deterministically instead of chasing a race that can never be won. No production code changes.
-async function seedContinuousWatermark(pool: Pool, slotName: string): Promise<string> {
-  const { rows } = await pool.query<{ confirmed_flush_lsn: string | null }>(
+async function seedContinuousWatermark(
+  sql: ReturnType<typeof postgres>,
+  slotName: string,
+): Promise<string> {
+  const rows = await sql.unsafe<{ confirmed_flush_lsn: string | null }[]>(
     `SELECT confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name = $1`,
     [slotName],
   );
@@ -196,10 +146,10 @@ async function seedContinuousWatermark(pool: Pool, slotName: string): Promise<st
   if (!confirmedFlushLsn) {
     throw new Error(`no confirmed_flush_lsn found for slot '${slotName}'`);
   }
-  await pool.query(`UPDATE "drizzle_pulse"."pulse_stream" SET last_lsn = $2 WHERE slot_name = $1`, [
-    slotName,
-    confirmedFlushLsn,
-  ]);
+  await sql.unsafe(
+    `UPDATE "drizzle_pulse"."pulse_stream" SET last_lsn = $2 WHERE slot_name = $1`,
+    [slotName, confirmedFlushLsn],
+  );
   return confirmedFlushLsn;
 }
 
@@ -223,7 +173,8 @@ function mentionsRecreated(spy: ReturnType<typeof spyOn>): boolean {
 
 describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeover', () => {
   test('G1: intact-slot resume — no recreate, no rotation, replay-tail dedupe, floor advances only on new work', async () => {
-    const { databaseName, databaseUrl, pool } = await createScenarioDatabase('g1');
+    const scenario = await createScenarioDb('pulse_slotresume_g1');
+    const { sql } = scenario;
     const publicationName = `slotresume_g1_pub_${randomSuffix()}`;
     const slotName = `slotresume_g1_slot_${randomSuffix()}`;
 
@@ -231,7 +182,7 @@ describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeo
     // throws before the runtime-B section (below) is ever reached — both runtimes share this
     // one persistent (pull:true) slot for the test's whole lifetime.
     try {
-      const a = buildRuntime(databaseUrl, publicationName, slotName);
+      const a = buildRuntime(scenario.databaseUrl, publicationName, slotName);
       let firstOrderId = 0;
       let epochBefore: string | undefined;
       let seedCountBefore = 0;
@@ -239,7 +190,7 @@ describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeo
 
       try {
         await a.runtime.start();
-        await waitForSlotActive(pool, slotName);
+        await waitForSlotActive(sql, slotName);
 
         // Cursor MUST be taken before the insert: subscribe's snapshot baselines against
         // whatever is already in the events table (sdk.ts getLatestSnapshot), so subscribing
@@ -247,7 +198,7 @@ describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeo
         // following pull is waiting for.
         const cursor = await subscribeClient(a.router, 'ordersByStatus', { status: 'accepted' });
 
-        const { rows } = await pool.query<{ id: number }>(
+        const rows = await sql.unsafe<{ id: number }[]>(
           `INSERT INTO "orders" (driver_id, status, price) VALUES (1, 'accepted', 10) RETURNING id`,
         );
         firstOrderId = rows[0]?.id as number;
@@ -255,11 +206,11 @@ describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeo
         const pulled = await pullUntilEvents(a.router, cursor);
         expect(pulled.events.length).toBeGreaterThan(0);
 
-        epochBefore = await eventsTableEpoch(pool);
+        epochBefore = await eventsTableEpoch(sql);
         expect(epochBefore).toBeDefined();
-        seedCountBefore = await snapshotSeedCount(pool);
-        expect(await nonSnapshotEventCount(pool, firstOrderId)).toBe(1);
-        lsnBefore = await streamLastLsn(pool, slotName);
+        seedCountBefore = await snapshotSeedCount(sql);
+        expect(await nonSnapshotEventCount(sql, firstOrderId)).toBe(1);
+        lsnBefore = await streamLastLsn(sql, slotName);
         expect(lsnBefore).toBeDefined();
       } finally {
         // Clean stop — the pull:true slot is persistent and survives it, unlike pull:false's
@@ -269,28 +220,28 @@ describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeo
       }
 
       // Downtime write while the runtime is fully stopped.
-      await pool.query(
+      await sql.unsafe(
         `INSERT INTO "orders" (driver_id, status, price) VALUES (2, 'accepted', 20)`,
       );
 
       // See seedContinuousWatermark's DISCOVERY comment: closes the structural
       // watermark-vs-confirmed_flush gap so resolveSlotStartup's continuity precondition
       // actually holds, exercising the real resume branch instead of an unreachable race.
-      lsnBefore = await seedContinuousWatermark(pool, slotName);
+      lsnBefore = await seedContinuousWatermark(sql, slotName);
 
       const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
-      const b = buildRuntime(databaseUrl, publicationName, slotName);
+      const b = buildRuntime(scenario.databaseUrl, publicationName, slotName);
       try {
         await b.runtime.start();
-        await waitForSlotActive(pool, slotName);
+        await waitForSlotActive(sql, slotName);
 
-        expect(await eventsTableEpoch(pool)).toBe(epochBefore);
-        expect(await snapshotSeedCount(pool)).toBe(seedCountBefore);
+        expect(await eventsTableEpoch(sql)).toBe(epochBefore);
+        expect(await snapshotSeedCount(sql)).toBe(seedCountBefore);
         expect(mentionsRecreated(errorSpy)).toBe(false);
 
         // The durable floor doesn't move on its own — start() only resumes, it doesn't persist
         // a commit until new work arrives.
-        expect(await streamLastLsn(pool, slotName)).toBe(lsnBefore);
+        expect(await streamLastLsn(sql, slotName)).toBe(lsnBefore);
 
         const client = createPulseClient(b.runtime);
         const collection = await client.ordersByStatus({ status: 'accepted' });
@@ -299,19 +250,19 @@ describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeo
 
         // Replay-tail dedupe: a resume that re-persisted minipg's at-least-once replay tail
         // would show a second non-snapshot row for the first order's pk.
-        expect(await nonSnapshotEventCount(pool, firstOrderId)).toBe(1);
+        expect(await nonSnapshotEventCount(sql, firstOrderId)).toBe(1);
 
         const freshCursor = await subscribeClient(b.router, 'ordersByStatus', {
           status: 'accepted',
         });
         expect(freshCursor.rows).toHaveLength(2);
 
-        await pool.query(
+        await sql.unsafe(
           `INSERT INTO "orders" (driver_id, status, price) VALUES (3, 'accepted', 30)`,
         );
         await waitFor(() => collection.list().length === 3);
         await waitFor(async () => {
-          const lsn = await streamLastLsn(pool, slotName);
+          const lsn = await streamLastLsn(sql, slotName);
           return lsn !== undefined && lsn !== lsnBefore;
         });
 
@@ -322,34 +273,34 @@ describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeo
         await b.sourceSql.end();
       }
     } finally {
-      await dropSlotWithRetry(pool, slotName).catch(() => {});
-      await pool.end();
-      await dropScenarioDatabase(databaseName);
+      await dropSlotWithRetry(sql, slotName).catch(() => {});
+      await scenario.drop();
     }
   });
 
   test('G2: stale-PID takeover on resume — occupier evicted, no recreate, pipeline live', async () => {
-    const { databaseName, databaseUrl, pool } = await createScenarioDatabase('g2');
+    const scenario = await createScenarioDb('pulse_slotresume_g2');
+    const { sql } = scenario;
     const publicationName = `slotresume_g2_pub_${randomSuffix()}`;
     const slotName = `slotresume_g2_slot_${randomSuffix()}`;
 
     try {
-      const a = buildRuntime(databaseUrl, publicationName, slotName);
+      const a = buildRuntime(scenario.databaseUrl, publicationName, slotName);
       let epochBefore: string | undefined;
 
       try {
         await a.runtime.start();
-        await waitForSlotActive(pool, slotName);
+        await waitForSlotActive(sql, slotName);
 
         // See the G1 test's cursor-ordering comment above: subscribe MUST precede the insert.
         const cursor = await subscribeClient(a.router, 'ordersByStatus', { status: 'accepted' });
-        await pool.query(
+        await sql.unsafe(
           `INSERT INTO "orders" (driver_id, status, price) VALUES (1, 'accepted', 10)`,
         );
         const pulled = await pullUntilEvents(a.router, cursor);
         expect(pulled.events.length).toBeGreaterThan(0);
 
-        epochBefore = await eventsTableEpoch(pool);
+        epochBefore = await eventsTableEpoch(sql);
         expect(epochBefore).toBeDefined();
       } finally {
         await a.runtime.stop();
@@ -360,11 +311,11 @@ describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeo
       // eviction branch lives INSIDE resolveSlotStartup's continuity gate, so the same
       // watermark-vs-confirmed_flush gap must be closed here too, or B recreates before it ever
       // reaches the eviction logic this test targets.
-      await seedContinuousWatermark(pool, slotName);
+      await seedContinuousWatermark(sql, slotName);
 
       // A raw minipg replication connection — NOT a second expose() runtime, which would evict
       // B back the same way B is about to evict this one (a live runtime auto-heals).
-      const occ = await replication(databaseUrl);
+      const occ = await replication(scenario.databaseUrl);
       let floatingRejected = false;
       try {
         const iterator = occ.start({
@@ -384,7 +335,7 @@ describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeo
         });
 
         await waitFor(async () => {
-          const { rows } = await pool.query<{ active_pid: number | null }>(
+          const rows = await sql.unsafe<{ active_pid: number | null }[]>(
             `SELECT active_pid FROM pg_replication_slots WHERE slot_name = $1`,
             [slotName],
           );
@@ -392,12 +343,12 @@ describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeo
         });
 
         const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
-        const b = buildRuntime(databaseUrl, publicationName, slotName);
+        const b = buildRuntime(scenario.databaseUrl, publicationName, slotName);
         try {
           await b.runtime.start();
-          await waitForSlotActive(pool, slotName);
+          await waitForSlotActive(sql, slotName);
 
-          expect(await eventsTableEpoch(pool)).toBe(epochBefore);
+          expect(await eventsTableEpoch(sql)).toBe(epochBefore);
           expect(mentionsRecreated(errorSpy)).toBe(false);
 
           await waitFor(() => floatingRejected);
@@ -410,7 +361,7 @@ describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeo
           });
           expect(cursor.rows).toHaveLength(1);
 
-          await pool.query(
+          await sql.unsafe(
             `INSERT INTO "orders" (driver_id, status, price) VALUES (2, 'accepted', 20)`,
           );
           const bPull = await pullUntilEvents(b.router, cursor);
@@ -433,9 +384,8 @@ describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeo
         }
       }
     } finally {
-      await dropSlotWithRetry(pool, slotName).catch(() => {});
-      await pool.end();
-      await dropScenarioDatabase(databaseName);
+      await dropSlotWithRetry(sql, slotName).catch(() => {});
+      await scenario.drop();
     }
   });
 });

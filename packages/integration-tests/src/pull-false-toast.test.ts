@@ -9,7 +9,7 @@
  * discipline (bare DDL, no publication/replica-identity setup, temp-slot teardown drain).
  */
 
-import { afterAll, describe, expect, spyOn, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { randomBytes } from 'node:crypto';
 import { decimal, pgTable, serial, text } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/postgres-js';
@@ -17,35 +17,9 @@ import { createSelectSchema } from 'drizzle-orm/zod';
 import { pulse } from 'drizzle-pulse';
 import { createPulseClient } from 'drizzle-pulse/client/embedded';
 import { createPulseRegistry, expose, LogLevel } from 'drizzle-pulse/server';
-import type { Pool } from 'pg';
 import postgres from 'postgres';
-import {
-  baseDatabaseUrl,
-  buildDatabaseUrl,
-  createQuietPool,
-  randomSuffix,
-  withQuietPostgresUrl,
-} from './helpers/test-harness.js';
-
-const adminPool = createQuietPool(baseDatabaseUrl());
-
-afterAll(async () => {
-  await adminPool.end();
-});
-
-// Bounded async poller — WAL tap delivery lags a scheduling beat behind the triggering
-// statement, so poll rather than assert synchronously (pull-false.test.ts idiom).
-async function waitFor(
-  predicate: () => boolean | Promise<boolean>,
-  timeoutMs = 5000,
-  pollIntervalMs = 25,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!(await predicate())) {
-    if (Date.now() >= deadline) throw new Error(`waitFor timed out after ${timeoutMs}ms`);
-    await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
-  }
-}
+import { createScenarioDb, waitFor } from './helpers/scenario.js';
+import { withQuietPostgresUrl } from './helpers/test-harness.js';
 
 const orders = pgTable('orders', {
   id: serial('id').primaryKey(),
@@ -70,38 +44,44 @@ function buildRegistry() {
   return createPulseRegistry({ ordersByStatus, ordersByNote });
 }
 
-async function setupScenario(label: string) {
-  const databaseName = `pulse_toastfalse_${label}_${randomSuffix()}`;
-  await adminPool.query(`CREATE DATABASE "${databaseName}"`);
-  const databaseUrl = buildDatabaseUrl(baseDatabaseUrl(), databaseName);
-  const pool = createQuietPool(databaseUrl);
+// This suite's own TOASTable `note` column — the shared minimal-orders fixture doesn't carry
+// one, and a bare-DDL scenario (no publication/replica-identity) is required for the pull:false
+// self-provisioning precondition (Phase 23 decision).
+const LOCAL_ORDERS_DDL = `
+  CREATE TABLE "orders" (
+    "id" serial PRIMARY KEY,
+    "status" text NOT NULL,
+    "price" numeric NOT NULL,
+    "note" text NOT NULL
+  )
+`;
 
-  await pool.query(`
-    CREATE TABLE "orders" (
-      "id" serial PRIMARY KEY,
-      "status" text NOT NULL,
-      "price" numeric NOT NULL,
-      "note" text NOT NULL
-    )
-  `);
+async function setupScenario(label: string) {
+  const scenario = await createScenarioDb(`pulse_toastfalse_${label}`, { ddl: LOCAL_ORDERS_DDL });
   // Deliberately absent: the publication — reconcile() self-provisions it under pull:false.
   // REPLICA IDENTITY is left untouched (RIF-02): the tap decodes old-tuple data via
   // oldKind/unchanged, and the TOAST fill runs a by-pk SELECT instead of relying on FULL.
-
   const publicationName = `toastfalse_pub_${label}`;
   const slotName = `toastfalse_slot_${label}`;
-  const sourceSql = postgres(withQuietPostgresUrl(databaseUrl));
+  const sourceSql = postgres(withQuietPostgresUrl(scenario.databaseUrl));
 
   const registry = buildRegistry();
   const runtime = expose(registry, {
-    databaseUrl,
+    databaseUrl: scenario.databaseUrl,
     sourceDb: drizzle({ client: sourceSql }),
     pull: false,
     wal: { publicationName, slotName },
     logLevel: LogLevel.Error,
   });
 
-  return { databaseName, pool, sourceSql, publicationName, slotName, runtime };
+  return {
+    sql: scenario.sql,
+    sourceSql,
+    publicationName,
+    slotName,
+    runtime,
+    drop: scenario.drop,
+  };
 }
 
 type Scenario = Awaited<ReturnType<typeof setupScenario>>;
@@ -109,27 +89,11 @@ type Scenario = Awaited<ReturnType<typeof setupScenario>>;
 async function teardownScenario(s: Scenario): Promise<void> {
   await s.runtime.stop();
   await s.sourceSql.end();
-  await s.pool.end();
-
-  // The temporary slot is dropped by Postgres once the replication connection's backend
-  // actually terminates, which lags stop()'s rep.end() by a beat.
-  await waitFor(async () => {
-    const { rows } = await adminPool.query(
-      `SELECT 1 FROM pg_replication_slots WHERE database = $1`,
-      [s.databaseName],
-    );
-    return rows.length === 0;
-  });
-
-  await adminPool.query(
-    `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
-    [s.databaseName],
-  );
-  await adminPool.query(`DROP DATABASE IF EXISTS "${s.databaseName}"`);
+  await s.drop();
 }
 
-async function eventsSchemaRelationCount(pool: Pool): Promise<number> {
-  const { rows } = await pool.query(
+async function eventsSchemaRelationCount(sql: Scenario['sql']): Promise<number> {
+  const rows = await sql.unsafe(
     `SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'drizzle_pulse'`,
   );
   return rows.length;
@@ -148,23 +112,22 @@ describe('pull: false — TOAST-omitted column fill by pk (RIF-02)', () => {
       await s.runtime.start();
 
       // Proves the fill path ran, not the FULL old-under-new spread — RIF-02 never forces FULL.
-      const replicaIdentity = await s.pool.query<{ relreplident: string }>(
+      const replicaIdentity = await s.sql.unsafe<{ relreplident: string }[]>(
         `SELECT relreplident FROM pg_class WHERE relname = 'orders'`,
       );
-      expect(replicaIdentity.rows[0]?.relreplident).toBe('d');
+      expect(replicaIdentity[0]?.relreplident).toBe('d');
 
       const client = createPulseClient(s.runtime);
       const collection = await client.ordersByStatus({ status: 'accepted' });
 
       const note = toastableValue();
-      await s.pool.query(
-        `INSERT INTO "orders" (status, price, note) VALUES ('accepted', 10, $1)`,
-        [note],
-      );
+      await s.sql.unsafe(`INSERT INTO "orders" (status, price, note) VALUES ('accepted', 10, $1)`, [
+        note,
+      ]);
       await waitFor(() => collection.list().length === 1);
       const insertedId = collection.list()[0]?.id as number;
 
-      await s.pool.query(`UPDATE "orders" SET price = 20 WHERE id = $1`, [insertedId]);
+      await s.sql.unsafe(`UPDATE "orders" SET price = 20 WHERE id = $1`, [insertedId]);
       await waitFor(() => {
         const row = collection.list()[0] as { price?: number } | undefined;
         return row?.price === 20;
@@ -174,7 +137,7 @@ describe('pull: false — TOAST-omitted column fill by pk (RIF-02)', () => {
       expect(row?.note).toBe(note);
       expect(row?.note?.length).toBe(note.length);
 
-      expect(await eventsSchemaRelationCount(s.pool)).toBe(0);
+      expect(await eventsSchemaRelationCount(s.sql)).toBe(0);
 
       collection.dispose();
     } finally {
@@ -191,7 +154,7 @@ describe('pull: false — TOAST-omitted column fill by pk (RIF-02)', () => {
       const note = toastableValue();
       const collection = await client.ordersByNote({ note });
 
-      await s.pool.query(
+      await s.sql.unsafe(
         `INSERT INTO "orders" (status, price, note) VALUES ('requested', 10, $1)`,
         [note],
       );
@@ -201,7 +164,7 @@ describe('pull: false — TOAST-omitted column fill by pk (RIF-02)', () => {
       // Without the fill the omitted `note` evaluates as non-matching (filter-ast treats a
       // missing column as non-matching) and the pk-stable update would evict the row via
       // membership even though `note` never changed.
-      await s.pool.query(`UPDATE "orders" SET price = 20 WHERE id = $1`, [insertedId]);
+      await s.sql.unsafe(`UPDATE "orders" SET price = 20 WHERE id = $1`, [insertedId]);
       await waitFor(() => {
         const row = collection.list()[0] as { price?: number } | undefined;
         return row?.price === 20;
@@ -211,10 +174,10 @@ describe('pull: false — TOAST-omitted column fill by pk (RIF-02)', () => {
       // Changing the filtered column itself still leaves — the new tuple genuinely carries the
       // non-matching value, no fill involved.
       const otherNote = toastableValue();
-      await s.pool.query(`UPDATE "orders" SET note = $1 WHERE id = $2`, [otherNote, insertedId]);
+      await s.sql.unsafe(`UPDATE "orders" SET note = $1 WHERE id = $2`, [otherNote, insertedId]);
       await waitFor(() => collection.list().length === 0);
 
-      expect(await eventsSchemaRelationCount(s.pool)).toBe(0);
+      expect(await eventsSchemaRelationCount(s.sql)).toBe(0);
 
       collection.dispose();
     } finally {
@@ -231,10 +194,9 @@ describe('pull: false — TOAST-omitted column fill by pk (RIF-02)', () => {
       const collection = await client.ordersByStatus({ status: 'accepted' });
 
       const note = toastableValue();
-      await s.pool.query(
-        `INSERT INTO "orders" (status, price, note) VALUES ('accepted', 10, $1)`,
-        [note],
-      );
+      await s.sql.unsafe(`INSERT INTO "orders" (status, price, note) VALUES ('accepted', 10, $1)`, [
+        note,
+      ]);
       await waitFor(() => collection.list().length === 1);
       const insertedId = collection.list()[0]?.id as number;
 
@@ -243,10 +205,13 @@ describe('pull: false — TOAST-omitted column fill by pk (RIF-02)', () => {
         // By the time the fill SELECT runs (decoding the UPDATE), the row is already gone —
         // the whole transaction, including the DELETE, has already committed in Postgres before
         // the replication stream delivers either change. The trailing delete in the same commit
-        // batch must absorb the miss.
-        await s.pool.query(
-          `BEGIN; UPDATE "orders" SET price = 30 WHERE id = ${insertedId}; DELETE FROM "orders" WHERE id = ${insertedId}; COMMIT;`,
-        );
+        // batch must absorb the miss. sql.begin() reserves one connection for both statements,
+        // matching the pg raw-multi-statement string this replaces (postgres.js rejects a bare
+        // pooled BEGIN outside sql.begin()/sql.reserved()).
+        await s.sql.begin(async (tx) => {
+          await tx.unsafe(`UPDATE "orders" SET price = 30 WHERE id = $1`, [insertedId]);
+          await tx.unsafe(`DELETE FROM "orders" WHERE id = $1`, [insertedId]);
+        });
 
         await waitFor(() => collection.list().length === 0);
 
@@ -257,7 +222,7 @@ describe('pull: false — TOAST-omitted column fill by pk (RIF-02)', () => {
         errorSpy.mockRestore();
       }
 
-      expect(await eventsSchemaRelationCount(s.pool)).toBe(0);
+      expect(await eventsSchemaRelationCount(s.sql)).toBe(0);
 
       collection.dispose();
     } finally {
