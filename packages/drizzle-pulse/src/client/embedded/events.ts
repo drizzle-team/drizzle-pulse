@@ -89,8 +89,10 @@ export function createPulseEvents<TQueries extends AnyPulseBuilders>(
         }
 
         const auth: PulseAuthContext = options?.auth ?? { userId: null };
-        // resolve() validates args and yields the auth-scoped WHERE — the same gate every
-        // tapped event is filtered through below.
+        // resolve() validates args and yields the auth-scoped WHERE. buildTapEvent always gates
+        // inserts on it; updates/deletes are gated too when the old tuple is fully evaluable
+        // (RID FULL, or pull:true), otherwise delivered with the row redacted to pk-only so
+        // membership stays correct without leaking out-of-scope column data (see tap-events.ts).
         const resolved = runtime.registry.resolve(prop, rawArgs, auth);
         const tableKey = getTableUniqueName(resolved.table);
 

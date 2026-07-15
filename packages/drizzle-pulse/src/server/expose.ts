@@ -86,12 +86,23 @@ export type PendingWalEvent = {
   op: 'insert' | 'update' | 'delete';
   row: Record<string, unknown>;
   oldRow: Record<string, unknown> | null;
+  // Mirrors WalTapPayload['oldRowComplete'] — whether `oldRow` is a full old tuple (safe to
+  // evaluate against a WHERE) or a null/pk-only degradation under a non-full identity.
+  oldRowComplete: boolean;
   tableQualifiedName: string;
 };
 
 // A TOAST fill-by-pk that returned zero rows — recorded transiently in decodeInto, resolved at
 // commit time in stream() against a trailing delete on the same pk (Pattern 3).
 type FillMiss = { pkValue: unknown; tableQualifiedName: string };
+
+// `===` misses same-value Date/Buffer pks decoded from separate WAL events (distinct instances).
+function pkValuesEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a instanceof Date && b instanceof Date) return a.getTime() === b.getTime();
+  if (Buffer.isBuffer(a) && Buffer.isBuffer(b)) return a.equals(b);
+  return false;
+}
 
 // D-04: no reconnect tuning knobs — fixed internal defaults, same values as the prior
 // config-driven defaults.
@@ -603,6 +614,32 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
             await execDdl(
               `ALTER TABLE ${source.quoted} REPLICA IDENTITY FULL`,
               `ownership of ${source.name}`,
+            );
+          }
+        }
+      } else {
+        // pull:false decodes deletes/pk-change straight off the WAL 'key' tuple instead of
+        // forcing FULL — that only carries real pk data under DEFAULT/FULL, or USING INDEX on
+        // the pk's own index. Anything else silently drops every delete (non-pk USING INDEX) or
+        // breaks the app's own writes once the table joins the publication (NOTHING) — fail
+        // closed here instead of at decode time with no visible signal.
+        for (const source of registeredSources) {
+          const identityResult = await tx.execute<{
+            relreplident: string;
+            ident_is_pk: boolean;
+          }>(
+            sql`SELECT c.relreplident, COALESCE(i.indisprimary, false) AS ident_is_pk
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                LEFT JOIN pg_index i ON i.indrelid = c.oid AND i.indisreplident
+                WHERE n.nspname = ${source.schemaName} AND c.relname = ${source.tableName}`,
+          );
+          const identityRow = identityResult.rows[0];
+          const ident = identityRow?.relreplident;
+          if (ident === 'n' || (ident === 'i' && !identityRow?.ident_is_pk)) {
+            const identLabel = ident === 'n' ? 'NOTHING' : 'USING INDEX (non-primary-key index)';
+            throw new Error(
+              `pulse(pull:false): ${source.name} has REPLICA IDENTITY ${identLabel}; deletes cannot be decoded — set REPLICA IDENTITY DEFAULT or FULL`,
             );
           }
         }
@@ -1183,11 +1220,11 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
           (event) =>
             event.op === 'delete' &&
             event.tableQualifiedName === miss.tableQualifiedName &&
-            event.pkValue === miss.pkValue,
+            pkValuesEqual(event.pkValue, miss.pkValue),
         );
         if (!absorbed) {
           this.logError(
-            `[WAL Listener] TOAST fill miss on ${miss.tableQualifiedName} pk=${String(miss.pkValue)}: zero rows on admin-pool SELECT with no trailing delete in this commit — check the admin role has SELECT (owner or BYPASSRLS under RLS)`,
+            `[WAL Listener] TOAST fill miss on ${miss.tableQualifiedName} pk=${String(miss.pkValue)}: zero rows on admin-pool SELECT with no trailing delete in this commit — check the admin role has SELECT (owner or BYPASSRLS under RLS), or the row was deleted in a commit that had not yet been decoded when this fill ran`,
           );
         }
       }
@@ -1199,6 +1236,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
           event.row,
           event.oldRow,
           t.commitLsn,
+          event.oldRowComplete,
         );
       }
 
@@ -1221,10 +1259,12 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     let row: Record<string, unknown>;
     let oldRow: Record<string, unknown> | null;
 
-    // Reading the pk off a 'key' old tuple is safe (pk columns are always real in both 'key'
-    // and 'full' tuples) — but reading any OTHER column off a 'key' tuple is not: minipg
-    // null-renders them, indistinguishable from a real SQL null. `rawOld` may therefore only be
-    // used in full for oldKind === 'full'; elsewhere only its pk column may be read.
+    // Reading the pk off a 'key' old tuple is safe: reconcile() (pull:false branch) fails closed
+    // on any identity where the 'key' tuple wouldn't carry real pk columns (NOTHING, or a
+    // non-pk USING INDEX), so every identity reaching here is DEFAULT/FULL/pk-index. Reading any
+    // OTHER column off a 'key' tuple is still not safe: minipg null-renders them, indistinguishable
+    // from a real SQL null. `rawOld` may therefore only be used in full for oldKind === 'full';
+    // elsewhere only its pk column may be read.
     const rawOld = ev.kind !== 'insert' && ev.old ? metadata.normalizeRow(ev.old) : null;
 
     if (ev.kind === 'insert') {
@@ -1242,11 +1282,16 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         // one of them would silently drop matching events without this fill (filter-ast treats
         // a missing column as non-matching), so this is required, not an optimization.
         const pkValue = base[metadata.pkColumnName];
-        const filled = await this.fillUnchangedByPk(metadata, pkValue, ev.unchanged);
-        if (filled) {
-          row = { ...base, ...filled };
-        } else {
-          t.fillMisses.push({ pkValue, tableQualifiedName });
+        // A TOASTable pk that's itself unchanged (and thus omitted) renders undefined here — the
+        // pkValue==null skip below runs after this fill, so a query-time `where pk = undefined`
+        // must be avoided explicitly rather than relying on that later guard.
+        if (pkValue != null) {
+          const filled = await this.fillUnchangedByPk(metadata, pkValue, ev.unchanged);
+          if (filled) {
+            row = { ...base, ...filled };
+          } else {
+            t.fillMisses.push({ pkValue, tableQualifiedName });
+          }
         }
       }
       // A partially-null-rendered old row (non-key columns null from a 'key' tuple) must never
@@ -1265,6 +1310,10 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
             ? { [metadata.pkColumnName]: rawOld[metadata.pkColumnName] }
             : null;
     }
+
+    // Mirrors the oldKind checks above: true only when `oldRow` is a genuine full tuple, safe
+    // to evaluate a WHERE against (threaded to the tap via WalTapPayload.oldRowComplete).
+    const oldRowComplete = ev.kind !== 'insert' && ev.oldKind === 'full';
 
     const pkSource = ev.kind === 'delete' ? oldRow : row;
     const pkValue = pkSource?.[metadata.pkColumnName];
@@ -1285,14 +1334,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     }
 
     const oldPk = rawOld?.[metadata.pkColumnName];
-    const pkChanged =
-      oldPk !== pkValue &&
-      !(
-        oldPk instanceof Date &&
-        pkValue instanceof Date &&
-        oldPk.getTime() === pkValue.getTime()
-      ) &&
-      !(Buffer.isBuffer(oldPk) && Buffer.isBuffer(pkValue) && oldPk.equals(pkValue));
+    const pkChanged = !pkValuesEqual(oldPk, pkValue);
     if (ev.kind === 'update' && oldPk != null && pkChanged) {
       // pk-changing UPDATE (BUG-02): a single update entry keyed by the new pk leaves every
       // consumer holding a ghost row under the old pk. Synthesize delete(oldPk) then
@@ -1305,8 +1347,15 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       };
       const oldRowForDelete =
         ev.oldKind === 'full' ? rawOld : { [metadata.pkColumnName]: oldPk };
-      t.events.push({ ...base, op: 'delete', pkValue: oldPk, row: {}, oldRow: oldRowForDelete });
-      t.events.push({ ...base, op: 'insert', pkValue, row, oldRow: null });
+      t.events.push({
+        ...base,
+        op: 'delete',
+        pkValue: oldPk,
+        row: {},
+        oldRow: oldRowForDelete,
+        oldRowComplete,
+      });
+      t.events.push({ ...base, op: 'insert', pkValue, row, oldRow: null, oldRowComplete: false });
       return;
     }
 
@@ -1317,6 +1366,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       op: ev.kind,
       row,
       oldRow,
+      oldRowComplete,
       tableQualifiedName,
     });
   }

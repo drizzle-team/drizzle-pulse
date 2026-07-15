@@ -220,8 +220,11 @@ Nothing outside the runtime creates or migrates these tables. On `PulseRuntime.s
 DDL. In that transaction it, in order:
 
 1. asserts `wal_level = logical` (server-wide, the one precondition it can't fix — fail-closed);
-2. sets `REPLICA IDENTITY FULL` on every registered source table (and resets it to `DEFAULT`
-   on any table it un-pulses);
+2. under `pull: true`, sets `REPLICA IDENTITY FULL` on every registered source table (and resets
+   it to `DEFAULT` on any table it un-pulses); under `pull: false`, replica identity is never
+   touched — reconcile instead reads each source's `relreplident` and fails closed if it is
+   `NOTHING`, or `USING INDEX` on an index other than the primary key, since deletes can't be
+   decoded off a `'key'` old tuple in either case;
 3. creates the `CREATE PUBLICATION` (owning exactly the registered sources) or — unless the
    publication is `FOR ALL TABLES` — diffs its membership, `ADD`ing registered sources and
    `DROP`ping members that are no longer pulsed;
@@ -302,12 +305,22 @@ the same `reconcile()` over a short-lived admin connection and returns without o
 stream. The app's later `start()` then finds everything in place and no-ops the DDL. The
 reconcile role needs, across the statements it may run:
 
-- **ownership of each pulsed source table** — for `REPLICA IDENTITY FULL` / `DEFAULT`;
+- **ownership of each pulsed source table** — for `REPLICA IDENTITY FULL` / `DEFAULT`
+  (`pull: true` only; `pull: false` never alters replica identity, just reads it);
 - **the database `CREATE` privilege** — for `CREATE PUBLICATION` and `CREATE SCHEMA`;
 - **ownership of the publication** — for membership `ADD`/`DROP` once it exists.
 
 The WAL streaming connection `start()` opens additionally needs the `REPLICATION` attribute (and
 a replication-enabled connection); `wal_level = logical` must be set server-wide.
+
+**Admin-pool grant for the `pull: false` TOAST fill:** under `pull: false`, an UPDATE that omits
+a TOASTed column (unchanged since the last WAL event) triggers a single by-pk `SELECT` of that
+column from the source table, run on the runtime's own admin connection — not `sourceDb`. The
+admin role therefore needs `SELECT` on every pulsed source table, and under row-level security it
+must additionally be the table owner or hold `BYPASSRLS`; otherwise the fill silently under-reads
+(a zero-row result reads identically to a deleted row — the runtime logs a fill miss with no
+matching same-commit delete at `error`, since that combination usually means a grant problem, but
+can also be a benign update-then-delete race decoded across two commits).
 
 ## 6. Keeping drizzle-kit out: `schemaFilter`
 

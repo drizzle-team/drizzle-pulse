@@ -19,6 +19,7 @@ describe('WalEventEmitter', () => {
       rowData: { id: 1 },
       oldRowData: null,
       lsn: '0/1A2B3C',
+      oldRowComplete: false,
     });
   });
 
@@ -76,6 +77,18 @@ describe('WalEventEmitter', () => {
 
     expect(captured).not.toBeNull();
     expect((captured as unknown as WalTapPayload).oldRowData).toBeNull();
+  });
+
+  it('passes oldRowComplete through, defaulting to false when omitted', () => {
+    const emitter = new WalEventEmitter();
+    const received: WalTapPayload[] = [];
+    emitter.subscribe(TABLE_A, (p) => received.push(p));
+
+    emitter.emit(TABLE_A, 'delete', {}, { id: 1 }, '0/1');
+    emitter.emit(TABLE_A, 'delete', {}, { id: 2, name: 'full' }, '0/2', true);
+
+    expect(received[0]?.oldRowComplete).toBe(false);
+    expect(received[1]?.oldRowComplete).toBe(true);
   });
 
   it('isolates listener errors — a throwing listener does not prevent others or propagate out of emit', () => {

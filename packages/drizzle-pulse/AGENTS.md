@@ -40,8 +40,8 @@ the platform-imports purity test).
 | `src/client/superjson.ts` | response deserialization helper |
 | `src/client/react/use-pulse-query.ts` | `usePulseQuery` wrapper around `PulseQuery` |
 | `src/client/embedded/index.ts` | in-process embedded client: `createPulseClient(runtime)` → `PulseCollection` facade (`list`/`onChange`/`onError`/`dispose`) fed tap-direct — a full-set `PulseMergeCore` rebuilt from `runtime.readCollectionBaseline` and kept live by `runtime.walEventEmitter`, reconciled through an LSN watermark handshake (no events table, no wire protocol); re-exports `createPulseEvents` |
-| `src/client/embedded/tap-events.ts` | `buildTapEvent(payload, resolved)`: the single WAL-tap-payload → `PulseEvent` builder shared by collections and `createPulseEvents` (extracts + WHERE-filters + projects a row; value-imports only `shared/`) |
-| `src/client/embedded/events.ts` | `createPulseEvents(runtime)` → stateless per-event subscription: WHERE-filtered WAL tap, `(event, lsn)` callback, no baseline, no merge core, no per-subscription error surface |
+| `src/client/embedded/tap-events.ts` | `buildTapEvent(payload, resolved)`: the single WAL-tap-payload → `PulseEvent` builder shared by collections and `createPulseEvents` (WHERE-filters inserts; updates/deletes are WHERE-filtered only when the old tuple is fully evaluable, else delivered with the row redacted to pk-only; value-imports only `shared/`) |
+| `src/client/embedded/events.ts` | `createPulseEvents(runtime)` → stateless per-event subscription: WHERE-filtered inserts, updates/deletes delivered by pk with `matchesNew` (redacted to pk-only when not evaluable), `(event, lsn)` callback, no baseline, no merge core, no per-subscription error surface |
 | `src/server/pulse-builder.ts` | immutable query builder (`.columns/.args/.order/.limit/.transform/.query`), seeded by `PulseTable.query(fn?)` |
 | `src/server/pulse-registry.ts` | registry finalization + `$client` phantom contract; rejects a bare `PulseTable`; defensive composite-PK re-check |
 | `src/server/pulse-projection.ts` | projection/response-shaping helpers split out to preserve platform purity for the embedded client entrypoint |
@@ -107,7 +107,9 @@ Embedded (in-process, tap-direct):
     → PulseCollection: list() / onChange() / onError() / dispose()
 
   createPulseEvents(runtime).queryName(args?, callback, { auth? })  // or (callback, options?)
-    → WHERE-filtered WAL tap, no baseline/state → returns an unsubscribe function
+    → WAL tap: inserts WHERE-filtered; updates/deletes WHERE-filtered when the old tuple is
+      fully evaluable, else delivered pk-redacted for membership correctness — no baseline/state
+    → returns an unsubscribe function
     → callback(event: PulseEvent<TRow>, lsn: string) in WAL commit order, at-least-once
       (a disconnect between tap emit and slot ack replays the commit on reconnect; no
       baseline/dedup here — consumers should key idempotency off (pk, lsn))

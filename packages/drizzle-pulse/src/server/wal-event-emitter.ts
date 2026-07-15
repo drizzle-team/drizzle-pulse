@@ -4,6 +4,13 @@ export type WalTapPayload = {
   oldRowData: Record<string, unknown> | null;
   /** Commit LSN of the transaction this event belongs to; shared by every event in that transaction. */
   lsn: string;
+  /**
+   * True when `oldRowData` is a genuinely complete old tuple (REPLICA IDENTITY FULL, or
+   * pull:true which always forces FULL) and can be evaluated against a query's WHERE. False
+   * when it's null or a pk-only degradation under a non-full identity — evaluating WHERE
+   * against a partial tuple would misclassify columns pgoutput never sent as non-matching.
+   */
+  oldRowComplete: boolean;
 };
 
 export type WalTapListener = (payload: WalTapPayload) => void;
@@ -28,10 +35,11 @@ export class WalEventEmitter {
     rowData: Record<string, unknown>,
     oldRowData: Record<string, unknown> | null,
     lsn: string,
+    oldRowComplete = false,
   ): void {
     const set = this.listeners.get(tableQualifiedName);
     if (!set) return;
-    const payload: WalTapPayload = { operation, rowData, oldRowData, lsn };
+    const payload: WalTapPayload = { operation, rowData, oldRowData, lsn, oldRowComplete };
     for (const listener of set) {
       try {
         listener(payload);
