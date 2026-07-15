@@ -61,7 +61,7 @@ await runtime.start(); // self-provisions its infrastructure (publication, event
 // tables" below
 
 // wire runtime.handlers.subscribe / .pull / .loadMore into your HTTP router, or mount the
-// optional first-party Hono router — see "drizzle-pulse/server/router" below
+// optional first-party Hono router — see "drizzle-pulse/server/hono" below
 ```
 
 **Client** — poll the server over HTTP with `createPulseClient`:
@@ -151,14 +151,14 @@ For split-role deploys where the app role is deliberately unprivileged, call `ru
 
 **Admin-pool grant for the `pull: false` TOAST fill:** under `pull: false`, an UPDATE that omits a TOASTed column (unchanged since the last WAL event) triggers a single by-pk `SELECT` of that column from the source table, run on the runtime's own admin connection — not `sourceDb`. The admin role therefore needs `SELECT` on every pulsed source table, and under row-level security it must additionally be the table owner or hold `BYPASSRLS`; otherwise the fill silently under-reads (a zero-row result reads identically to "row deleted"). A fill that returns zero rows with no matching delete in the same WAL commit is logged at `error` — usually an admin-pool visibility failure to investigate, but it can also mean the row was deleted in a commit that hadn't been decoded yet when the fill ran (a benign update-then-delete race); the log line names both.
 
-## `drizzle-pulse/server/router`
+## `drizzle-pulse/server/hono`
 
 `runtime.handlers` is a transport-agnostic SDK — plug its `subscribe`/`pull`/`loadMore` methods into any HTTP framework. For Hono, the optional first-party router wraps them (superjson-encoded responses over three POST routes: `/subscribe`, `/pull`, `/load-more`):
 
 ```ts
-import { createPulseRouter } from 'drizzle-pulse/server/router';
+import { createPulseHonoRouter } from 'drizzle-pulse/server/hono';
 
-const router = createPulseRouter(runtime.handlers, { userId: null }); // Hono instance
+const router = createPulseHonoRouter(runtime.handlers, { userId: null }); // Hono instance
 app.route('/pulse', router);
 ```
 
@@ -240,7 +240,7 @@ Updates are push-shaped: the collection re-pulls when the runtime's WAL tap sign
 | `drizzle-orm` | `^1.0.0-rc.4` | Tested against `1.0.0-rc.4` |
 | `zod` | `^4.0.0` | |
 | `react` | `>=18.0.0` | Optional — only required for `drizzle-pulse/client/react` |
-| `hono` | `^4.6.0` | Optional — only required for `drizzle-pulse/server/router` |
+| `hono` | `^4.6.0` | Optional — only required for `drizzle-pulse/server/hono` |
 | `node` | `>=20` | |
 | PostgreSQL | `16` | Requires `wal_level=logical` |
 

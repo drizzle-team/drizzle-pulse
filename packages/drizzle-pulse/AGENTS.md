@@ -6,7 +6,7 @@ Type-safe Pulse SDK shared by server, client, React, and embedded layers.
 
 - root side: `pulse`, `PulseTable` — the collection entity, exported once per table from schema files
 - server side: `PulseBuilder` (seeded via `PulseTable.query(fn?)`), `createPulseRegistry`, `expose`, the transport-agnostic request handler (SDK), and the events-table machinery (`buildEventsTable` resolver + internal DDL renderer + `reconcile`/`provision`)
-- server/router side: `createPulseRouter` — an optional Hono wrapper over the SDK on the `./server/router` subpath
+- server/hono side: `createPulseHonoRouter` — an optional Hono wrapper over the SDK on the `./server/hono` subpath
 - client side: `createPulseClient`, `PulseQuery` (over a pluggable transport)
 - React side: `usePulseQuery`
 - embedded side: `createPulseClient` (in-process, tap-direct, runtime-backed), `PulseCollection` facade, `createPulseEvents` (stateless per-event subscription)
@@ -23,7 +23,7 @@ them but never bundle them — nothing on a client value-import path references 
 the platform-imports purity test).
 
 `hono` and `react` are **optional peer dependencies**: `hono` is needed only to mount the
-`./server/router` Hono wrapper (the SDK handler itself is transport-agnostic), `react` only for
+`./server/hono` Hono wrapper (the SDK handler itself is transport-agnostic), `react` only for
 `./client/react`. `drizzle-orm` and `zod` are required peers.
 
 ## Source Layout
@@ -50,7 +50,7 @@ the platform-imports purity test).
 | `src/server/cursor.ts` | opaque cursor tokens `"<epoch>:<snapshot>"` — `formatCursor`/`parseCursor`; epoch rotates on events-table recreate so stale tokens are detectable |
 | `src/server/pulse-sql.ts` | query compilation / row predicate evaluation |
 | `src/server/sdk.ts` | `PulseRequestHandler` — the transport-agnostic SDK core: subscribe/pull/loadMore, cursor-token mint/validate, `DEFAULT_PULL_EVENT_LIMIT` overflow→reset. Stateless: auth re-resolved per pull, no subscription registry |
-| `src/server/router.ts` | `createPulseRouter` — optional Hono wrapper over the SDK's three routes (`/subscribe`, `/pull`, `/load-more`); superjson-encoded responses; `./server/router` subpath |
+| `src/server/hono.ts` | `createPulseHonoRouter` — optional Hono wrapper over the SDK's three routes (`/subscribe`, `/pull`, `/load-more`); superjson-encoded responses; `./server/hono` subpath |
 | `src/server/expose.ts` | `PulseRuntime` assembly, `ExposeConfig` (publication/slot default `drizzle_pulse`, `eventsSchema`, `pullEventLimit`, `logLevel`), `reconcile()` self-provisioning + `provision()`, WAL listener lifecycle |
 | `src/server/pulse-store.ts` | `PulseStore` — events-table reads/writes over the pulse-owned pool |
 | `src/__tests__/` | runtime/unit tests for SDK internals |
@@ -91,7 +91,7 @@ Server (derive queries outside the schema file):
     → provision() runs reconcile() only (no WAL) — for elevated-role deploy steps
 
   runtime.handlers → transport-agnostic SDK (subscribe/pull/loadMore)
-  createPulseRouter(runtime.handlers)  [optional Hono wrapper, ./server/router]
+  createPulseHonoRouter(runtime.handlers)  [optional Hono wrapper, ./server/hono]
 
 Client:
   createPulseClient<PulseClient>({ url }) → QueryDescriptor<TResult>
@@ -146,8 +146,8 @@ serializeResponse
 applyColumnFilter, type PulseClientContract, PulseQueryContext, WithPk, ColumnsSelection, ...
 type PulseAuthContext
 
-// drizzle-pulse/server/router
-createPulseRouter, type PulseRouterHandlers
+// drizzle-pulse/server/hono
+createPulseHonoRouter, type PulseHonoHandlers
 
 // drizzle-pulse/client
 createPulseClient

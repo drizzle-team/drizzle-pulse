@@ -16,7 +16,7 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createPulseClient } from 'drizzle-pulse/client/embedded';
 import { createPulseRegistry, expose, LogLevel } from 'drizzle-pulse/server';
-import { createPulseRouter as createServerRouter } from 'drizzle-pulse/server/router';
+import { createPulseHonoRouter as createServerRouter } from 'drizzle-pulse/server/hono';
 import type { Hono } from 'hono';
 import type { Pool } from 'pg';
 import postgres from 'postgres';

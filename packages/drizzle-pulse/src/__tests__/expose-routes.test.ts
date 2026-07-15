@@ -9,7 +9,7 @@ import { expose } from '../server/expose.js';
 import type { AnyPulseBuilders, PulseRegistry } from '../server/pulse-registry.js';
 import { createPulseRegistry } from '../server/pulse-registry.js';
 import type { PulseStore } from '../server/pulse-store.js';
-import { createPulseRouter } from '../server/router.js';
+import { createPulseHonoRouter } from '../server/hono.js';
 import { PulseRequestHandler } from '../server/sdk.js';
 import type {
   LoadMoreResponse,
@@ -219,7 +219,7 @@ function createRouterHarness(params?: {
     params?.pull?.eventLimit,
   );
 
-  const router = createPulseRouter(requestHandler, { userId: null });
+  const router = createPulseHonoRouter(requestHandler, { userId: null });
 
   return { router };
 }

@@ -6,12 +6,12 @@ import { serializeResponse } from './superjson-utils.js';
 
 // The three transport entry points the router drives. Structural so callers can pass a
 // full PulseRequestHandler or any equivalent SDK surface.
-export type PulseRouterHandlers = Pick<PulseRequestHandler, 'subscribe' | 'pull' | 'loadMore'>;
+export type PulseHonoHandlers = Pick<PulseRequestHandler, 'subscribe' | 'pull' | 'loadMore'>;
 
 // Thin Hono wrapper over the SDK: plain-JSON request in, superjson-encoded {status, body}
 // out. The stateless protocol has exactly these three paths.
-export function createPulseRouter(
-  handlers: PulseRouterHandlers,
+export function createPulseHonoRouter(
+  handlers: PulseHonoHandlers,
   auth: PulseAuthContext = { userId: null },
 ): Hono {
   const router = new Hono();

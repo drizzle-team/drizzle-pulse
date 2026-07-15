@@ -12,7 +12,7 @@ import {
   type PulseRegistry,
   type PulseRuntime,
 } from 'drizzle-pulse/server';
-import { createPulseRouter as createServerRouter } from 'drizzle-pulse/server/router';
+import { createPulseHonoRouter as createServerRouter } from 'drizzle-pulse/server/hono';
 import type { Hono } from 'hono';
 import { Pool } from 'pg';
 import postgres from 'postgres';

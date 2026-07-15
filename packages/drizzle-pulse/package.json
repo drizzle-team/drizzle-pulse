@@ -52,9 +52,9 @@
       "types": "./dist/server/index.d.ts",
       "default": "./dist/server/index.js"
     },
-    "./server/router": {
-      "types": "./dist/server/router.d.ts",
-      "default": "./dist/server/router.js"
+    "./server/hono": {
+      "types": "./dist/server/hono.d.ts",
+      "default": "./dist/server/hono.js"
     },
     "./package.json": "./package.json"
   },
