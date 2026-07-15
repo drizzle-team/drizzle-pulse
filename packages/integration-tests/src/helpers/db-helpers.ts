@@ -1,8 +1,10 @@
 import { sql } from 'drizzle-orm';
 import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
-import type { Pool } from 'pg';
+import postgres from 'postgres';
 import type { HarnessEvent } from './test-harness.js';
+
+type PostgresClient = ReturnType<typeof postgres>;
 
 type FixtureWithEventsTable = {
   eventsTable: PgTable;
@@ -25,9 +27,9 @@ export function eventsTableIdent(fixture: FixtureWithEventsTable): string {
 
 async function getCurrentSnapshotForFixture(
   fixture: FixtureWithEventsTable,
-  pool: Pool,
+  pool: PostgresClient,
 ): Promise<number> {
-  const { rows } = await pool.query<{ max_snapshot: string }>(
+  const rows = await pool.unsafe<Array<{ max_snapshot: string }>>(
     `SELECT COALESCE(MAX("$snapshot"), 0)::text AS max_snapshot FROM ${eventsTableIdent(fixture)}`,
   );
   return Number(rows[0]?.max_snapshot ?? '0');
@@ -56,7 +58,7 @@ const WAIT_FOR_EVENTS_DEFAULT_TIMEOUT_MS: Record<WaitForEventsPredicate, number>
  */
 export async function waitForEvents(
   fixture: FixtureWithEventsTable,
-  pool: Pool,
+  pool: PostgresClient,
   sinceSnapshot: number,
   expectedCount: number,
   opts?: WaitForEventsOptions,
@@ -68,7 +70,7 @@ export async function waitForEvents(
   const start = Date.now();
 
   const fetchFilteredRows = () =>
-    pool.query<HarnessEvent>(
+    pool.unsafe<HarnessEvent[]>(
       `
         SELECT "$snapshot"::int AS snapshot, id AS pk, "$op" AS op, "$timestamp"::text AS timestamp
         FROM ${eventsTable}
@@ -81,7 +83,7 @@ export async function waitForEvents(
 
   if (predicate === 'rowCount') {
     while (Date.now() - start < timeoutMs) {
-      const { rows } = await fetchFilteredRows();
+      const rows = await fetchFilteredRows();
 
       if (rows.length >= expectedCount) {
         return rows;
@@ -92,7 +94,7 @@ export async function waitForEvents(
       });
     }
 
-    const { rows } = await pool.query<{ count: string }>(
+    const rows = await pool.unsafe<Array<{ count: string }>>(
       `
         SELECT COUNT(*)::text AS count
         FROM ${eventsTable}
@@ -113,7 +115,7 @@ export async function waitForEvents(
     const currentSnapshot = await getCurrentSnapshotForFixture(fixture, pool);
 
     if (currentSnapshot >= targetSnapshot) {
-      const { rows } = await fetchFilteredRows();
+      const rows = await fetchFilteredRows();
       return rows;
     }
 
@@ -132,7 +134,7 @@ export async function waitForEvents(
 /** Legacy row-count-predicate poller, now a thin delegation to {@link waitForEvents}. */
 export async function waitForEventsForFixture(
   fixture: FixtureWithEventsTable,
-  pool: Pool,
+  pool: PostgresClient,
   sinceSnapshot: number,
   expectedCount: number,
   opts?: { timeoutMs?: number; pollIntervalMs?: number },
@@ -146,7 +148,7 @@ export async function waitForEventsForFixture(
 /** Legacy max-snapshot-predicate poller, now a thin delegation to {@link waitForEvents}. */
 export async function waitForProcessedEventsForFixture(
   fixture: FixtureWithEventsTable,
-  pool: Pool,
+  pool: PostgresClient,
   sinceSnapshot: number,
   expectedEventCount: number,
   opts?: { timeoutMs?: number; pollIntervalMs?: number },
@@ -178,7 +180,7 @@ export async function processDbOperations<
   const TOperations extends ReadonlyArray<DbEventOperation>,
 >(
   fixture: FixtureWithEventsTable,
-  pool: Pool,
+  pool: PostgresClient,
   operations: TOperations,
   options?: ProcessDbOperationsOptions,
 ): Promise<{ events: HarnessEvent[]; results: DbEventResults<TOperations> }> {

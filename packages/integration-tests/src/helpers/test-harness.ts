@@ -14,7 +14,6 @@ import {
 } from 'drizzle-pulse/server';
 import { createPulseHonoRouter as createServerRouter } from 'drizzle-pulse/server/hono';
 import type { Hono } from 'hono';
-import { Pool } from 'pg';
 import postgres from 'postgres';
 import SuperJSON from 'superjson';
 import { z } from 'zod';
@@ -159,40 +158,31 @@ export function withQuietPostgresUrl(databaseUrl: string): string {
   return url.toString();
 }
 
-export function createQuietPool(databaseUrl: string): Pool {
-  return new Pool({ connectionString: withQuietPostgresUrl(databaseUrl) });
-}
-
 export function createQuietPostgresClient(databaseUrl: string) {
   return postgres(withQuietPostgresUrl(databaseUrl));
 }
 
-async function ensureCleanTestDatabase(adminPool: Pool, databaseName: string): Promise<void> {
-  await adminPool.query(
-    `
-      SELECT pg_terminate_backend(pid)
-      FROM pg_stat_activity
-      WHERE datname = $1
-        AND pid <> pg_backend_pid()
-    `,
-    [databaseName],
-  );
+async function ensureCleanTestDatabase(
+  adminPool: ReturnType<typeof postgres>,
+  databaseName: string,
+): Promise<void> {
+  await adminPool`
+    SELECT pg_terminate_backend(pid)
+    FROM pg_stat_activity
+    WHERE datname = ${databaseName}
+      AND pid <> pg_backend_pid()
+  `;
 
-  await adminPool.query(`DROP DATABASE IF EXISTS "${databaseName}"`);
-  await adminPool.query(`CREATE DATABASE "${databaseName}"`);
+  await adminPool.unsafe(`DROP DATABASE IF EXISTS "${databaseName}"`);
+  await adminPool.unsafe(`CREATE DATABASE "${databaseName}"`);
 }
 
-async function cleanupStaleTestSlots(adminPool: Pool): Promise<void> {
-  const { rows } = await adminPool.query<{
-    slot_name: string;
-    active_pid: number | null;
-  }>(
-    `
-      SELECT slot_name, active_pid
-      FROM pg_replication_slots
-      WHERE slot_name LIKE 'test\\_%' ESCAPE '\\'
-    `,
-  );
+async function cleanupStaleTestSlots(adminPool: ReturnType<typeof postgres>): Promise<void> {
+  const rows = await adminPool<Array<{ slot_name: string; active_pid: number | null }>>`
+    SELECT slot_name, active_pid
+    FROM pg_replication_slots
+    WHERE slot_name LIKE 'test\\_%' ESCAPE '\\'
+  `;
 
   for (const row of rows) {
     // Never touch active slots — they may belong to other workers/processes
@@ -200,7 +190,7 @@ async function cleanupStaleTestSlots(adminPool: Pool): Promise<void> {
       continue;
     }
 
-    await adminPool.query('SELECT pg_drop_replication_slot($1)', [row.slot_name]);
+    await adminPool`SELECT pg_drop_replication_slot(${row.slot_name})`;
   }
 }
 
@@ -216,7 +206,7 @@ async function applyFixtureMigrations(databaseUrl: string, migrationsPath: strin
 }
 
 async function waitForWalStartup(
-  adminPool: Pool,
+  adminPool: ReturnType<typeof postgres>,
   slotName: string,
   runtimeStartupError: { current: Error | null },
   opts?: { timeoutMs?: number; pollIntervalMs?: number },
@@ -230,10 +220,9 @@ async function waitForWalStartup(
       throw runtimeStartupError.current;
     }
 
-    const { rows } = await adminPool.query<{ slot_name: string }>(
-      'SELECT slot_name FROM pg_replication_slots WHERE slot_name = $1',
-      [slotName],
-    );
+    const rows = await adminPool<Array<{ slot_name: string }>>`
+      SELECT slot_name FROM pg_replication_slots WHERE slot_name = ${slotName}
+    `;
 
     if (rows.length > 0) {
       return;
@@ -290,7 +279,7 @@ export type TestSuiteResult<
 > = {
   runtime: TestRuntime<TQueries>;
   router: Hono;
-  pool: Pool;
+  pool: ReturnType<typeof postgres>;
   db: PostgresJsDatabase;
   databaseUrl: string;
   publicationName: string;
@@ -313,7 +302,7 @@ export async function setupTestSuiteForFixture<
   registry: PulseRegistry<TQueries>,
 ): Promise<TestSuiteResult<TFixture, TQueries>> {
   const base = baseDatabaseUrl();
-  const adminPool = createQuietPool(base);
+  const adminPool = createQuietPostgresClient(base);
   const databaseName = `${TEST_DATABASE_PREFIX}_${randomSuffix()}`;
   const runtimeStartupError = { current: null as Error | null };
 
@@ -321,7 +310,7 @@ export async function setupTestSuiteForFixture<
   await ensureCleanTestDatabase(adminPool, databaseName);
 
   const databaseUrl = buildDatabaseUrl(base, databaseName);
-  const testPool = createQuietPool(databaseUrl);
+  const testPool = createQuietPostgresClient(databaseUrl);
 
   // Events tables (and their pulse_meta bookkeeping) are runtime-owned: the migrations set up
   // the source table + publication + replica identity, and runtime.start() below reconciles
@@ -355,26 +344,22 @@ export async function setupTestSuiteForFixture<
     tornDown = true;
 
     await runtime.stop();
-    await testPool.query(`DROP PUBLICATION IF EXISTS ${runtime.publicationName}`);
-    await adminPool.query(
-      'SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1',
-      [runtime.slotName],
-    );
+    await testPool.unsafe(`DROP PUBLICATION IF EXISTS ${runtime.publicationName}`);
+    await adminPool`
+      SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = ${runtime.slotName}
+    `;
 
     await testPool.end();
     await runtime.sourceSql.end();
     await dbSql.end();
 
-    await adminPool.query(
-      `
-        SELECT pg_terminate_backend(pid)
-        FROM pg_stat_activity
-        WHERE datname = $1
-          AND pid <> pg_backend_pid()
-      `,
-      [databaseName],
-    );
-    await adminPool.query(`DROP DATABASE IF EXISTS "${databaseName}"`);
+    await adminPool`
+      SELECT pg_terminate_backend(pid)
+      FROM pg_stat_activity
+      WHERE datname = ${databaseName}
+        AND pid <> pg_backend_pid()
+    `;
+    await adminPool.unsafe(`DROP DATABASE IF EXISTS "${databaseName}"`);
     await adminPool.end();
   };
 
@@ -385,8 +370,8 @@ export async function setupTestSuiteForFixture<
 
     const eventsTable = eventsTableIdent(fixture);
     const tableList = fixture.cleanupTables.map((t) => `"${t}"`).join(', ');
-    await testPool.query(`TRUNCATE TABLE ${tableList} RESTART IDENTITY CASCADE`);
-    await testPool.query(`TRUNCATE TABLE ${eventsTable} RESTART IDENTITY`);
+    await testPool.unsafe(`TRUNCATE TABLE ${tableList} RESTART IDENTITY CASCADE`);
+    await testPool.unsafe(`TRUNCATE TABLE ${eventsTable} RESTART IDENTITY`);
     await runtime.ensureBaselines();
   };
 

@@ -7,7 +7,7 @@ import { createPulseClient, PulseQuery } from 'drizzle-pulse/client';
 import { createPulseRegistry } from 'drizzle-pulse/server';
 import fc from 'fast-check';
 import type { Hono } from 'hono';
-import type { Pool } from 'pg';
+import type postgres from 'postgres';
 import { fullOrdersFixture, type HarnessOrderStatus } from './fixtures/full-orders/index.js';
 import type { GeneratedOperation as Operation } from './helpers/order-ops-arbitrary.js';
 import { makeOperationSequenceArb } from './helpers/order-ops-arbitrary.js';
@@ -25,7 +25,7 @@ import {
 
 let suite: TestSuiteResult;
 let router: Hono;
-let pool: Pool;
+let pool: ReturnType<typeof postgres>;
 let db: PostgresJsDatabase;
 let runDbOperations: HarnessProcessDbOperations;
 

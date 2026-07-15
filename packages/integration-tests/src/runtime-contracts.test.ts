@@ -5,7 +5,7 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createPulseRegistry } from 'drizzle-pulse/server';
 import type { Hono } from 'hono';
-import type { Pool } from 'pg';
+import type postgres from 'postgres';
 import SuperJSON from 'superjson';
 import { fullOrdersFixture } from './fixtures/full-orders/index.js';
 import type {
@@ -25,7 +25,7 @@ import {
 describe('Runtime Contracts', () => {
   let suite: TestSuiteResult;
   let router: Hono;
-  let pool: Pool;
+  let pool: ReturnType<typeof postgres>;
   let db: PostgresJsDatabase;
   let processDbOperations: HarnessProcessDbOperations;
   let runtime!: RuntimeOf<typeof registry>;
