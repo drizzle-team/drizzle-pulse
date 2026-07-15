@@ -1,9 +1,11 @@
 /**
- * Integration proof: reconcile() self-provisions the publication and REPLICA IDENTITY.
+ * Integration proof: reconcile() self-provisions the publication for both pull modes.
  * expose().provision() (the same reconcile path start() runs, minus the replication stream)
- * creates the publication owning exactly the registered sources, keeps its membership in sync
- * (adding new sources, un-pulsing removed ones), and forces REPLICA IDENTITY FULL — restoring
- * it after drift. Each scenario builds its own standalone database and drops it in a finally
+ * creates the publication owning exactly the registered sources and keeps its membership in
+ * sync (adding new sources, un-pulsing removed ones). REPLICA IDENTITY handling is pull:true
+ * only: forces FULL, restores it after drift, and resets to DEFAULT on un-pulse. Under
+ * pull:false identity is never touched in either direction (RIF-02) — see the dedicated
+ * pull:false test. Each scenario builds its own standalone database and drops it in a finally
  * block, so the publication/schema it creates go with the database.
  */
 
@@ -62,7 +64,12 @@ async function setupBareScenario(label: string): Promise<Scenario> {
   return { databaseName, databaseUrl, pool, sourceSql };
 }
 
-function makeRuntime(s: Scenario, label: string, tables: 'orders' | 'both') {
+function makeRuntime(
+  s: Scenario,
+  label: string,
+  tables: 'orders' | 'both',
+  pull: boolean = true,
+) {
   const registry =
     tables === 'both'
       ? createPulseRegistry({ orders: pulse(orders).query(), extras: pulse(extras).query() })
@@ -70,7 +77,7 @@ function makeRuntime(s: Scenario, label: string, tables: 'orders' | 'both') {
   return expose(registry, {
     databaseUrl: s.databaseUrl,
     sourceDb: drizzle({ client: s.sourceSql }),
-    pull: true,
+    pull,
     wal: { publicationName: `pulse_pub_${label}`, slotName: `pulse_slot_${label}` },
     logLevel: LogLevel.Error,
   });
@@ -214,7 +221,7 @@ describe('reconcile publication + replica identity self-provisioning', () => {
     }
   });
 
-  test('RI drift: manually resetting to DEFAULT is restored to FULL on next provision()', async () => {
+  test('pull:true RI drift: manually resetting to DEFAULT is restored to FULL on next provision()', async () => {
     const s = await setupBareScenario('drift');
     try {
       const runtime = makeRuntime(s, 'drift', 'orders');
@@ -223,6 +230,25 @@ describe('reconcile publication + replica identity self-provisioning', () => {
 
       await s.pool.query('ALTER TABLE "orders" REPLICA IDENTITY DEFAULT');
       expect(await replicaIdentity(s.pool, 'orders')).not.toBe('f');
+
+      await runtime.provision();
+      expect(await replicaIdentity(s.pool, 'orders')).toBe('f');
+    } finally {
+      await teardown(s);
+    }
+  });
+
+  test('pull:false: provision() never forces FULL, and never restores drift to FULL either', async () => {
+    const s = await setupBareScenario('falsedrift');
+    try {
+      const runtime = makeRuntime(s, 'falsedrift', 'orders', false);
+      await runtime.provision();
+      expect(await replicaIdentity(s.pool, 'orders')).toBe('d');
+
+      // A table another logical consumer (or a prior pull:true boot) already forced to FULL
+      // must stay FULL — pull:false never resets identity in either direction.
+      await s.pool.query('ALTER TABLE "orders" REPLICA IDENTITY FULL');
+      expect(await replicaIdentity(s.pool, 'orders')).toBe('f');
 
       await runtime.provision();
       expect(await replicaIdentity(s.pool, 'orders')).toBe('f');

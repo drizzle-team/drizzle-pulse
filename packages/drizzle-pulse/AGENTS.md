@@ -59,12 +59,15 @@ the platform-imports purity test).
 
 The runtime **self-provisions all its infrastructure** — the app no longer migrates events
 tables. `PulseRuntime.reconcile()` runs inside one transaction under a per-events-schema
-advisory lock and: asserts `wal_level=logical` (the one precondition it can't fix), sets
-`REPLICA IDENTITY FULL` on each source (resets to `DEFAULT` on un-pulse), creates/diffs the
-publication, creates the events schema + `pulse_meta` bookkeeping, creates/recreates each events
-table whose rendered-DDL sha256 diverges (rotating its epoch), and sweeps orphans. `start()`
-runs it then opens WAL; `provision()` runs it and returns (split-role deploys). Failed DDL throws
-naming the exact statement and the grant it most likely needs. See
+advisory lock and: asserts `wal_level=logical` (the one precondition it can't fix), creates/diffs
+the publication (mode-independent), creates the events schema + `pulse_meta` bookkeeping,
+creates/recreates each events table whose rendered-DDL sha256 diverges (rotating its epoch), and
+sweeps orphans. `pull: true` only (RIF-02): sets `REPLICA IDENTITY FULL` on each source and
+resets it to `DEFAULT` on un-pulse — `pull: false` never forces or resets identity in either
+direction (old-tuple data comes from `oldKind`/`unchanged` instead, gated per-event not per-mode,
+so upgrading a `pull: false` deployment is zero-step). `start()` runs it then opens WAL;
+`provision()` runs it and returns (split-role deploys). Failed DDL throws naming the exact
+statement and the grant it most likely needs. See
 [`../../docs/events-table-convention.md`](../../docs/events-table-convention.md) sections 5–8.
 
 ## Contract Flow

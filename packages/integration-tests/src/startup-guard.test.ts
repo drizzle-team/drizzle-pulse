@@ -1,15 +1,15 @@
 /**
  * Integration proof: expose()'s boot reconciliation against real Postgres, through the full
- * start() path (WAL stream and all).
+ * start() path (WAL stream and all). All scenarios below run pull:true.
  *
  * Most preconditions the guard once only asserted are now self-provisioned inside reconcile():
- * a missing publication is created, a missing member is added, a source without REPLICA
- * IDENTITY FULL is altered. These scenarios prove start() heals a bare/partial setup and then
- * boots. wal_level stays the one fail-closed assert (the runtime can't fix a server-wide
- * setting), but it can't be toggled on the shared test server, so it has no live case here.
- * Finer membership/RI coverage lives in reconcile-publication.test.ts (provision() path). Each
- * scenario gets its own randomly-named database/publication/slot and tears itself down in a
- * `finally` block.
+ * a missing publication is created, a missing member is added, and (pull:true only — RIF-02) a
+ * source without REPLICA IDENTITY FULL is altered. These scenarios prove start() heals a
+ * bare/partial setup and then boots. wal_level stays the one fail-closed assert (the runtime
+ * can't fix a server-wide setting), but it can't be toggled on the shared test server, so it has
+ * no live case here. Finer membership/RI coverage lives in reconcile-publication.test.ts
+ * (provision() path, both pull modes). Each scenario gets its own randomly-named
+ * database/publication/slot and tears itself down in a `finally` block.
  */
 
 import { afterAll, describe, expect, test } from 'bun:test';

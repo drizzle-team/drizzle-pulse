@@ -1,12 +1,14 @@
 /**
  * Integration proof: BUG-02 — a pk-changing UPDATE (`UPDATE orders SET id = id + N`) must
- * synthesize delete(oldPk) + insert(newPk) so no consumer retains a ghost old-pk row. Proven
- * in both pull modes since both run REPLICA IDENTITY FULL today (oldPk is always real).
+ * synthesize delete(oldPk) + insert(newPk) so no consumer retains a ghost old-pk row. Proven in
+ * both pull modes: pull:true forces REPLICA IDENTITY FULL (the old tuple is always full);
+ * pull:false runs REPLICA IDENTITY DEFAULT (the old tuple is key-only), and synthesis reads only
+ * the old pk, which a key tuple always carries as a real value.
  *
  * Each scenario builds its own standalone ephemeral database (bare `orders` table only —
- * reconcile() self-provisions the publication + REPLICA IDENTITY FULL exactly as it does under
- * normal boot) so it cannot collide with other suites, and tears itself down in a `finally`
- * block.
+ * reconcile() self-provisions the publication, plus REPLICA IDENTITY FULL under pull:true only,
+ * exactly as it does under normal boot) so it cannot collide with other suites, and tears itself
+ * down in a `finally` block.
  */
 
 import { afterAll, describe, expect, test } from 'bun:test';
@@ -63,8 +65,9 @@ async function createScenarioDatabase(label: string) {
   const databaseUrl = buildDatabaseUrl(baseDatabaseUrl(), databaseName);
   const pool = createQuietPool(databaseUrl);
 
-  // Deliberately absent: the publication AND REPLICA IDENTITY FULL — reconcile() self-
-  // provisions both at boot, same as every other self-managed scenario in this suite family.
+  // Deliberately absent: the publication (self-provisioned at boot for both scenarios below)
+  // and REPLICA IDENTITY FULL (self-provisioned only for the pull:true scenario — pull:false
+  // leaves identity untouched, per RIF-02).
   await pool.query(`
     CREATE TABLE "orders" (
       "id" serial PRIMARY KEY,

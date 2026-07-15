@@ -3,9 +3,10 @@
  * infrastructure while embedded collections and stateless events subscriptions stay fully
  * live over the WAL tap (DRIVER-06) — and their replication slot is temporary with a
  * randomized suffix so a crashed process can never leak WAL-retaining slot state (D-01).
- * Each scenario builds its own standalone database (bare — no pre-existing publication or
- * REPLICA IDENTITY) so reconcile()'s self-provisioning of the WAL prerequisites is exercised
- * the same way it is under `pull: true`, and tears itself down in a `finally` block.
+ * REPLICA IDENTITY is never forced under pull:false (RIF-02) — only the publication is
+ * self-provisioned. Each scenario builds its own standalone database (bare — no pre-existing
+ * publication) so reconcile()'s self-provisioning of the WAL prerequisites is exercised, and
+ * tears itself down in a `finally` block.
  */
 
 import { afterAll, describe, expect, test } from 'bun:test';
@@ -68,8 +69,9 @@ async function setupPullFalseScenario(label: string) {
       "created_at" timestamp with time zone DEFAULT now() NOT NULL
     )
   `);
-  // Deliberately absent: the publication AND REPLICA IDENTITY FULL — reconcile() still
-  // self-provisions both under pull:false (embedded needs WAL, per A3).
+  // Deliberately absent: the publication — reconcile() still self-provisions it under
+  // pull:false (embedded needs WAL, per A3). REPLICA IDENTITY is left untouched under
+  // pull:false (RIF-02): the tap decodes old-tuple data via oldKind/unchanged instead.
 
   const publicationName = `pullfalse_pub_${label}`;
   const slotName = `pullfalse_slot_${label}`;
@@ -125,7 +127,7 @@ async function eventsSchemaRelationCount(pool: Pool): Promise<number> {
 }
 
 describe('pull: false — embedded-only runtime writes nothing to events tables (DRIVER-06)', () => {
-  test('provisioning: zero events-schema relations; publication + REPLICA IDENTITY FULL still self-provisioned', async () => {
+  test('provisioning: zero events-schema relations; publication self-provisioned, REPLICA IDENTITY left at DEFAULT', async () => {
     const s = await setupPullFalseScenario('provision');
     try {
       await s.runtime.start();
@@ -139,10 +141,12 @@ describe('pull: false — embedded-only runtime writes nothing to events tables 
       );
       expect(members.rows.map((row) => row.tablename)).toEqual(['orders']);
 
+      // pull:false never forces REPLICA IDENTITY FULL (RIF-02) — zero durable mutation of user
+      // tables at boot, no ACCESS EXCLUSIVE lock.
       const replicaIdentity = await s.pool.query<{ relreplident: string }>(
         `SELECT relreplident FROM pg_class WHERE relname = 'orders'`,
       );
-      expect(replicaIdentity.rows[0]?.relreplident).toBe('f');
+      expect(replicaIdentity.rows[0]?.relreplident).toBe('d');
     } finally {
       await teardownScenario(s);
     }
