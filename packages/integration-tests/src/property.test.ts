@@ -9,6 +9,8 @@ import fc from 'fast-check';
 import type { Hono } from 'hono';
 import type { Pool } from 'pg';
 import { fullOrdersFixture, type HarnessOrderStatus } from './fixtures/full-orders/index.js';
+import type { GeneratedOperation as Operation } from './helpers/order-ops-arbitrary.js';
+import { makeOperationSequenceArb } from './helpers/order-ops-arbitrary.js';
 import type { HarnessEvent, HarnessProcessDbOperations } from './helpers/test-harness.js';
 import {
   cleanupBetweenTestsForFixture,
@@ -33,40 +35,6 @@ const ordersByStatus = pulse(orders)
   .query((ctx) => ctx.query({ status: ctx.args.status }));
 const registry = createPulseRegistry({ ordersByStatus });
 
-type InsertOperation = {
-  type: 'insert';
-  ref: number;
-  status: HarnessOrderStatus;
-  price: number;
-  assignDriver: boolean;
-};
-
-type UpdateOperation = {
-  type: 'update';
-  ref: number;
-  status?: HarnessOrderStatus;
-  price?: number;
-  driverMode?: 'set' | 'clear';
-};
-
-type DeleteOperation = {
-  type: 'delete';
-  ref: number;
-};
-
-type Operation = InsertOperation | UpdateOperation | DeleteOperation;
-
-type GeneratedStep = {
-  kind: 'insert' | 'update' | 'delete';
-  targetHint: number;
-  status: HarnessOrderStatus;
-  priceCents: number;
-  assignDriver: boolean;
-  touchStatus: boolean;
-  touchPrice: boolean;
-  touchDriver: boolean;
-};
-
 type ExecutionResult = {
   sequenceLength: number;
   clientRows: Record<string, unknown>[];
@@ -75,33 +43,9 @@ type ExecutionResult = {
   pullSnapshot: number;
 };
 
-const statusArb = fc.constantFrom<HarnessOrderStatus>(
-  'requested',
-  'accepted',
-  'completed',
-  'cancelled',
-);
-
-const generatedStepArb = fc.record<GeneratedStep>({
-  kind: fc.constantFrom('insert', 'update', 'delete'),
-  targetHint: fc.nat(100),
-  status: statusArb,
-  priceCents: fc.integer({ min: 500, max: 20_000 }),
-  assignDriver: fc.boolean(),
-  touchStatus: fc.boolean(),
-  touchPrice: fc.boolean(),
-  touchDriver: fc.boolean(),
-});
-
-const operationSequenceArb = fc
-  .array(generatedStepArb, { minLength: 1, maxLength: 8 })
-  .map((steps) => normalizeSteps(steps));
+const operationSequenceArb = makeOperationSequenceArb({ minLength: 1, maxLength: 8 });
 
 const concurrentInsertCountArb = fc.integer({ min: 1, max: 8 });
-
-function formatPrice(cents: number): number {
-  return cents / 100;
-}
 
 function readNumber(value: unknown, field: string): number {
   if (typeof value !== 'number') {
@@ -120,76 +64,6 @@ function readStatus(value: unknown, field: string): HarnessOrderStatus {
     return value;
   }
   throw new Error(`Expected ${field} to be a valid HarnessOrderStatus`);
-}
-
-function normalizeSteps(steps: ReadonlyArray<GeneratedStep>): Operation[] {
-  const operations: Operation[] = [];
-  const liveRefs: number[] = [];
-  let nextRef = 1;
-
-  for (const step of steps) {
-    if (step.kind === 'insert' || liveRefs.length === 0) {
-      const ref = nextRef;
-      nextRef += 1;
-      liveRefs.push(ref);
-      operations.push({
-        type: 'insert',
-        ref,
-        status: step.status,
-        price: formatPrice(step.priceCents),
-        assignDriver: step.assignDriver,
-      });
-      continue;
-    }
-
-    if (step.kind === 'update') {
-      const targetIndex = step.targetHint % liveRefs.length;
-      const targetRef = liveRefs[targetIndex];
-      if (targetRef === undefined) {
-        continue;
-      }
-
-      const updateOperation: UpdateOperation = {
-        type: 'update',
-        ref: targetRef,
-      };
-
-      if (step.touchStatus) {
-        updateOperation.status = step.status;
-      }
-      if (step.touchPrice) {
-        updateOperation.price = formatPrice(step.priceCents);
-      }
-      if (step.touchDriver) {
-        updateOperation.driverMode = step.assignDriver ? 'set' : 'clear';
-      }
-
-      if (
-        updateOperation.status === undefined &&
-        updateOperation.price === undefined &&
-        updateOperation.driverMode === undefined
-      ) {
-        updateOperation.status = step.status;
-      }
-
-      operations.push(updateOperation);
-      continue;
-    }
-
-    const targetIndex = step.targetHint % liveRefs.length;
-    const targetRef = liveRefs[targetIndex];
-    if (targetRef === undefined) {
-      continue;
-    }
-
-    operations.push({
-      type: 'delete',
-      ref: targetRef,
-    });
-    liveRefs.splice(targetIndex, 1);
-  }
-
-  return operations;
 }
 
 function extractPkList(rows: ReadonlyArray<Record<string, unknown>>): number[] {
