@@ -9,41 +9,15 @@
  * tears itself down in a `finally` block.
  */
 
-import { afterAll, describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createPulseClient, createPulseEvents } from 'drizzle-pulse/client/embedded';
 import { createPulseRegistry, expose, LogLevel } from 'drizzle-pulse/server';
-import type { Pool } from 'pg';
 import postgres from 'postgres';
 import { orders, ordersByStatusArgsSchema } from './fixtures/minimal-orders/schema.js';
-import {
-  baseDatabaseUrl,
-  buildDatabaseUrl,
-  createQuietPool,
-  randomSuffix,
-  withQuietPostgresUrl,
-} from './helpers/test-harness.js';
-
-const adminPool = createQuietPool(baseDatabaseUrl());
-
-afterAll(async () => {
-  await adminPool.end();
-});
-
-// Bounded async poller — WAL tap delivery and walsender slot teardown both lag a scheduling
-// beat behind the triggering statement, so poll rather than assert synchronously.
-async function waitFor(
-  predicate: () => boolean | Promise<boolean>,
-  timeoutMs = 5000,
-  pollIntervalMs = 25,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!(await predicate())) {
-    if (Date.now() >= deadline) throw new Error(`waitFor timed out after ${timeoutMs}ms`);
-    await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
-  }
-}
+import { createScenarioDb, waitFor } from './helpers/scenario.js';
+import { withQuietPostgresUrl } from './helpers/test-harness.js';
 
 const ordersByStatus = pulse(orders)
   .args(ordersByStatusArgsSchema)
@@ -55,38 +29,32 @@ function buildRegistry() {
 }
 
 async function setupPullFalseScenario(label: string) {
-  const databaseName = `pulse_pullfalse_${label}_${randomSuffix()}`;
-  await adminPool.query(`CREATE DATABASE "${databaseName}"`);
-  const databaseUrl = buildDatabaseUrl(baseDatabaseUrl(), databaseName);
-  const pool = createQuietPool(databaseUrl);
-
-  await pool.query(`
-    CREATE TABLE "orders" (
-      "id" serial PRIMARY KEY,
-      "driver_id" integer,
-      "status" text DEFAULT 'requested' NOT NULL,
-      "price" numeric NOT NULL,
-      "created_at" timestamp with time zone DEFAULT now() NOT NULL
-    )
-  `);
+  const scenario = await createScenarioDb(`pulse_pullfalse_${label}`);
   // Deliberately absent: the publication — reconcile() still self-provisions it under
   // pull:false (embedded needs WAL, per A3). REPLICA IDENTITY is left untouched under
   // pull:false (RIF-02): the tap decodes old-tuple data via oldKind/unchanged instead.
-
   const publicationName = `pullfalse_pub_${label}`;
   const slotName = `pullfalse_slot_${label}`;
-  const sourceSql = postgres(withQuietPostgresUrl(databaseUrl));
+  const sourceSql = postgres(withQuietPostgresUrl(scenario.databaseUrl));
 
   const registry = buildRegistry();
   const runtime = expose(registry, {
-    databaseUrl,
+    databaseUrl: scenario.databaseUrl,
     sourceDb: drizzle({ client: sourceSql }),
     pull: false,
     wal: { publicationName, slotName },
     logLevel: LogLevel.Error,
   });
 
-  return { databaseName, pool, sourceSql, publicationName, slotName, runtime };
+  return {
+    databaseName: scenario.databaseName,
+    sql: scenario.sql,
+    sourceSql,
+    publicationName,
+    slotName,
+    runtime,
+    drop: scenario.drop,
+  };
 }
 
 type PullFalseScenario = Awaited<ReturnType<typeof setupPullFalseScenario>>;
@@ -99,28 +67,11 @@ async function teardownScenario(
     await s.runtime.stop();
   }
   await s.sourceSql.end();
-  await s.pool.end();
-
-  // The temporary slot (D-01) is dropped by Postgres once the replication connection's
-  // backend actually terminates, which lags stop()'s rep.end() by a beat — DROP DATABASE
-  // fails with "used by an active logical replication slot" if it races ahead of that.
-  await waitFor(async () => {
-    const { rows } = await adminPool.query(
-      `SELECT 1 FROM pg_replication_slots WHERE database = $1`,
-      [s.databaseName],
-    );
-    return rows.length === 0;
-  });
-
-  await adminPool.query(
-    `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
-    [s.databaseName],
-  );
-  await adminPool.query(`DROP DATABASE IF EXISTS "${s.databaseName}"`);
+  await s.drop();
 }
 
-async function eventsSchemaRelationCount(pool: Pool): Promise<number> {
-  const { rows } = await pool.query(
+async function eventsSchemaRelationCount(sql: PullFalseScenario['sql']): Promise<number> {
+  const rows = await sql.unsafe(
     `SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'drizzle_pulse'`,
   );
   return rows.length;
@@ -133,20 +84,20 @@ describe('pull: false — embedded-only runtime writes nothing to events tables 
       await s.runtime.start();
       expect(s.runtime.isRunning).toBe(true);
 
-      expect(await eventsSchemaRelationCount(s.pool)).toBe(0);
+      expect(await eventsSchemaRelationCount(s.sql)).toBe(0);
 
-      const members = await s.pool.query<{ tablename: string }>(
+      const members = await s.sql.unsafe<{ tablename: string }[]>(
         `SELECT tablename FROM pg_publication_tables WHERE pubname = $1`,
         [s.publicationName],
       );
-      expect(members.rows.map((row) => row.tablename)).toEqual(['orders']);
+      expect(members.map((row) => row.tablename)).toEqual(['orders']);
 
       // pull:false never forces REPLICA IDENTITY FULL (RIF-02) — zero durable mutation of user
       // tables at boot, no ACCESS EXCLUSIVE lock.
-      const replicaIdentity = await s.pool.query<{ relreplident: string }>(
+      const replicaIdentity = await s.sql.unsafe<{ relreplident: string }[]>(
         `SELECT relreplident FROM pg_class WHERE relname = 'orders'`,
       );
-      expect(replicaIdentity.rows[0]?.relreplident).toBe('d');
+      expect(replicaIdentity[0]?.relreplident).toBe('d');
     } finally {
       await teardownScenario(s);
     }
@@ -167,22 +118,22 @@ describe('pull: false — embedded-only runtime writes nothing to events tables 
     try {
       await s.runtime.start();
 
-      const slots = await s.pool.query<{ slot_name: string; temporary: boolean }>(
+      const slots = await s.sql.unsafe<{ slot_name: string; temporary: boolean }[]>(
         `SELECT slot_name, temporary FROM pg_replication_slots WHERE slot_name LIKE $1`,
         [`${s.slotName}\\_%`],
       );
-      expect(slots.rows).toHaveLength(1);
-      expect(slots.rows[0]?.slot_name).not.toBe(s.slotName);
-      expect(slots.rows[0]?.temporary).toBe(true);
+      expect(slots).toHaveLength(1);
+      expect(slots[0]?.slot_name).not.toBe(s.slotName);
+      expect(slots[0]?.temporary).toBe(true);
 
       await s.runtime.stop();
 
       await waitFor(async () => {
-        const remaining = await s.pool.query(
+        const remaining = await s.sql.unsafe(
           `SELECT 1 FROM pg_replication_slots WHERE slot_name LIKE $1`,
           [`${s.slotName}\\_%`],
         );
-        return remaining.rows.length === 0;
+        return remaining.length === 0;
       });
     } finally {
       await teardownScenario(s, { alreadyStopped: true });
@@ -199,10 +150,10 @@ describe('pull: false — embedded-only runtime writes nothing to events tables 
       // column). This is the exact case that breaks if RIF-02 (key-only old tuple) had landed
       // before RIF-01 (pk-membership delete detection): a where-evaluation against a tuple
       // missing `status` would silently keep the row.
-      const replicaIdentity = await s.pool.query<{ relreplident: string }>(
+      const replicaIdentity = await s.sql.unsafe<{ relreplident: string }[]>(
         `SELECT relreplident FROM pg_class WHERE relname = 'orders'`,
       );
-      expect(replicaIdentity.rows[0]?.relreplident).toBe('d');
+      expect(replicaIdentity[0]?.relreplident).toBe('d');
 
       const client = createPulseClient(s.runtime);
       const events = createPulseEvents(s.runtime);
@@ -215,7 +166,7 @@ describe('pull: false — embedded-only runtime writes nothing to events tables 
 
       const collection = await collectionPromise;
 
-      await s.pool.query(
+      await s.sql.unsafe(
         `INSERT INTO "orders" (driver_id, status, price) VALUES (1, 'accepted', 10)`,
       );
       await waitFor(() => collection.list().length === 1 && eventLog.length === 1);
@@ -224,24 +175,24 @@ describe('pull: false — embedded-only runtime writes nothing to events tables 
 
       const insertedId = collection.list()[0]?.id as number;
 
-      await s.pool.query(`UPDATE "orders" SET status = 'completed' WHERE id = $1`, [insertedId]);
+      await s.sql.unsafe(`UPDATE "orders" SET status = 'completed' WHERE id = $1`, [insertedId]);
       await waitFor(() => collection.list().length === 0 && eventLog.length === 2);
       expect(eventLog[1]?.op).toBe('update');
 
-      await s.pool.query(
+      await s.sql.unsafe(
         `INSERT INTO "orders" (driver_id, status, price) VALUES (1, 'accepted', 20)`,
       );
       await waitFor(() => collection.list().length === 1 && eventLog.length === 3);
       expect(eventLog[2]?.op).toBe('insert');
       const secondId = collection.list()[0]?.id as number;
 
-      await s.pool.query(`DELETE FROM "orders" WHERE id = $1`, [secondId]);
+      await s.sql.unsafe(`DELETE FROM "orders" WHERE id = $1`, [secondId]);
       await waitFor(() => collection.list().length === 0 && eventLog.length === 4);
       expect(eventLog[3]?.op).toBe('delete');
 
       // No events-table infrastructure appeared as a side effect of the insert/update/delete
       // cycle above — persistence stayed off for the entire lifecycle, not just at boot.
-      expect(await eventsSchemaRelationCount(s.pool)).toBe(0);
+      expect(await eventsSchemaRelationCount(s.sql)).toBe(0);
 
       unsub();
       collection.dispose();
@@ -261,7 +212,7 @@ describe('pull: false — embedded-only runtime writes nothing to events tables 
         captured.push(event);
       });
 
-      await s.pool.query(
+      await s.sql.unsafe(
         `INSERT INTO "orders" (driver_id, status, price) VALUES (1, 'accepted', 10)`,
       );
       await waitFor(() => captured.length === 1);
@@ -269,7 +220,7 @@ describe('pull: false — embedded-only runtime writes nothing to events tables 
       expect(Object.keys(insertEvent).sort()).toEqual(['op', 'pk', 'row']);
       const insertedId = insertEvent.pk as number;
 
-      await s.pool.query(`UPDATE "orders" SET price = 20 WHERE id = $1`, [insertedId]);
+      await s.sql.unsafe(`UPDATE "orders" SET price = 20 WHERE id = $1`, [insertedId]);
       await waitFor(() => captured.length === 2);
       const updateEvent = captured[1] as Record<string, unknown>;
       expect(updateEvent).toHaveProperty('matchesNew');
@@ -278,7 +229,7 @@ describe('pull: false — embedded-only runtime writes nothing to events tables 
       // The sanctioned wire break (RIF-01/RIF-02): a pull:false delete's old_row is pk-only —
       // no non-key data columns, regardless of the subscriber's WHERE. Any future field
       // addition/removal on this shape must consciously edit this pin.
-      await s.pool.query(`DELETE FROM "orders" WHERE id = $1`, [insertedId]);
+      await s.sql.unsafe(`DELETE FROM "orders" WHERE id = $1`, [insertedId]);
       await waitFor(() => captured.length === 3);
       const deleteEvent = captured[2] as Record<string, unknown>;
       expect(Object.keys(deleteEvent).sort()).toEqual(['old_row', 'op', 'pk']);
@@ -307,35 +258,35 @@ describe('pull: false — embedded-only runtime writes nothing to events tables 
       const client = createPulseClient(s.runtime);
       const collection = await client.ordersByStatus({ status: 'accepted' });
 
-      await s.pool.query(
+      await s.sql.unsafe(
         `INSERT INTO "orders" (driver_id, status, price) VALUES (1, 'accepted', 10)`,
       );
       await waitFor(() => collection.list().length === 1);
 
       // Locate the active temp slot (D-01: randomized-suffix, never the base slotName) and its
       // walsender backend.
-      const before = await s.pool.query<{ slot_name: string; active_pid: number | null }>(
+      const before = await s.sql.unsafe<{ slot_name: string; active_pid: number | null }[]>(
         `SELECT slot_name, active_pid FROM pg_replication_slots WHERE slot_name LIKE $1`,
         [`${s.slotName}\\_%`],
       );
-      expect(before.rows).toHaveLength(1);
-      const killedSlotName = before.rows[0]?.slot_name;
-      const activePid = before.rows[0]?.active_pid;
+      expect(before).toHaveLength(1);
+      const killedSlotName = before[0]?.slot_name;
+      const activePid = before[0]?.active_pid;
       expect(activePid).not.toBeNull();
 
       // Terminate only — do NOT drop. The temporary slot vanishes with its backend once the
       // reconnect creates a fresh one (D-01); dropping it ourselves would be redundant and could
       // race the server's own cleanup.
-      await s.pool.query(`SELECT pg_terminate_backend($1)`, [activePid]);
+      await s.sql.unsafe(`SELECT pg_terminate_backend($1)`, [activePid ?? null]);
 
       // Downtime write while disconnected, before the reconnect lands.
-      await s.pool.query(
+      await s.sql.unsafe(
         `INSERT INTO "orders" (driver_id, status, price) VALUES (2, 'accepted', 20)`,
       );
 
       // First reconnect lands ~1-2s after the edge (RECONNECT_BASE_DELAY_MS * 2^0 + jitter).
       await waitFor(async () => {
-        const { rows } = await s.pool.query<{ slot_name: string }>(
+        const rows = await s.sql.unsafe<{ slot_name: string }[]>(
           `SELECT slot_name FROM pg_replication_slots WHERE slot_name LIKE $1`,
           [`${s.slotName}\\_%`],
         );
@@ -351,7 +302,7 @@ describe('pull: false — embedded-only runtime writes nothing to events tables 
       expect(terminalError).toBeNull();
 
       // Post-recovery liveness: the pipeline keeps delivering after the reconnect settles.
-      await s.pool.query(
+      await s.sql.unsafe(
         `INSERT INTO "orders" (driver_id, status, price) VALUES (3, 'accepted', 30)`,
       );
       await waitFor(() => collection.list().length === 3);

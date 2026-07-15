@@ -6,90 +6,52 @@
  * test-isolation convention and tears itself down in a finally block.
  */
 
-import { afterAll, describe, expect, spyOn, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createPulseRegistry, expose, LogLevel } from 'drizzle-pulse/server';
-import type { Pool } from 'pg';
 import postgres from 'postgres';
 import { orders } from './fixtures/minimal-orders/schema.js';
-import {
-  baseDatabaseUrl,
-  buildDatabaseUrl,
-  createQuietPool,
-  randomSuffix,
-  withQuietPostgresUrl,
-} from './helpers/test-harness.js';
-
-const adminPool = createQuietPool(baseDatabaseUrl());
-
-afterAll(async () => {
-  await adminPool.end();
-});
+import { createScenarioDb, waitFor } from './helpers/scenario.js';
+import { withQuietPostgresUrl } from './helpers/test-harness.js';
 
 async function setupHealthyScenario(label: string, logLevel: LogLevel = LogLevel.Error) {
-  const databaseName = `pulse_reconcile_${label}_${randomSuffix()}`;
-  await adminPool.query(`CREATE DATABASE "${databaseName}"`);
-  const databaseUrl = buildDatabaseUrl(baseDatabaseUrl(), databaseName);
-  const pool = createQuietPool(databaseUrl);
+  const scenario = await createScenarioDb(`pulse_reconcile_${label}`);
+  await scenario.sql.unsafe('ALTER TABLE "orders" REPLICA IDENTITY FULL');
+  await scenario.sql.unsafe(`CREATE PUBLICATION reconcile_pub_${label} FOR ALL TABLES`);
 
-  await pool.query(`
-    CREATE TABLE "orders" (
-      "id" serial PRIMARY KEY,
-      "driver_id" integer,
-      "status" text DEFAULT 'requested' NOT NULL,
-      "price" numeric NOT NULL,
-      "created_at" timestamp with time zone DEFAULT now() NOT NULL
-    )
-  `);
-  await pool.query('ALTER TABLE "orders" REPLICA IDENTITY FULL');
-  await pool.query(`CREATE PUBLICATION reconcile_pub_${label} FOR ALL TABLES`);
-
-  const sourceSql = postgres(withQuietPostgresUrl(databaseUrl));
+  const sourceSql = postgres(withQuietPostgresUrl(scenario.databaseUrl));
   const registry = createPulseRegistry({ orders: pulse(orders).query() });
   const runtime = expose(registry, {
-    databaseUrl,
+    databaseUrl: scenario.databaseUrl,
     sourceDb: drizzle({ client: sourceSql }),
     pull: true,
     wal: { publicationName: `reconcile_pub_${label}`, slotName: `reconcile_slot_${label}` },
     logLevel,
   });
 
-  return { databaseName, pool, sourceSql, runtime };
+  return {
+    databaseName: scenario.databaseName,
+    databaseUrl: scenario.databaseUrl,
+    sql: scenario.sql,
+    sourceSql,
+    runtime,
+    drop: scenario.drop,
+  };
 }
 
-async function teardownScenario(scenario: {
-  databaseName: string;
-  pool: Pool;
-  sourceSql: ReturnType<typeof postgres>;
-}): Promise<void> {
+type HealthyScenario = Awaited<ReturnType<typeof setupHealthyScenario>>;
+
+async function teardownScenario(scenario: HealthyScenario): Promise<void> {
   await scenario.sourceSql.end();
-  await scenario.pool.end();
-  await adminPool.query(
-    `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
-    [scenario.databaseName],
-  );
-  await adminPool.query(`DROP DATABASE IF EXISTS "${scenario.databaseName}"`);
+  await scenario.drop();
 }
 
-async function metaEpoch(pool: Pool): Promise<string | undefined> {
-  const { rows } = await pool.query<{ epoch: string }>(
+async function metaEpoch(sql: HealthyScenario['sql']): Promise<string | undefined> {
+  const rows = await sql.unsafe<{ epoch: string }[]>(
     `SELECT epoch FROM drizzle_pulse.pulse_meta WHERE table_name = 'public_orders'`,
   );
   return rows[0]?.epoch;
-}
-
-// Bounded async poller — avoids fixed sleeps while bounding test duration.
-async function waitFor(
-  predicate: () => boolean | Promise<boolean>,
-  timeoutMs = 10000,
-  pollIntervalMs = 100,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!(await predicate())) {
-    if (Date.now() >= deadline) throw new Error(`waitFor timed out after ${timeoutMs}ms`);
-    await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
-  }
 }
 
 // Poll-retry a slot drop (cloned from slot-recovery.test.ts): the previous owning backend's
@@ -97,10 +59,10 @@ async function waitFor(
 // hit 55006 (object_in_use). Reconcile scenarios never created a persistent slot before (only
 // provision() was exercised) — a full start() does, and G6 must drop it or leak against the
 // shared container's 4-slot budget.
-async function dropSlotWithRetry(pool: Pool, slotName: string): Promise<void> {
+async function dropSlotWithRetry(sql: HealthyScenario['sql'], slotName: string): Promise<void> {
   await waitFor(async () => {
     try {
-      await pool.query(`SELECT pg_drop_replication_slot($1)`, [slotName]);
+      await sql.unsafe(`SELECT pg_drop_replication_slot($1)`, [slotName]);
       return true;
     } catch (e) {
       const code = (e as { code?: string }).code;
@@ -111,25 +73,24 @@ async function dropSlotWithRetry(pool: Pool, slotName: string): Promise<void> {
   }, 5000);
 }
 
-async function streamLastLsn(pool: Pool, slotName: string): Promise<string | undefined> {
-  const { rows } = await pool.query<{ last_lsn: string }>(
+async function streamLastLsn(
+  sql: HealthyScenario['sql'],
+  slotName: string,
+): Promise<string | undefined> {
+  const rows = await sql.unsafe<{ last_lsn: string }[]>(
     `SELECT last_lsn FROM drizzle_pulse.pulse_stream WHERE slot_name = $1`,
     [slotName],
   );
   return rows[0]?.last_lsn;
 }
 
-async function snapshotRowCount(pool: Pool): Promise<number> {
-  const { rows } = await pool.query(
-    `SELECT 1 FROM drizzle_pulse.public_orders WHERE "$op" = 'snapshot'`,
-  );
+async function snapshotRowCount(sql: HealthyScenario['sql']): Promise<number> {
+  const rows = await sql.unsafe(`SELECT 1 FROM drizzle_pulse.public_orders WHERE "$op" = 'snapshot'`);
   return rows.length;
 }
 
-async function nonSnapshotEventCount(pool: Pool): Promise<number> {
-  const { rows } = await pool.query(
-    `SELECT 1 FROM drizzle_pulse.public_orders WHERE "$op" <> 'snapshot'`,
-  );
+async function nonSnapshotEventCount(sql: HealthyScenario['sql']): Promise<number> {
+  const rows = await sql.unsafe(`SELECT 1 FROM drizzle_pulse.public_orders WHERE "$op" <> 'snapshot'`);
   return rows.length;
 }
 
@@ -141,8 +102,11 @@ async function nonSnapshotEventCount(pool: Pool): Promise<number> {
 // observed confirmed_flush_lsn reproduces the precondition deterministically, isolating the
 // reconcile()-level DDL-divergence recreate this test targets from the separate (and here
 // irrelevant) question of whether the slot itself gets recreated. No production code changes.
-async function seedContinuousWatermark(pool: Pool, slotName: string): Promise<string> {
-  const { rows } = await pool.query<{ confirmed_flush_lsn: string | null }>(
+async function seedContinuousWatermark(
+  sql: HealthyScenario['sql'],
+  slotName: string,
+): Promise<string> {
+  const rows = await sql.unsafe<{ confirmed_flush_lsn: string | null }[]>(
     `SELECT confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name = $1`,
     [slotName],
   );
@@ -150,7 +114,7 @@ async function seedContinuousWatermark(pool: Pool, slotName: string): Promise<st
   if (!confirmedFlushLsn) {
     throw new Error(`no confirmed_flush_lsn found for slot '${slotName}'`);
   }
-  await pool.query(`UPDATE drizzle_pulse.pulse_stream SET last_lsn = $2 WHERE slot_name = $1`, [
+  await sql.unsafe(`UPDATE drizzle_pulse.pulse_stream SET last_lsn = $2 WHERE slot_name = $1`, [
     slotName,
     confirmedFlushLsn,
   ]);
@@ -183,17 +147,17 @@ describe('runtime-owned events-table reconcile', () => {
     try {
       await s.runtime.provision();
 
-      const table = await s.pool.query(
+      const table = await s.sql.unsafe(
         `SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'drizzle_pulse' AND c.relname = 'public_orders' AND c.relkind = 'r'`,
       );
-      expect(table.rows).toHaveLength(1);
+      expect(table).toHaveLength(1);
 
-      const meta = await s.pool.query<{ ddl_hash: string; epoch: string }>(
+      const meta = await s.sql.unsafe<{ ddl_hash: string; epoch: string }[]>(
         `SELECT ddl_hash, epoch FROM drizzle_pulse.pulse_meta WHERE table_name = 'public_orders'`,
       );
-      expect(meta.rows).toHaveLength(1);
-      expect(meta.rows[0]?.ddl_hash).toBeTruthy();
-      expect(s.runtime.getEpochForQuery('orders')).toBe(meta.rows[0]?.epoch);
+      expect(meta).toHaveLength(1);
+      expect(meta[0]?.ddl_hash).toBeTruthy();
+      expect(s.runtime.getEpochForQuery('orders')).toBe(meta[0]?.epoch);
     } finally {
       await teardownScenario(s);
     }
@@ -204,11 +168,11 @@ describe('runtime-owned events-table reconcile', () => {
     try {
       await s.runtime.provision();
       const firstEpoch = s.runtime.getEpochForQuery('orders');
-      const firstDbEpoch = await metaEpoch(s.pool);
+      const firstDbEpoch = await metaEpoch(s.sql);
 
       await s.runtime.provision();
       expect(s.runtime.getEpochForQuery('orders')).toBe(firstEpoch);
-      expect(await metaEpoch(s.pool)).toBe(firstDbEpoch);
+      expect(await metaEpoch(s.sql)).toBe(firstDbEpoch);
     } finally {
       await teardownScenario(s);
     }
@@ -223,7 +187,7 @@ describe('runtime-owned events-table reconcile', () => {
 
       // Simulate a shape change without redefining the source table: corrupt the stored hash
       // so it no longer matches the freshly rendered DDL.
-      await s.pool.query(
+      await s.sql.unsafe(
         `UPDATE drizzle_pulse.pulse_meta SET ddl_hash = 'stale' WHERE table_name = 'public_orders'`,
       );
 
@@ -231,7 +195,7 @@ describe('runtime-owned events-table reconcile', () => {
       const secondEpoch = s.runtime.getEpochForQuery('orders');
       expect(secondEpoch).toBeTruthy();
       expect(secondEpoch).not.toBe(firstEpoch);
-      expect(await metaEpoch(s.pool)).toBe(secondEpoch);
+      expect(await metaEpoch(s.sql)).toBe(secondEpoch);
     } finally {
       await teardownScenario(s);
     }
@@ -245,37 +209,37 @@ describe('runtime-owned events-table reconcile', () => {
 
       // A meta-registered orphan (a table + pulse_meta row for a source no longer registered)
       // and an unmanaged physical table (no pulse_meta row) sharing the events schema.
-      await s.pool.query('CREATE TABLE drizzle_pulse.public_ghost ("id" integer)');
-      await s.pool.query(
+      await s.sql.unsafe('CREATE TABLE drizzle_pulse.public_ghost ("id" integer)');
+      await s.sql.unsafe(
         `INSERT INTO drizzle_pulse.pulse_meta (table_name, ddl_hash, epoch) VALUES ('public_ghost', 'h', gen_random_uuid())`,
       );
-      await s.pool.query('CREATE TABLE drizzle_pulse.stray ("id" integer)');
+      await s.sql.unsafe('CREATE TABLE drizzle_pulse.stray ("id" integer)');
 
       warnSpy.mockClear();
       await s.runtime.provision();
 
-      const ghostTable = await s.pool.query(
+      const ghostTable = await s.sql.unsafe(
         `SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'drizzle_pulse' AND c.relname = 'public_ghost'`,
       );
-      expect(ghostTable.rows).toHaveLength(0);
-      const ghostMeta = await s.pool.query(
+      expect(ghostTable).toHaveLength(0);
+      const ghostMeta = await s.sql.unsafe(
         `SELECT 1 FROM drizzle_pulse.pulse_meta WHERE table_name = 'public_ghost'`,
       );
-      expect(ghostMeta.rows).toHaveLength(0);
+      expect(ghostMeta).toHaveLength(0);
 
       // Unmanaged table is left untouched, but warned about.
-      const strayTable = await s.pool.query(
+      const strayTable = await s.sql.unsafe(
         `SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'drizzle_pulse' AND c.relname = 'stray'`,
       );
-      expect(strayTable.rows).toHaveLength(1);
+      expect(strayTable).toHaveLength(1);
       const warnedStray = warnSpy.mock.calls.some((call) => String(call[0]).includes('stray'));
       expect(warnedStray).toBe(true);
 
       // The registered events table survives the sweep.
-      const ordersTable = await s.pool.query(
+      const ordersTable = await s.sql.unsafe(
         `SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'drizzle_pulse' AND c.relname = 'public_orders'`,
       );
-      expect(ordersTable.rows).toHaveLength(1);
+      expect(ordersTable).toHaveLength(1);
     } finally {
       warnSpy.mockRestore();
       await teardownScenario(s);
@@ -285,7 +249,6 @@ describe('runtime-owned events-table reconcile', () => {
   test('DDL divergence at boot with an intact slot: start() recreates, reseeds via ensureBaselines, resumes the slot, and streams (G6)', async () => {
     const label = 'g6full';
     const s = await setupHealthyScenario(label);
-    const databaseUrl = buildDatabaseUrl(baseDatabaseUrl(), s.databaseName);
     const slotName = `reconcile_slot_${label}`;
 
     let epoch1: string | undefined;
@@ -297,14 +260,14 @@ describe('runtime-owned events-table reconcile', () => {
         // slot (unlike the provision()-only tests above, which never open a replication stream).
         await s.runtime.start();
 
-        await s.pool.query(
+        await s.sql.unsafe(
           `INSERT INTO "orders" (driver_id, status, price) VALUES (1, 'accepted', 10)`,
         );
-        await waitFor(async () => (await nonSnapshotEventCount(s.pool)) >= 1);
+        await waitFor(async () => (await nonSnapshotEventCount(s.sql)) >= 1);
 
-        epoch1 = await metaEpoch(s.pool);
+        epoch1 = await metaEpoch(s.sql);
         expect(epoch1).toBeDefined();
-        lsn1 = await streamLastLsn(s.pool, slotName);
+        lsn1 = await streamLastLsn(s.sql, slotName);
         expect(lsn1).toBeDefined();
       } finally {
         // Clean stop — the pull:true slot is persistent and survives it, intact.
@@ -313,7 +276,7 @@ describe('runtime-owned events-table reconcile', () => {
 
       // Corrupt the stored hash exactly as the divergence test above does, forcing reconcile()
       // to recreate the events table and rotate the epoch on the next boot.
-      await s.pool.query(
+      await s.sql.unsafe(
         `UPDATE drizzle_pulse.pulse_meta SET ddl_hash = 'stale' WHERE table_name = 'public_orders'`,
       );
 
@@ -321,23 +284,23 @@ describe('runtime-owned events-table reconcile', () => {
       // watermark-vs-confirmed_flush gap so resolveSlotStartup's continuity precondition
       // actually holds — this test's "slot resumed, not recreated" assertion needs the real
       // resume branch, isolated from the reconcile()-level recreate it targets.
-      lsn1 = await seedContinuousWatermark(s.pool, slotName);
+      lsn1 = await seedContinuousWatermark(s.sql, slotName);
 
       const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
-      const second = buildSecondRuntime(databaseUrl, label);
+      const second = buildSecondRuntime(s.databaseUrl, label);
       try {
         await second.runtime.start();
 
         // Epoch rotated exactly once by reconcile()'s DDL-divergence recreate.
-        const epoch2 = await metaEpoch(s.pool);
+        const epoch2 = await metaEpoch(s.sql);
         expect(epoch2).toBeDefined();
         expect(epoch2).not.toBe(epoch1);
         expect(second.runtime.getEpochForQuery('orders')).toBe(epoch2);
 
         // The recreated table holds ensureBaselines' snapshot seed and none of the
         // pre-divergence event rows (TRUNCATEd by reconcile()'s recreate).
-        expect(await snapshotRowCount(s.pool)).toBeGreaterThanOrEqual(1);
-        expect(await nonSnapshotEventCount(s.pool)).toBe(0);
+        expect(await snapshotRowCount(s.sql)).toBeGreaterThanOrEqual(1);
+        expect(await nonSnapshotEventCount(s.sql)).toBe(0);
 
         // The slot itself was resumed, not recreated: no recreate log, and pulse_stream.last_lsn
         // is exactly the value it held before this boot (recoverSlot would have overwritten it
@@ -345,20 +308,20 @@ describe('runtime-owned events-table reconcile', () => {
         expect(
           errorSpy.mock.calls.some((call: unknown[]) => String(call[0]).includes('recreated')),
         ).toBe(false);
-        expect(await streamLastLsn(s.pool, slotName)).toBe(lsn1);
+        expect(await streamLastLsn(s.sql, slotName)).toBe(lsn1);
 
         // The pipeline is live end-to-end on the recreated events table.
-        await s.pool.query(
+        await s.sql.unsafe(
           `INSERT INTO "orders" (driver_id, status, price) VALUES (2, 'accepted', 20)`,
         );
-        await waitFor(async () => (await nonSnapshotEventCount(s.pool)) >= 1);
+        await waitFor(async () => (await nonSnapshotEventCount(s.sql)) >= 1);
       } finally {
         errorSpy.mockRestore();
         await second.runtime.stop();
         await second.sourceSql.end();
       }
     } finally {
-      await dropSlotWithRetry(s.pool, slotName).catch(() => {});
+      await dropSlotWithRetry(s.sql, slotName).catch(() => {});
       await teardownScenario(s);
     }
   });

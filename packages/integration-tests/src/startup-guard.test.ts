@@ -12,92 +12,49 @@
  * database/publication/slot and tears itself down in a `finally` block.
  */
 
-import { afterAll, describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createPulseRegistry, expose, LogLevel } from 'drizzle-pulse/server';
-import type { Pool } from 'pg';
 import postgres from 'postgres';
 import { orders } from './fixtures/minimal-orders/schema.js';
-import {
-  baseDatabaseUrl,
-  buildDatabaseUrl,
-  createQuietPool,
-  randomSuffix,
-  withQuietPostgresUrl,
-} from './helpers/test-harness.js';
-
-// A single shared admin pool (connected to the base `postgres` database) creates/drops
-// every scenario's standalone database and cleans up cluster-wide replication slots —
-// mirrors the harness's own adminPool idiom.
-const adminPool = createQuietPool(baseDatabaseUrl());
-
-afterAll(async () => {
-  await adminPool.end();
-});
+import { createScenarioDb } from './helpers/scenario.js';
+import { randomSuffix, withQuietPostgresUrl } from './helpers/test-harness.js';
 
 type GuardScenarioContext = {
-  databaseName: string;
   databaseUrl: string;
-  pool: Pool;
+  sql: ReturnType<typeof postgres>;
+  drop: () => Promise<void>;
 };
 
+// The `orders` source table is provisioned by createScenarioDb's default DDL — deliberately
+// absent: the publication AND REPLICA IDENTITY FULL, which reconcile() self-provisions.
 async function setupGuardScenario(scenario: string): Promise<GuardScenarioContext> {
-  const base = baseDatabaseUrl();
-  const databaseName = `pulse_guard_${scenario}_${randomSuffix()}`;
-  await adminPool.query(`CREATE DATABASE "${databaseName}"`);
-  const databaseUrl = buildDatabaseUrl(base, databaseName);
-  const pool = createQuietPool(databaseUrl);
-  return { databaseName, databaseUrl, pool };
+  const s = await createScenarioDb(`pulse_guard_${scenario}`);
+  return { databaseUrl: s.databaseUrl, sql: s.sql, drop: s.drop };
 }
 
 async function teardownGuardScenario(ctx: GuardScenarioContext): Promise<void> {
-  await ctx.pool.end();
-  await adminPool.query(
-    `
-      SELECT pg_terminate_backend(pid)
-      FROM pg_stat_activity
-      WHERE datname = $1
-        AND pid <> pg_backend_pid()
-    `,
-    [ctx.databaseName],
-  );
-  await adminPool.query(`DROP DATABASE IF EXISTS "${ctx.databaseName}"`);
+  await ctx.drop();
 }
 
-async function dropSlotIfExists(slotName: string): Promise<void> {
-  await adminPool.query(
-    'SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1',
-    [slotName],
-  );
+async function setReplicaIdentityFull(sql: GuardScenarioContext['sql']): Promise<void> {
+  await sql.unsafe('ALTER TABLE "orders" REPLICA IDENTITY FULL');
 }
 
-async function createOrdersSourceTable(pool: Pool): Promise<void> {
-  await pool.query(`
-    CREATE TABLE "orders" (
-      "id" serial PRIMARY KEY,
-      "driver_id" integer,
-      "status" text DEFAULT 'requested' NOT NULL,
-      "price" numeric NOT NULL,
-      "created_at" timestamp with time zone DEFAULT now() NOT NULL
-    )
-  `);
-}
-
-async function setReplicaIdentityFull(pool: Pool): Promise<void> {
-  await pool.query('ALTER TABLE "orders" REPLICA IDENTITY FULL');
-}
-
-async function publicationMembers(pool: Pool, publicationName: string): Promise<string[]> {
-  const { rows } = await pool.query<{ qualified: string }>(
+async function publicationMembers(
+  sql: GuardScenarioContext['sql'],
+  publicationName: string,
+): Promise<string[]> {
+  const rows = await sql.unsafe<{ qualified: string }[]>(
     `SELECT schemaname || '.' || tablename AS qualified FROM pg_publication_tables WHERE pubname = $1 ORDER BY qualified`,
     [publicationName],
   );
   return rows.map((row) => row.qualified);
 }
 
-async function ordersReplicaIdentity(pool: Pool): Promise<string | undefined> {
-  const { rows } = await pool.query<{ relreplident: string }>(
+async function ordersReplicaIdentity(sql: GuardScenarioContext['sql']): Promise<string | undefined> {
+  const rows = await sql.unsafe<{ relreplident: string }[]>(
     `SELECT c.relreplident FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname = 'orders'`,
   );
   return rows[0]?.relreplident;
@@ -111,10 +68,6 @@ describe('Startup reconcile (self-provisioning)', () => {
     const sourceSql = postgres(withQuietPostgresUrl(ctx.databaseUrl));
 
     try {
-      await createOrdersSourceTable(ctx.pool);
-      // Deliberately absent: the publication AND REPLICA IDENTITY FULL — reconcile() creates
-      // both, so start() succeeds where it once rejected.
-
       const registry = createPulseRegistry({ orders: pulse(orders).query() });
       const runtime = expose(registry, {
         databaseUrl: ctx.databaseUrl,
@@ -126,15 +79,13 @@ describe('Startup reconcile (self-provisioning)', () => {
 
       await runtime.start();
       expect(runtime.isRunning).toBe(true);
-      expect(await publicationMembers(ctx.pool, publicationName)).toEqual(['public.orders']);
-      expect(await ordersReplicaIdentity(ctx.pool)).toBe('f');
+      expect(await publicationMembers(ctx.sql, publicationName)).toEqual(['public.orders']);
+      expect(await ordersReplicaIdentity(ctx.sql)).toBe('f');
 
       await runtime.stop();
       expect(runtime.isRunning).toBe(false);
     } finally {
       await sourceSql.end();
-      await ctx.pool.query(`DROP PUBLICATION IF EXISTS ${publicationName}`).catch(() => {});
-      await dropSlotIfExists(slotName).catch(() => {});
       await teardownGuardScenario(ctx);
     }
   });
@@ -144,7 +95,6 @@ describe('Startup reconcile (self-provisioning)', () => {
     const sourceSql = postgres(withQuietPostgresUrl(ctx.databaseUrl));
 
     try {
-      await createOrdersSourceTable(ctx.pool);
       // No wal config supplied — proves the default publication name (drizzle_pulse) flows all
       // the way into the CREATE PUBLICATION reconcile() runs. provision() avoids slot setup.
 
@@ -157,7 +107,7 @@ describe('Startup reconcile (self-provisioning)', () => {
       });
 
       await runtime.provision();
-      expect(await publicationMembers(ctx.pool, 'drizzle_pulse')).toEqual(['public.orders']);
+      expect(await publicationMembers(ctx.sql, 'drizzle_pulse')).toEqual(['public.orders']);
     } finally {
       await sourceSql.end();
       await teardownGuardScenario(ctx);
@@ -171,9 +121,8 @@ describe('Startup reconcile (self-provisioning)', () => {
     const sourceSql = postgres(withQuietPostgresUrl(ctx.databaseUrl));
 
     try {
-      await createOrdersSourceTable(ctx.pool);
-      await setReplicaIdentityFull(ctx.pool);
-      await ctx.pool.query(`CREATE PUBLICATION ${publicationName} FOR ALL TABLES`);
+      await setReplicaIdentityFull(ctx.sql);
+      await ctx.sql.unsafe(`CREATE PUBLICATION ${publicationName} FOR ALL TABLES`);
       // Deliberately absent: the events table — the runtime creates it at boot.
 
       const registry = createPulseRegistry({ orders: pulse(orders).query() });
@@ -188,22 +137,20 @@ describe('Startup reconcile (self-provisioning)', () => {
       expect(runtime.isRunning).toBe(true);
 
       // Runtime-owned DDL: boot created the events table and its pulse_meta bookkeeping row.
-      const eventsTable = await ctx.pool.query(
+      const eventsTable = await ctx.sql.unsafe(
         `SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'drizzle_pulse' AND c.relname = 'public_orders' AND c.relkind = 'r'`,
       );
-      expect(eventsTable.rows).toHaveLength(1);
-      const metaRow = await ctx.pool.query<{ epoch: string }>(
+      expect(eventsTable).toHaveLength(1);
+      const metaRow = await ctx.sql.unsafe<{ epoch: string }[]>(
         `SELECT epoch FROM drizzle_pulse.pulse_meta WHERE table_name = 'public_orders'`,
       );
-      expect(metaRow.rows).toHaveLength(1);
-      expect(runtime.getEpochForQuery('orders')).toBe(metaRow.rows[0]?.epoch);
+      expect(metaRow).toHaveLength(1);
+      expect(runtime.getEpochForQuery('orders')).toBe(metaRow[0]?.epoch);
 
       await runtime.stop();
       expect(runtime.isRunning).toBe(false);
     } finally {
       await sourceSql.end();
-      await ctx.pool.query(`DROP PUBLICATION IF EXISTS ${publicationName}`).catch(() => {});
-      await dropSlotIfExists(slotName).catch(() => {});
       await teardownGuardScenario(ctx);
     }
   });
@@ -215,12 +162,11 @@ describe('Startup reconcile (self-provisioning)', () => {
     const sourceSql = postgres(withQuietPostgresUrl(ctx.databaseUrl));
 
     try {
-      await createOrdersSourceTable(ctx.pool);
-      await setReplicaIdentityFull(ctx.pool);
-      await ctx.pool.query('CREATE TABLE "users" ("id" serial PRIMARY KEY)');
+      await setReplicaIdentityFull(ctx.sql);
+      await ctx.sql.unsafe('CREATE TABLE "users" ("id" serial PRIMARY KEY)');
       // A FOR TABLE publication missing the pulsed table but carrying an unregistered one.
       // pulse owns the publication: reconcile() ADDs orders and un-pulses (DROPs) users.
-      await ctx.pool.query(`CREATE PUBLICATION ${publicationName} FOR TABLE "users"`);
+      await ctx.sql.unsafe(`CREATE PUBLICATION ${publicationName} FOR TABLE "users"`);
 
       const registry = createPulseRegistry({ orders: pulse(orders).query() });
       const runtime = expose(registry, {
@@ -233,14 +179,12 @@ describe('Startup reconcile (self-provisioning)', () => {
 
       await runtime.start();
       expect(runtime.isRunning).toBe(true);
-      expect(await publicationMembers(ctx.pool, publicationName)).toEqual(['public.orders']);
+      expect(await publicationMembers(ctx.sql, publicationName)).toEqual(['public.orders']);
 
       await runtime.stop();
       expect(runtime.isRunning).toBe(false);
     } finally {
       await sourceSql.end();
-      await ctx.pool.query(`DROP PUBLICATION IF EXISTS ${publicationName}`).catch(() => {});
-      await dropSlotIfExists(slotName).catch(() => {});
       await teardownGuardScenario(ctx);
     }
   });
