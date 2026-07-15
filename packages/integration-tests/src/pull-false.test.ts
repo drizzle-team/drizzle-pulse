@@ -194,6 +194,16 @@ describe('pull: false — embedded-only runtime writes nothing to events tables 
     try {
       await s.runtime.start();
 
+      // Sequencing canary (ROADMAP criterion 1): relreplident stays 'd' — the delete below runs
+      // against a key-only old tuple, filtered by the collection's WHERE on `status` (a non-key
+      // column). This is the exact case that breaks if RIF-02 (key-only old tuple) had landed
+      // before RIF-01 (pk-membership delete detection): a where-evaluation against a tuple
+      // missing `status` would silently keep the row.
+      const replicaIdentity = await s.pool.query<{ relreplident: string }>(
+        `SELECT relreplident FROM pg_class WHERE relname = 'orders'`,
+      );
+      expect(replicaIdentity.rows[0]?.relreplident).toBe('d');
+
       const client = createPulseClient(s.runtime);
       const events = createPulseEvents(s.runtime);
 
@@ -235,6 +245,50 @@ describe('pull: false — embedded-only runtime writes nothing to events tables 
 
       unsub();
       collection.dispose();
+    } finally {
+      await teardownScenario(s);
+    }
+  });
+
+  test('wire-shape pin (criterion 5): the pull:false delete event is exactly { op, old_row, pk } with a pk-only old_row, and updates carry matchesNew with no old-match flag', async () => {
+    const s = await setupPullFalseScenario('wireshape');
+    try {
+      await s.runtime.start();
+
+      const events = createPulseEvents(s.runtime);
+      const captured: unknown[] = [];
+      const unsub = events.ordersByStatus({ status: 'accepted' }, (event) => {
+        captured.push(event);
+      });
+
+      await s.pool.query(
+        `INSERT INTO "orders" (driver_id, status, price) VALUES (1, 'accepted', 10)`,
+      );
+      await waitFor(() => captured.length === 1);
+      const insertEvent = captured[0] as Record<string, unknown>;
+      expect(Object.keys(insertEvent).sort()).toEqual(['op', 'pk', 'row']);
+      const insertedId = insertEvent.pk as number;
+
+      await s.pool.query(`UPDATE "orders" SET price = 20 WHERE id = $1`, [insertedId]);
+      await waitFor(() => captured.length === 2);
+      const updateEvent = captured[1] as Record<string, unknown>;
+      expect(updateEvent).toHaveProperty('matchesNew');
+      expect(updateEvent).not.toHaveProperty('matchesOld');
+
+      // The sanctioned wire break (RIF-01/RIF-02): a pull:false delete's old_row is pk-only —
+      // no non-key data columns, regardless of the subscriber's WHERE. Any future field
+      // addition/removal on this shape must consciously edit this pin.
+      await s.pool.query(`DELETE FROM "orders" WHERE id = $1`, [insertedId]);
+      await waitFor(() => captured.length === 3);
+      const deleteEvent = captured[2] as Record<string, unknown>;
+      expect(Object.keys(deleteEvent).sort()).toEqual(['old_row', 'op', 'pk']);
+      expect(deleteEvent.pk).toBe(insertedId);
+      const oldRow = deleteEvent.old_row as Record<string, unknown>;
+      expect(Object.keys(oldRow).sort()).toEqual(['$pk', 'id']);
+      expect(oldRow.id).toBe(insertedId);
+      expect(oldRow.$pk).toBe(insertedId);
+
+      unsub();
     } finally {
       await teardownScenario(s);
     }
