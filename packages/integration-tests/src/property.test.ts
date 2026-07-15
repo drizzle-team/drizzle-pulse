@@ -94,7 +94,13 @@ async function executeSequence(
 
   // Create PulseQuery client bound to the Hono router (production runtime path)
   const fetchImpl = createRouterFetchAdapter(router);
-  const client = createPulseClient<typeof registry.$client>({ url: 'http://localhost', fetchImpl });
+  // pollIntervalMs: 0 disables PullClient's batched auto-poll — this test drives poll()
+  // explicitly and must not leak a background timer past the assertions.
+  const client = createPulseClient<typeof registry.$client>({
+    url: 'http://localhost',
+    fetchImpl,
+    pollIntervalMs: 0,
+  });
   const core = new PulseQuery(client.ordersByStatus({ status: 'requested' }));
 
   // Subscribe — PulseQuery captures initial snapshot internally
@@ -196,6 +202,8 @@ async function executeSequence(
   // Read the pull snapshot from WAL events for ordering invariant
   const lastWalSnapshot =
     walEvents.length > 0 ? (walEvents[walEvents.length - 1]?.snapshot ?? 0) : 0;
+
+  core.destroy();
 
   return {
     sequenceLength: sequence.length,
@@ -340,9 +348,12 @@ describe('Property Invariants', () => {
           );
 
           const fetchImpl = createRouterFetchAdapter(router);
+          // pollIntervalMs: 0 disables PullClient's batched auto-poll — this test drives poll()
+          // explicitly and must not leak a background timer past the assertions.
           const client = createPulseClient<typeof registry.$client>({
             url: 'http://localhost',
             fetchImpl,
+            pollIntervalMs: 0,
           });
           const core = new PulseQuery(client.ordersByStatus({ status: 'requested' }));
 
@@ -367,6 +378,8 @@ describe('Property Invariants', () => {
           const expectedOrder = [...clientPks].sort((left, right) => right - left);
           expect(clientPks).toEqual(expectedOrder);
           expect(clientPks).toHaveLength(insertCount);
+
+          core.destroy();
         }),
         { numRuns: 20 },
       );
