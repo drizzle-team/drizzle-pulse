@@ -55,7 +55,7 @@ export type ExposeConfig = {
   pull:
     | boolean
     | {
-        /** Schema for the `__events_*` tables (default {@link DEFAULT_EVENTS_SCHEMA}). */
+        /** Schema for the derived events tables (default {@link DEFAULT_EVENTS_SCHEMA}). */
         eventsSchema?: string;
         /**
          * Max events a single pull may replay before it falls back to a full reset instead of
@@ -112,6 +112,8 @@ const RECONNECT_MAX_DELAY_MS = 30000;
 
 const DEFAULT_PUBLICATION_NAME = 'drizzle_pulse';
 const DEFAULT_SLOT_NAME = 'drizzle_pulse';
+
+const WAL_LOG_PREFIX = '[WAL Listener] ';
 
 // D-04: no knobs — fixed window a live collection's reconnect-debounce round comfortably fits
 // inside; a collection materialized after it just takes the Phase 18 watermark handshake.
@@ -336,7 +338,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       (queryName: string) => this.getEpochForQuery(queryName),
       (typeof this.config.pull === 'object' ? this.config.pull.eventLimit : undefined) ??
         DEFAULT_PULL_EVENT_LIMIT,
-      (message: string, ...args: unknown[]) => this.logError(message, ...args),
+      (message: string, ...args: unknown[]) => this.logErrorRaw(message, ...args),
     );
   }
 
@@ -471,7 +473,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
   async start(): Promise<void> {
     if (this.run) {
-      this.logInfo('[WAL Listener] Already running');
+      this.logInfo('Already running');
       return;
     }
 
@@ -501,7 +503,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       try {
         listener();
       } catch (err) {
-        this.logError('[WAL Listener] onStop listener error:', err);
+        this.logError('onStop listener error:', err);
       }
     }
 
@@ -515,7 +517,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     this.store = null;
     await store?.end();
 
-    this.logInfo('[WAL Listener] Stopped');
+    this.logInfo('Stopped');
   }
 
   /**
@@ -810,7 +812,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
           ? await this.resolveSlot(rep) // recovery lives INSIDE the try — never consumes a retry
           : await this.createTempSlot(rep);
 
-        this.logInfo(`[WAL Listener] Subscribing to slot '${slot}'`);
+        this.logInfo(`Subscribing to slot '${slot}'`);
         const iterator = rep.start({
           slot,
           publications: [this.publicationName],
@@ -830,12 +832,12 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
         everConnected = true;
         first.resolve();
-        this.logInfo('[WAL Listener] Replication started');
+        this.logInfo('Replication started');
 
         await this.stream(rep, iterator, run); // returns on clean end too — falls into retry below
       } catch (error) {
         if (signal.aborted) return;
-        this.logError('[WAL Listener] Replication error:', error);
+        this.logError('Replication error:', error);
       } finally {
         signal.removeEventListener('abort', kill);
         rep?.end();
@@ -851,16 +853,14 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
       run.attempts += 1;
       first.resolve(); // first-connect failure still resolves start() (today's behavior)
-      this.logInfo(
-        `[WAL Listener] Reconnecting (attempt ${run.attempts}/${RECONNECT_MAX_RETRIES})`,
-      );
+      this.logInfo(`Reconnecting (attempt ${run.attempts}/${RECONNECT_MAX_RETRIES})`);
       await abortableSleep(backoffDelay(run.attempts - 1), signal);
     }
   }
 
   // The terminal path: reachable only once run.attempts exhausts RECONNECT_MAX_RETRIES.
   private giveUp(): void {
-    this.logError('[WAL Listener] Max reconnection attempts reached. Giving up.');
+    this.logError('Max reconnection attempts reached. Giving up.');
     const terminalError = new Error(
       `WAL replication failed permanently after ${RECONNECT_MAX_RETRIES} reconnect attempts`,
     );
@@ -868,7 +868,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       try {
         listener(terminalError);
       } catch (err) {
-        this.logError('[WAL Listener] onTerminalError listener error:', err);
+        this.logError('onTerminalError listener error:', err);
       }
     }
     void this.stop();
@@ -908,14 +908,14 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
     if (slot.active && slot.active_pid) {
       this.logInfo(
-        `[WAL Listener] Terminating stale connection on slot '${this.slotName}' (PID ${slot.active_pid})`,
+        `Terminating stale connection on slot '${this.slotName}' (PID ${slot.active_pid})`,
       );
       await this.evictWalsender(this.slotName);
     }
 
     await this.ensureBaselines();
 
-    this.logInfo(`[WAL Listener] Replication slot '${this.slotName}' ready`);
+    this.logInfo(`Replication slot '${this.slotName}' ready`);
     this.lastPersistedCommitLsn = watermark;
     return { slot: this.slotName, from: undefined }; // server resumes from confirmed_flush
   }
@@ -951,7 +951,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     // Operators must see this: a recreate resets events/baselines. Name the slot, never
     // databaseUrl (V7 — info disclosure).
     this.logError(
-      `[WAL Listener] Replication slot '${this.slotName}' was missing or invalidated and has been recreated`,
+      `Replication slot '${this.slotName}' was missing or invalidated and has been recreated`,
     );
 
     return consistentPoint;
@@ -980,7 +980,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       await this.openPin(snapshot, consistentPoint);
     }
 
-    this.logInfo(`[WAL Listener] Created temporary slot '${slot}'`);
+    this.logInfo(`Created temporary slot '${slot}'`);
     return { slot, from: consistentPoint };
   }
 
@@ -1178,7 +1178,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
           // pgoutput streams transactions whole (begin always precedes its row events), so this
           // is a protocol anomaly, not routine — there is no per-message LSN to fall back to.
           this.logError(
-            `[WAL Listener] Protocol anomaly: no tracked begin.finalLsn for ${ev.schema}.${ev.table}; skipping event`,
+            `Protocol anomaly: no tracked begin.finalLsn for ${ev.schema}.${ev.table}; skipping event`,
           );
           continue;
         }
@@ -1224,7 +1224,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         );
         if (!absorbed) {
           this.logError(
-            `[WAL Listener] TOAST fill miss on ${miss.tableQualifiedName} pk=${String(miss.pkValue)}: zero rows on admin-pool SELECT with no trailing delete in this commit — check the admin role has SELECT (owner or BYPASSRLS under RLS), or the row was deleted in a commit that had not yet been decoded when this fill ran`,
+            `TOAST fill miss on ${miss.tableQualifiedName} pk=${String(miss.pkValue)}: zero rows on admin-pool SELECT with no trailing delete in this commit — check the admin role has SELECT (owner or BYPASSRLS under RLS), or the row was deleted in a commit that had not yet been decoded when this fill ran`,
           );
         }
       }
@@ -1319,7 +1319,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     const pkValue = pkSource?.[metadata.pkColumnName];
     if (pkValue === undefined || pkValue === null) {
       this.logDebug(
-        `[WAL Listener] Skipping ${ev.kind} on ${tableQualifiedName}: missing pk (${String(pkValue)})`,
+        `Skipping ${ev.kind} on ${tableQualifiedName}: missing pk (${String(pkValue)})`,
       );
       return;
     }
@@ -1328,7 +1328,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     // arrives with no old tuple at all (ev.old === null) and MUST still proceed.
     if (ev.kind === 'delete' && !oldRow) {
       this.logDebug(
-        `[WAL Listener] Skipping delete on ${tableQualifiedName}: missing old row data for pk=${pkValue}`,
+        `Skipping delete on ${tableQualifiedName}: missing old row data for pk=${pkValue}`,
       );
       return;
     }
@@ -1345,8 +1345,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         pkColumnName: metadata.pkColumnName,
         tableQualifiedName,
       };
-      const oldRowForDelete =
-        ev.oldKind === 'full' ? rawOld : { [metadata.pkColumnName]: oldPk };
+      const oldRowForDelete = ev.oldKind === 'full' ? rawOld : { [metadata.pkColumnName]: oldPk };
       t.events.push({
         ...base,
         op: 'delete',
@@ -1386,7 +1385,9 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       unchanged.map((name) => sql`${sql.identifier(name)}`),
       sql`, `,
     );
-    const result = await this.getPulseStore().getDb().execute<Record<string, unknown>>(sql`
+    const result = await this.getPulseStore()
+      .getDb()
+      .execute<Record<string, unknown>>(sql`
       select ${columnsIdentifier}
       from ${sourceIdentifier}
       where ${sql.identifier(metadata.pkColumnName)} = ${pkValue}
@@ -1405,11 +1406,17 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   }
 
   private logInfo(message: string, ...args: unknown[]): void {
-    if (this.logLevel >= LogLevel.Info) console.log(message, ...args);
+    if (this.logLevel >= LogLevel.Info) console.log(WAL_LOG_PREFIX + message, ...args);
+  }
+
+  // Unprefixed: the sdk error-logger callback (constructor, above) routes through this so
+  // sdk-originated messages keep their own format, never the WAL listener's prefix.
+  private logErrorRaw(message: string, ...args: unknown[]): void {
+    if (this.logLevel >= LogLevel.Error) console.error(message, ...args);
   }
 
   private logError(message: string, ...args: unknown[]): void {
-    if (this.logLevel >= LogLevel.Error) console.error(message, ...args);
+    this.logErrorRaw(WAL_LOG_PREFIX + message, ...args);
   }
 
   private logWarn(message: string, ...args: unknown[]): void {
@@ -1417,7 +1424,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   }
 
   private logDebug(message: string, ...args: unknown[]): void {
-    if (this.logLevel >= LogLevel.Debug) console.log(message, ...args);
+    if (this.logLevel >= LogLevel.Debug) console.log(WAL_LOG_PREFIX + message, ...args);
   }
 }
 
