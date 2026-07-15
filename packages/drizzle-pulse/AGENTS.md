@@ -17,10 +17,10 @@ Type-safe Pulse SDK shared by server, client, React, and embedded layers.
 
 ## Dependencies
 
-`pg` and `pg-logical-replication` are hard `dependencies`, imported only by the `./server`
-entrypoint. Client-only consumers (`./client`, `./client/react`, `./client/embedded`) install
-them but never bundle them — nothing on a client value-import path references them (enforced by
-the platform-imports purity test).
+`minipg` and `superjson` are the only hard `dependencies`. `minipg` is value-imported only by
+the `./server` entrypoint (replication + admin pool); client entrypoints (`./client`,
+`./client/react`, `./client/embedded`) never reach it on a value-import path (enforced by the
+platform-imports purity test).
 
 `hono` and `react` are **optional peer dependencies**: `hono` is needed only to mount the
 `./server/hono` Hono wrapper (the SDK handler itself is transport-agnostic), `react` only for
