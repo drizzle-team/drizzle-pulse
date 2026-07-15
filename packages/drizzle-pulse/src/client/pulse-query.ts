@@ -10,7 +10,7 @@ import type { PulseEvent } from '../shared/pulse-events.js';
 import { RangedPulseMergeCore } from '../shared/ranged-merge-core.js';
 import type { QueryDescriptor } from '../types.js';
 import type { PullClient } from './create-client.js';
-import type { PulseQueryTransport } from './transport.js';
+import type { PulseHttpTransport } from './transport.js';
 
 export type {
   PulseDeleteEvent,
@@ -33,7 +33,7 @@ export type CreatePulseQueryOptions<TResult extends Record<string, unknown> & { 
 
 export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown }> {
   private readonly onStateChange?: (state: PulseQueryState<TResult>) => void;
-  private readonly transport: PulseQueryTransport;
+  private readonly transport: PulseHttpTransport;
   private readonly pullClient: PullClient;
   private readonly queryKey: string;
 
@@ -56,7 +56,7 @@ export class PulseQuery<TResult extends Record<string, unknown> & { $pk: unknown
     options?: CreatePulseQueryOptions<TResult>,
   ) {
     this.onStateChange = options?.onStateChange;
-    this.transport = descriptor.transport;
+    this.transport = descriptor.pullClient.transport;
     this.pullClient = descriptor.pullClient;
     this.queryKey = `${descriptor.queryName}:${JSON.stringify(descriptor.args)}:${Math.random().toString(36).slice(2, 10)}`;
     this.core = new RangedPulseMergeCore({

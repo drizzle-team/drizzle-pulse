@@ -1,6 +1,6 @@
 import type { PullSubscriptionRequest } from '../shared/protocol-types.js';
 import { QueryDescriptor } from '../types.js';
-import { createHttpTransport, type PulseQueryTransport } from './transport.js';
+import { createHttpTransport, type PulseHttpTransport } from './transport.js';
 
 // The self-describing per-query pull state; `key` is injected by the PullClient from the
 // registration key, so a handle only supplies the query identity + its current window.
@@ -20,7 +20,7 @@ export class PullClient {
   private inFlight: Promise<void> | null = null;
 
   constructor(
-    private readonly transport: PulseQueryTransport,
+    readonly transport: PulseHttpTransport,
     private readonly pollIntervalMs = 1000,
   ) {}
 
@@ -123,7 +123,7 @@ export function createPulseClient<TClient>(config: {
     {
       get(_target, prop: string) {
         return (args?: Record<string, unknown>) =>
-          new QueryDescriptor(prop, args ?? {}, config.url, transport, pullClient);
+          new QueryDescriptor(prop, args ?? {}, config.url, pullClient);
       },
     },
   ) as TClient;

@@ -16,18 +16,6 @@ export type PullResultMap = Record<
   PullResponse<TransportRow, PulseEvent<TransportRow>> | PullResponseErrorResult
 >;
 
-/**
- * The three protocol operations a {@link PulseQuery} needs, decoupled from how they travel:
- * the HTTP transport ({@link createHttpTransport}) speaks fetch+superjson to a router, the
- * embedded client's direct transport calls the in-process SDK handler. `pull` takes the
- * batched self-describing entries and returns their results keyed by entry `key`.
- */
-export interface PulseQueryTransport {
-  subscribe(request: SubscribeRequest): Promise<SubscribeResponse<TransportRow>>;
-  pull(entries: PullSubscriptionRequest[]): Promise<PullResultMap>;
-  loadMore(request: LoadMoreRequest): Promise<LoadMoreResponse<TransportRow>>;
-}
-
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 async function postJson(fetchImpl: Fetch, url: string, body: unknown): Promise<string> {
@@ -44,19 +32,21 @@ async function postJson(fetchImpl: Fetch, url: string, body: unknown): Promise<s
 }
 
 /** HTTP transport: the fetch+superjson call sites the React/HTTP client drives. */
-export function createHttpTransport(url: string, fetchImpl: Fetch): PulseQueryTransport {
+export function createHttpTransport(url: string, fetchImpl: Fetch) {
   return {
-    async subscribe(request) {
+    async subscribe(request: SubscribeRequest): Promise<SubscribeResponse<TransportRow>> {
       return deserializeResponse(await postJson(fetchImpl, `${url}/subscribe`, request));
     },
-    async pull(entries) {
+    async pull(entries: PullSubscriptionRequest[]): Promise<PullResultMap> {
       const { results } = deserializeResponse<{ results: PullResultMap }>(
         await postJson(fetchImpl, `${url}/pull`, { subscriptions: entries }),
       );
       return results;
     },
-    async loadMore(request) {
+    async loadMore(request: LoadMoreRequest): Promise<LoadMoreResponse<TransportRow>> {
       return deserializeResponse(await postJson(fetchImpl, `${url}/load-more`, request));
     },
   };
 }
+
+export type PulseHttpTransport = ReturnType<typeof createHttpTransport>;

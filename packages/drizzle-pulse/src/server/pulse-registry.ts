@@ -23,18 +23,13 @@ export type AnyPulseBuilder = PulseBuilder<
 
 export type AnyPulseBuilders = Record<string, AnyPulseBuilder>;
 
-type BuiltQuery = {
-  pulseQuery: PulseRegistryQuery;
-  sourceTable: PgTable;
-};
-
-function buildPulseQuery(query: AnyPulseBuilder) {
+function buildPulseQuery(query: AnyPulseBuilder): PulseRegistryQuery {
   const { config } = query;
   const sourceTable = config.table.source;
 
   getPulsePkColumn(sourceTable);
 
-  const pulseQuery: PulseRegistryQuery = {
+  return {
     table: sourceTable,
     pkColumn: config.pkColumn,
     columns: config.columns,
@@ -48,29 +43,15 @@ function buildPulseQuery(query: AnyPulseBuilder) {
     transformRows: (rows: Record<string, unknown>[]) =>
       config.transformFn ? config.transformFn(rows) : rows,
   };
-
-  return {
-    pulseQuery,
-    sourceTable,
-  };
 }
 
 export class PulseRegistry<TQueries extends AnyPulseBuilders> {
   readonly $client!: PulseClientContract<TQueries>;
   private readonly pulseQueries: Record<string, PulseRegistryQuery>;
-  private readonly sourceTables: Record<string, PgTable>;
 
   constructor(queries: TQueries) {
-    const builtEntries = Object.entries(queries).map<[string, BuiltQuery]>(([name, query]) => [
-      name,
-      buildPulseQuery(query),
-    ]);
-
     this.pulseQueries = Object.fromEntries(
-      builtEntries.map(([name, built]) => [name, built.pulseQuery]),
-    );
-    this.sourceTables = Object.fromEntries(
-      builtEntries.map(([name, built]) => [name, built.sourceTable]),
+      Object.entries(queries).map(([name, query]) => [name, buildPulseQuery(query)]),
     );
   }
 
@@ -79,7 +60,7 @@ export class PulseRegistry<TQueries extends AnyPulseBuilders> {
   }
 
   getSourceTable(name: string) {
-    return this.sourceTables[name] ?? null;
+    return this.pulseQueries[name]?.table ?? null;
   }
 
   getQueryNames() {
