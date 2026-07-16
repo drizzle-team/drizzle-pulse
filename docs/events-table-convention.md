@@ -30,7 +30,7 @@ The events table name is:
   with a single `_`. This keeps names readable, but the join is **not injective**:
   distinct `(schema, table)` pairs can derive the same name (e.g. schema `a_` table `b`
   and schema `a` table `_b` both derive `a___b`). Such collisions are **rejected at
-  registration** — `expose()` throws when two distinct source tables derive the same
+  registration** — the `PulseRuntime` constructor throws when two distinct source tables derive the same
   events-table name, naming both source tables and the derived name. There is no silent
   shadowing, so the pretty (un-injective) encoding stays safe in practice.
 
@@ -92,13 +92,13 @@ column keeps the source's element type, dimension count, and array (de)serializa
 codec, and the emitted DDL renders the element type followed by one `[]` per dimension
 (e.g. a 1-dimensional `text('tags').array()` renders as `"tags" text[]`).
 
-### 2.3 `$old_<sqlColumnName>` twins
+### 2.3 `$old_` twins
 
-Each source column also produces an `$old_`-prefixed twin, keyed off the source
-column's **SQL name** (not its JS property name): source column `small_int_col`
-produces twin `$old_small_int_col`. The twin is always nullable and uses the same
-relaxed type as the new-value column (i.e. the twin of a `serial` PK is a nullable
-`integer`, not a `serial`).
+Each source column also produces an `$old_`-prefixed twin. Its **JS property key** is
+`$old_<jsKey>` (source key `smallIntCol` → twin key `$old_smallIntCol`) and its **SQL
+name** is `$old_<sqlName>` (SQL name `small_int_col` → twin SQL name `$old_small_int_col`).
+The twin is always nullable and uses the same relaxed type as the new-value column (i.e. the
+twin of a `serial` PK is a nullable `integer`, not a `serial`).
 
 ### 2.4 Enum columns
 
@@ -111,11 +111,13 @@ Lifted directly from the `pg-data-types` integration fixture
 (`packages/integration-tests/src/fixtures/pg-data-types/schema.ts`), which is the
 byte-level acceptance spec for this section:
 
-Note: the snippet below shows the *source* table with its normal JS export keys (which
-may be camelCase), but the *events* table's JS object keys are always the source
-column's **SQL name** — `buildEventsTable` builds its `columns` record keyed by
-`sourceColumn.name`, never by the source table's JS property name. This differs from a
-normal `pgTable()` call, where the JS key and SQL name commonly diverge.
+Note: the events table's JS object keys **mirror the source table's JS property keys** —
+`buildEventsTable` builds its `columns` record keyed by the source table's property key
+(the key in `getColumns(sourceTable)`), with the `$old_` twins keyed by `$old_<jsKey>`.
+Only the columns' **SQL names** (the builder argument, and the emitted DDL) stay the source
+column's SQL name. So the events table reads and writes exactly like the source table via the
+drizzle query builder — property keys in, property keys out — while the physical schema is
+byte-identical to before.
 
 ```ts
 // Source table
@@ -124,17 +126,17 @@ smallSerialCol: smallserial('small_serial_col'),                  // non-PK, sma
 bigSerialNumberCol: bigserial('big_serial_number_col', { mode: 'number' }),
 moodCol: moodEnum('mood_col'),
 
-// Events table (new-value columns) — JS keys are SQL names, not the source's camelCase keys
+// Events table (new-value columns) — JS keys mirror the source's property keys; SQL names unchanged
 id: integer('id').notNull(),                                      // PK stays NOT NULL, serial -> integer
-small_serial_col: integer('small_serial_col'),                    // nullable, smallserial -> integer
-big_serial_number_col: bigint('big_serial_number_col', { mode: 'number' }),
-mood_col: moodEnum('mood_col'),                                   // same enum instance
+smallSerialCol: integer('small_serial_col'),                     // nullable, smallserial -> integer
+bigSerialNumberCol: bigint('big_serial_number_col', { mode: 'number' }),
+moodCol: moodEnum('mood_col'),                                    // same enum instance
 
-// Events table ($old_ twins)
+// Events table ($old_ twins) — JS key is $old_<jsKey>; SQL name is $old_<sqlName>
 $old_id: integer('$old_id'),
-$old_small_serial_col: integer('$old_small_serial_col'),
-$old_big_serial_number_col: bigint('$old_big_serial_number_col', { mode: 'number' }),
-$old_mood_col: moodEnum('$old_mood_col'),                         // same enum instance again
+$old_smallSerialCol: integer('$old_small_serial_col'),
+$old_bigSerialNumberCol: bigint('$old_big_serial_number_col', { mode: 'number' }),
+$old_moodCol: moodEnum('$old_mood_col'),                          // same enum instance again
 ```
 
 ### 2.6 Enum type identifiers in emitted DDL
@@ -149,14 +151,15 @@ schema-qualified when the enum was declared in a non-default schema (e.g.
 
 ### 2.7 Reserved source column names
 
-A source column name that would collide with a synthesized events-table column name is
-rejected outright rather than silently overwritten by object-spread ordering:
+A source column whose JS property key **or** SQL name would collide with a synthesized
+events-table column is rejected outright rather than silently overwritten by object-spread
+ordering (both are now events-table keyspaces, so both are checked):
 
 - The three metadata names (`$snapshot`, `$op`, `$timestamp`, section 3) are reserved —
-  a source column literally named `$snapshot`, `$op`, or `$timestamp` throws at
+  a source column whose JS key or SQL name is `$snapshot`, `$op`, or `$timestamp` throws at
   `buildEventsTable()` time.
-- Any source column name starting with the `$old_` prefix is reserved (it is the
-  derivation scheme's own prefix for old-value twins, section 2.3) and likewise throws.
+- Any source column whose JS key or SQL name starts with the `$old_` prefix is reserved (it
+  is the derivation scheme's own prefix for old-value twins, section 2.3) and likewise throws.
 
 Both are hard failures, matching this document's philosophy for other derivation hazards
 (section 4's 63-byte guard) — there is no silent-collision fallback.

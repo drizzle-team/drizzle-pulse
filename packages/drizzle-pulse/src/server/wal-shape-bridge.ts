@@ -8,9 +8,10 @@ type ShapeCol = ReturnType<typeof Shape>['$cols'][number];
 type CodecNormalize = (value: unknown) => unknown;
 type CodecNormalizeArray = (value: string, dimensions: number) => unknown;
 
-// Ported verbatim from shape-fidelity.spike.test.ts's buildCandidateDecoder (SPIKE-02,
-// zero-divergence across the pg_data_types matrix). Replaces wal-normalization.ts's
-// createWalRowNormalizer with the same `(sourceTable) => (row) => normalizedRow` signature.
+// Decodes a replication row's raw-text values into the same JS shapes drizzle's query-time
+// decode produces, via the table's Shape spec plus per-column codec fallbacks. Input rows are
+// SQL-column-name-keyed (as they arrive off pgoutput); output rows are re-keyed to the source
+// table's JS property keys, matching what the drizzle query builder reads and writes.
 export function createShapeRowNormalizer(
   sourceTable: PgTable,
 ): (row: Record<string, unknown>) => Record<string, unknown> {
@@ -18,10 +19,16 @@ export function createShapeRowNormalizer(
   const mapper = Shape(spec);
   const columns = getColumns(sourceTable);
 
+  // Internal lookups stay keyed by SQL name (the input keyspace); output is re-keyed via this
+  // SQL-name -> JS-property-key map (an unknown input key falls back to itself).
+  const jsKeyBySqlName = new Map<string, string>(
+    Object.entries(columns).map(([jsKey, column]) => [(column as Column).name, jsKey]),
+  );
+
   // $cols[].name is the TS property key (e.g. "bigIntCol"); WAL rows are keyed by SQL column
-  // name (e.g. "big_int_col") — translate via getColumns(). Keying directly by $cols[].name is
-  // the exact SPIKE-02 instrument bug (commit 3ac9af0): it silently misses every non-trivial
-  // column and measures only the codec-normalize fallback below.
+  // name (e.g. "big_int_col") — translate via getColumns(). Keying directly by $cols[].name
+  // silently misses every column whose two names differ, leaving only the codec-normalize
+  // fallback below.
   const colBySqlName = new Map<string, ShapeCol>(
     mapper.$cols.map((col) => [(columns[col.name as keyof typeof columns] as Column).name, col]),
   );
@@ -45,16 +52,17 @@ export function createShapeRowNormalizer(
   return (row) => {
     const out: Record<string, unknown> = {};
     for (const [name, value] of Object.entries(row)) {
+      const jsKey = jsKeyBySqlName.get(name) ?? name;
       // minipg's default decoders already produce the final JS value for the 9 basic OIDs
       // (bool/bytea/int2/int4/oid/float4/float8/json/jsonb) — only raw-text strings need
       // further decode here.
       if (value === null || value === undefined || typeof value !== 'string') {
-        out[name] = value;
+        out[jsKey] = value;
         continue;
       }
       const xform = colBySqlName.get(name)?.xform;
       if (xform) {
-        out[name] = xform(value);
+        out[jsKey] = xform(value);
         continue;
       }
       // buildShape assumed minipg's own query-time decode of this OID+js-target already
@@ -71,10 +79,10 @@ export function createShapeRowNormalizer(
         : undefined;
       const dimensions = dimensionsBySqlName.get(name) ?? 0;
       if (dimensions > 0 && codecEntry?.normalizeArray) {
-        out[name] = codecEntry.normalizeArray(value, dimensions);
+        out[jsKey] = codecEntry.normalizeArray(value, dimensions);
         continue;
       }
-      out[name] = codecEntry?.normalize ? codecEntry.normalize(value) : value;
+      out[jsKey] = codecEntry?.normalize ? codecEntry.normalize(value) : value;
     }
     return out;
   };

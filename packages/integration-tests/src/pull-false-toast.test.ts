@@ -1,5 +1,5 @@
 /**
- * Integration proof for the pull:false TOAST fill (RIF-02's fillUnchangedByPk): under
+ * Integration proof for the pull:false TOAST fill (fillUnchangedByPk): under
  * REPLICA IDENTITY DEFAULT, an UPDATE that never touches a TOASTed column omits it from
  * pgoutput's new tuple — the one parameterized by-pk SELECT on the admin pool must carry it
  * forward, a WHERE evaluated against that filled row must still work, and a same-commit
@@ -16,7 +16,7 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import { createSelectSchema } from 'drizzle-orm/zod';
 import { pulse } from 'drizzle-pulse';
 import { createPulseClient } from 'drizzle-pulse/client/embedded';
-import { createPulseRegistry, expose, LogLevel } from 'drizzle-pulse/server';
+import { createPulseRegistry, LogLevel, PulseRuntime } from 'drizzle-pulse/server';
 import postgres from 'postgres';
 import { createScenarioDb, waitFor } from './helpers/scenario.js';
 import { withQuietPostgresUrl } from './helpers/test-harness.js';
@@ -46,7 +46,7 @@ function buildRegistry() {
 
 // This suite's own TOASTable `note` column — the shared minimal-orders fixture doesn't carry
 // one, and a bare-DDL scenario (no publication/replica-identity) is required for the pull:false
-// self-provisioning precondition (Phase 23 decision).
+// self-provisioning precondition.
 const LOCAL_ORDERS_DDL = `
   CREATE TABLE "orders" (
     "id" serial PRIMARY KEY,
@@ -59,14 +59,14 @@ const LOCAL_ORDERS_DDL = `
 async function setupScenario(label: string) {
   const scenario = await createScenarioDb(`pulse_toastfalse_${label}`, { ddl: LOCAL_ORDERS_DDL });
   // Deliberately absent: the publication — reconcile() self-provisions it under pull:false.
-  // REPLICA IDENTITY is left untouched (RIF-02): the tap decodes old-tuple data via
+  // REPLICA IDENTITY is left untouched: the tap decodes old-tuple data via
   // oldKind/unchanged, and the TOAST fill runs a by-pk SELECT instead of relying on FULL.
   const publicationName = `toastfalse_pub_${label}`;
   const slotName = `toastfalse_slot_${label}`;
   const sourceSql = postgres(withQuietPostgresUrl(scenario.databaseUrl));
 
   const registry = buildRegistry();
-  const runtime = expose(registry, {
+  const runtime = new PulseRuntime(registry, {
     databaseUrl: scenario.databaseUrl,
     sourceDb: drizzle({ client: sourceSql }),
     pull: false,
@@ -105,13 +105,13 @@ function toastableValue(): string {
   return randomBytes(5000).toString('hex');
 }
 
-describe('pull: false — TOAST-omitted column fill by pk (RIF-02)', () => {
+describe('pull: false — TOAST-omitted column fill by pk', () => {
   test('carry-forward: an unrelated-column update does not drop the TOAST-omitted column', async () => {
     const s = await setupScenario('carry');
     try {
       await s.runtime.start();
 
-      // Proves the fill path ran, not the FULL old-under-new spread — RIF-02 never forces FULL.
+      // Proves the fill path ran, not the FULL old-under-new spread — pull:false never forces FULL.
       const replicaIdentity = await s.sql.unsafe<{ relreplident: string }[]>(
         `SELECT relreplident FROM pg_class WHERE relname = 'orders'`,
       );

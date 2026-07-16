@@ -15,6 +15,7 @@ import { buildEventsTable, DEFAULT_EVENTS_SCHEMA } from './events-table-resolver
 import type { AnyPulseBuilders, PulseRegistry } from './pulse-registry.js';
 import { buildSelectQuery, type PulseSourceDb } from './pulse-sql.js';
 import { PulseStore } from './pulse-store.js';
+import { getQueryColumnKey } from './pulse-types.js';
 import { DEFAULT_PULL_EVENT_LIMIT, PulseRequestHandler } from './sdk.js';
 import { WalEventEmitter } from './wal-event-emitter.js';
 import { createShapeRowNormalizer } from './wal-shape-bridge.js';
@@ -69,19 +70,23 @@ export type ExposeConfig = {
 
 type SourceTableMetadata = {
   sourceTable: PgTable;
-  pkColumnName: string;
+  // The pk column's JS property key — indexes into the (now JS-keyed) in-memory row objects.
+  pkKey: string;
+  // The pk column's SQL name — used only where a raw sql.identifier is emitted.
+  pkSqlName: string;
   eventsTable: PgTable;
   normalizeRow: (row: Record<string, unknown>) => Record<string, unknown>;
 };
 
 // A decoded WAL row event, buffered between a transaction's `begin` and `commit` so the whole
 // transaction persists atomically and acks together. `row`/`oldRow` are already normalized via
-// the shape bridge — for delete, `row` is deliberately `{}` (the tap's dedupe-by-absence
-// contract); the persisted events-table row still carries the old row's data (PulseStore's
-// buildEventRow), so persistence and the tap emit stay correctly divergent for deletes.
+// the shape bridge into JS-property-keyed rows — for delete, `row` is deliberately `{}` (the
+// tap's dedupe-by-absence contract); the persisted events-table row still carries the old row's
+// data (PulseStore's buildEventRow), so persistence and the tap emit stay correctly divergent
+// for deletes.
 export type PendingWalEvent = {
   eventsTable: PgTable;
-  pkColumnName: string;
+  pkKey: string;
   pkValue: unknown;
   op: 'insert' | 'update' | 'delete';
   row: Record<string, unknown>;
@@ -93,7 +98,7 @@ export type PendingWalEvent = {
 };
 
 // A TOAST fill-by-pk that returned zero rows — recorded transiently in decodeInto, resolved at
-// commit time in stream() against a trailing delete on the same pk (Pattern 3).
+// commit time in stream() against a trailing delete on the same pk.
 type FillMiss = { pkValue: unknown; tableQualifiedName: string };
 
 // `===` misses same-value Date/Buffer pks decoded from separate WAL events (distinct instances).
@@ -104,8 +109,6 @@ function pkValuesEqual(a: unknown, b: unknown): boolean {
   return false;
 }
 
-// No reconnect tuning knobs — fixed internal defaults, same values as the prior
-// config-driven defaults.
 const RECONNECT_MAX_RETRIES = 10;
 const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 30000;
@@ -115,8 +118,8 @@ const DEFAULT_SLOT_NAME = 'drizzle_pulse';
 
 const WAL_LOG_PREFIX = '[WAL Listener] ';
 
-// No knobs — fixed window a live collection's reconnect-debounce round comfortably fits
-// inside; a collection materialized after it just takes the watermark handshake.
+// Fixed window a live collection's reconnect-debounce round comfortably fits inside;
+// a collection materialized after it just takes the watermark handshake.
 const REBASELINE_PIN_WINDOW_MS = 5000;
 
 // One connection lifecycle attempt: aborting closes the socket (the only way to stop a parked
@@ -154,23 +157,6 @@ function assertSnapshotName(name: string): void {
       `Refusing to use exported snapshot name "${name}": expected only hex digits and dashes`,
     );
   }
-}
-
-// A plain `db.select().from(sourceTable)` maps result rows by JS property key (e.g.
-// `driverId`), but PulseStore.insertEventRow/buildEventRow expect SQL-column-name keys — the
-// same shape WAL rows already carry. Translate a baseline SELECT's row before handing it to
-// createBaselineSnapshot.
-function toSqlKeyedRow(
-  sourceTable: PgTable,
-  row: Record<string, unknown>,
-): Record<string, unknown> {
-  const columns = getColumns(sourceTable);
-  const out: Record<string, unknown> = {};
-  for (const [jsKey, value] of Object.entries(row)) {
-    const column = columns[jsKey as keyof typeof columns];
-    out[column ? column.name : jsKey] = value;
-  }
-  return out;
 }
 
 // A resolve() with idempotent settling — supervise() resolves `first` from several exits
@@ -322,7 +308,10 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
       this.sourceTableMetadata.set(getTableUniqueName(pulseQuery.table), {
         sourceTable,
-        pkColumnName: pulseQuery.pkColumn.name,
+        pkKey:
+          getQueryColumnKey(getColumns(sourceTable), pulseQuery.pkColumn) ??
+          pulseQuery.pkColumn.name,
+        pkSqlName: pulseQuery.pkColumn.name,
         eventsTable,
         normalizeRow: createShapeRowNormalizer(sourceTable),
       });
@@ -384,13 +373,15 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   private async seedBaseline(
     fetchLatest: () => Promise<Record<string, unknown> | undefined>,
     writeHandle: Parameters<PulseStore['createBaselineSnapshot']>[3] | undefined,
-    meta: { sourceTable: PgTable; pkColumnName: string; eventsTable: PgTable },
+    meta: { pkKey: string; eventsTable: PgTable },
   ): Promise<void> {
+    // The baseline SELECT already returns JS-property-keyed rows (drizzle query builder), the
+    // same convention the events table is written in — hand it straight through.
     const baselineRow = await fetchLatest();
     await this.getPulseStore().createBaselineSnapshot(
       meta.eventsTable,
-      meta.pkColumnName,
-      baselineRow ? toSqlKeyedRow(meta.sourceTable, baselineRow) : null,
+      meta.pkKey,
+      baselineRow ?? null,
       writeHandle,
     );
   }
@@ -402,6 +393,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       const pulseQuery = this.registry.getPulseQuery(queryName);
       const sourceTable = this.registry.getSourceTable(queryName);
       if (!pulseQuery || !sourceTable) continue;
+      const metadata = this.sourceTableMetadata.get(getTableUniqueName(pulseQuery.table));
+      if (!metadata) continue;
 
       await this.seedBaseline(
         async () => {
@@ -414,9 +407,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         },
         undefined,
         {
-          sourceTable,
-          pkColumnName: pulseQuery.pkColumn.name,
-          eventsTable: this.getEventsTableForQuery(queryName),
+          pkKey: metadata.pkKey,
+          eventsTable: metadata.eventsTable,
         },
       );
     }
@@ -582,10 +574,11 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
       // wal_level=logical is server-wide (postgresql.conf + restart); the runtime can't fix it,
       // so it stays a fail-closed assert.
-      const walLevelResult = await tx.execute<{ wal_level: string }>(
+      const {
+        rows: [{ wal_level: walLevel } = {}],
+      } = await tx.execute<{ wal_level?: string }>(
         sql`SELECT current_setting('wal_level') AS wal_level`,
       );
-      const walLevel = walLevelResult.rows[0]?.wal_level;
       if (walLevel !== 'logical') {
         throw new Error(
           `wal_level is "${walLevel ?? 'unknown'}", but must be "logical" — set wal_level=logical in postgresql.conf and restart Postgres`,
@@ -713,9 +706,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         await tx.execute(
           sql`CREATE TABLE IF NOT EXISTS ${metaTable} (table_name text PRIMARY KEY, ddl_hash text NOT NULL, epoch uuid NOT NULL)`,
         );
-        // Durable commit-LSN dedupe watermark (research Open Question 1): survives a full
-        // process restart so resuming an intact slot doesn't re-persist minipg's at-least-once
-        // replay tail.
+        // Durable commit-LSN dedupe watermark: survives a full process restart so resuming an
+        // intact slot doesn't re-persist minipg's at-least-once replay tail.
         await tx.execute(
           sql`CREATE TABLE IF NOT EXISTS ${streamTable} (slot_name text PRIMARY KEY, last_lsn text NOT NULL)`,
         );
@@ -794,8 +786,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   // iteration, so there is nothing left to supersede.
   private async supervise(run: Run, first: { promise: Promise<void>; resolve: () => void }) {
     const { signal } = run.abort;
-    // Per-run, not per-instance (documented delta a): a stopped-then-restarted runtime fires no
-    // reconnect edge on its first connect.
+    // Per-run, not per-instance: a stopped-then-restarted runtime fires no reconnect edge on
+    // its first connect.
     let everConnected = false;
 
     while (!signal.aborted) {
@@ -949,7 +941,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     }
 
     // Operators must see this: a recreate resets events/baselines. Name the slot, never
-    // databaseUrl (V7 — info disclosure).
+    // databaseUrl (info disclosure).
     this.logError(
       `Replication slot '${this.slotName}' was missing or invalidated and has been recreated`,
     );
@@ -1058,6 +1050,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
           const sourceTable = this.registry.getSourceTable(queryName);
           if (!pulseQuery || !sourceTable) continue;
 
+          const metadata = this.sourceTableMetadata.get(getTableUniqueName(pulseQuery.table));
+          if (!metadata) continue;
           const eventsTable = this.getEventsTableForQuery(queryName);
           const eventsTableConfig = getTableConfig(eventsTable);
           if (epochs.has(eventsTableConfig.name)) continue; // two queries, one source table
@@ -1087,7 +1081,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
               return row;
             },
             tx,
-            { sourceTable, pkColumnName: pulseQuery.pkColumn.name, eventsTable },
+            { pkKey: metadata.pkKey, eventsTable },
           );
         }
 
@@ -1275,13 +1269,13 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       row = base;
       if (ev.oldKind === 'full' && rawOld) {
         // pgoutput omits an UPDATE's unchanged TOASTed columns from the new tuple; the
-        // old-under-new spread carries them forward under REPLICA IDENTITY FULL (DRIVER-04).
+        // old-under-new spread carries them forward under REPLICA IDENTITY FULL.
         row = { ...rawOld, ...base };
       } else if (ev.unchanged.length > 0) {
         // Under a non-full identity the omitted columns are absent from `new` too — a WHERE on
         // one of them would silently drop matching events without this fill (filter-ast treats
         // a missing column as non-matching), so this is required, not an optimization.
-        const pkValue = base[metadata.pkColumnName];
+        const pkValue = base[metadata.pkKey];
         // A TOASTable pk that's itself unchanged (and thus omitted) renders undefined here — the
         // pkValue==null skip below runs after this fill, so a query-time `where pk = undefined`
         // must be avoided explicitly rather than relying on that later guard.
@@ -1307,7 +1301,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         ev.oldKind === 'full'
           ? rawOld
           : rawOld
-            ? { [metadata.pkColumnName]: rawOld[metadata.pkColumnName] }
+            ? { [metadata.pkKey]: rawOld[metadata.pkKey] }
             : null;
     }
 
@@ -1316,7 +1310,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     const oldRowComplete = ev.kind !== 'insert' && ev.oldKind === 'full';
 
     const pkSource = ev.kind === 'delete' ? oldRow : row;
-    const pkValue = pkSource?.[metadata.pkColumnName];
+    const pkValue = pkSource?.[metadata.pkKey];
     if (pkValue === undefined || pkValue === null) {
       this.logDebug(
         `Skipping ${ev.kind} on ${tableQualifiedName}: missing pk (${String(pkValue)})`,
@@ -1333,19 +1327,19 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       return;
     }
 
-    const oldPk = rawOld?.[metadata.pkColumnName];
+    const oldPk = rawOld?.[metadata.pkKey];
     const pkChanged = !pkValuesEqual(oldPk, pkValue);
     if (ev.kind === 'update' && oldPk != null && pkChanged) {
-      // pk-changing UPDATE (BUG-02): a single update entry keyed by the new pk leaves every
+      // pk-changing UPDATE: a single update entry keyed by the new pk leaves every
       // consumer holding a ghost row under the old pk. Synthesize delete(oldPk) then
       // insert(newPk) — delete MUST precede insert since stream()'s commit case fans out
       // `events` in order (per-index snapshots for the events table, emit order for the tap).
       const base = {
         eventsTable: metadata.eventsTable,
-        pkColumnName: metadata.pkColumnName,
+        pkKey: metadata.pkKey,
         tableQualifiedName,
       };
-      const oldRowForDelete = ev.oldKind === 'full' ? rawOld : { [metadata.pkColumnName]: oldPk };
+      const oldRowForDelete = ev.oldKind === 'full' ? rawOld : { [metadata.pkKey]: oldPk };
       t.events.push({
         ...base,
         op: 'delete',
@@ -1360,7 +1354,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
     t.events.push({
       eventsTable: metadata.eventsTable,
-      pkColumnName: metadata.pkColumnName,
+      pkKey: metadata.pkKey,
       pkValue,
       op: ev.kind,
       row,
@@ -1390,7 +1384,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       .execute<Record<string, unknown>>(sql`
       select ${columnsIdentifier}
       from ${sourceIdentifier}
-      where ${sql.identifier(metadata.pkColumnName)} = ${pkValue}
+      where ${sql.identifier(metadata.pkSqlName)} = ${pkValue}
       limit 1
     `);
     const row = result.rows[0];
@@ -1420,17 +1414,10 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   }
 
   private logWarn(message: string, ...args: unknown[]): void {
-    if (this.logLevel >= LogLevel.Info) console.warn(message, ...args);
+    if (this.logLevel >= LogLevel.Info) console.warn(WAL_LOG_PREFIX + message, ...args);
   }
 
   private logDebug(message: string, ...args: unknown[]): void {
     if (this.logLevel >= LogLevel.Debug) console.log(WAL_LOG_PREFIX + message, ...args);
   }
-}
-
-export function expose<TQueries extends AnyPulseBuilders>(
-  registry: PulseRegistry<TQueries>,
-  config: ExposeConfig,
-) {
-  return new PulseRuntime(registry, config);
 }

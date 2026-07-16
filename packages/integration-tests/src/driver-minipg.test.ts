@@ -1,15 +1,14 @@
 /**
- * Integration proof for DRIVER-05 and DRIVER-04, standalone (research Open Question 2: keeps
- * `test-harness.ts` single-driver rather than parametrizing it).
+ * Two integration proofs, standalone (keeps `test-harness.ts` single-driver rather than
+ * parametrizing it).
  *
- * DRIVER-05: a plain node-postgres (`pg`) `Pool` — connectionString only, NO `types` override —
+ * Coexistence: a plain node-postgres (`pg`) `Pool` — connectionString only, NO `types` override —
  * coexists with minipg-owned replication as a generic `sourceDb`. The old custom-`types` caveat
  * (needed so the deleted hand-rolled WAL normalizer's from-text codecs could consume
  * date/timestamp/point OIDs that pg's default parsers over-decoded) is dead: minipg's shape
- * bridge now decodes WAL rows, and a plain sourceDb never touches that path (Pitfall 9,
- * 19-RESEARCH.md).
+ * bridge now decodes WAL rows, and a plain sourceDb never touches that path.
  *
- * DRIVER-04: an UPDATE that never touches a TOASTed column omits it from pgoutput's new tuple;
+ * TOAST carry-forward: an UPDATE that never touches a TOASTed column omits it from pgoutput's new tuple;
  * the existing old-under-new spread must still carry it forward intact, in both the persisted
  * events-table row and embedded `list()`.
  */
@@ -22,7 +21,12 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { getTableConfig } from 'drizzle-orm/pg-core';
 import { pulse } from 'drizzle-pulse';
 import { createPulseClient } from 'drizzle-pulse/client/embedded';
-import { buildEventsTable, createPulseRegistry, expose, LogLevel } from 'drizzle-pulse/server';
+import {
+  buildEventsTable,
+  createPulseRegistry,
+  LogLevel,
+  PulseRuntime,
+} from 'drizzle-pulse/server';
 import { Pool } from 'pg';
 import { pgDataTypesFixture } from './fixtures/pg-data-types/index.js';
 import { pgDataTypeInsertValues } from './fixtures/pg-data-types/inventory.js';
@@ -55,7 +59,7 @@ async function setupScenario(label: string) {
     await migrationPool.end();
   }
 
-  // The DRIVER-05 point under test: a plain node-postgres Pool — connectionString only, no
+  // The point under test: a plain node-postgres Pool — connectionString only, no
   // `types` override. See module doc.
   const sourcePool = new Pool({ connectionString: withQuietPostgresUrl(scenario.databaseUrl) });
   const sourceDb: NodePgDatabase = drizzle({ client: sourcePool });
@@ -64,7 +68,7 @@ async function setupScenario(label: string) {
   const slotName = `test_slot_driverminipg_${label}_${randomSuffix()}`;
 
   const registry = buildRegistry();
-  const runtime = expose(registry, {
+  const runtime = new PulseRuntime(registry, {
     databaseUrl: scenario.databaseUrl,
     sourceDb,
     pull: true,
@@ -95,7 +99,7 @@ async function teardownScenario(s: Scenario): Promise<void> {
   await s.scenario.drop();
 }
 
-describe('a plain pg sourceDb coexisting with minipg replication (DRIVER-05 / DRIVER-04)', () => {
+describe('a plain pg sourceDb coexisting with minipg replication', () => {
   test('coexistence: embedded list() and an HTTP subscribe baseline both converge to source truth, including date/timestamp/point columns', async () => {
     const s = await setupScenario('coexist');
     try {
@@ -154,7 +158,7 @@ describe('a plain pg sourceDb coexisting with minipg replication (DRIVER-05 / DR
     }
   });
 
-  test('a TOAST-omitted UPDATE column survives an unrelated-column update in both the events table and embedded list() (DRIVER-04)', async () => {
+  test('a TOAST-omitted UPDATE column survives an unrelated-column update in both the events table and embedded list()', async () => {
     const s = await setupScenario('toast');
     try {
       const client = createPulseClient(s.runtime);

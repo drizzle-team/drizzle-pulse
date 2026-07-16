@@ -4,8 +4,8 @@ import { makePulseRuntime, makeResolvedQuery } from './mock-runtime.js';
 
 // ---------------------------------------------------------------------------
 // readCollectionBaseline: the watermark-then-baseline reader the embedded
-// tap-direct handshake (plan 18-03) consumes. Ordering is the entire point
-// (18-RESEARCH.md Pitfall 2) — recorded via invocation order, not timing.
+// tap-direct handshake consumes. Ordering is the entire point —
+// recorded via invocation order, not timing.
 // ---------------------------------------------------------------------------
 
 describe('readCollectionBaseline', () => {
@@ -75,7 +75,7 @@ describe('readCollectionBaseline', () => {
 });
 
 // ---------------------------------------------------------------------------
-// onTerminalError: D-04's terminal-failure edge — fires once reconnect gives
+// onTerminalError: the terminal-failure edge — fires once reconnect gives
 // up permanently, then the runtime stops (collections dispose via onStop).
 // ---------------------------------------------------------------------------
 
@@ -94,7 +94,7 @@ describe('onTerminalError', () => {
     });
 
     // `isRunning` is now a getter over `run !== null` — install a run object directly.
-    // RECONNECT_MAX_RETRIES is a hardcoded module constant in expose.ts (D-04: no reconnect
+    // RECONNECT_MAX_RETRIES is a hardcoded module constant in expose.ts (no reconnect
     // knobs), not a per-runtime config surface — mirror its value (10) directly.
     (runtime as any).run = { abort: new AbortController(), attempts: 10 };
 
@@ -117,7 +117,7 @@ describe('onTerminalError', () => {
       events.push('stop');
     });
 
-    // RECONNECT_MAX_RETRIES is a hardcoded module constant in expose.ts (D-04: no reconnect
+    // RECONNECT_MAX_RETRIES is a hardcoded module constant in expose.ts (no reconnect
     // knobs), not a per-runtime config surface — mirror its value (10) directly.
     (runtime as any).run = { abort: new AbortController(), attempts: 10 };
 

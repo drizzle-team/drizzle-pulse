@@ -1,5 +1,5 @@
 /**
- * Integration proof: runtime-owned events-table DDL. expose().provision() (the same
+ * Integration proof: runtime-owned events-table DDL. PulseRuntime.provision() (the same
  * reconcile path start() runs, minus the replication stream) creates/recreates events tables
  * and their pulse_meta bookkeeping against real Postgres, rotating an epoch on every recreate
  * and sweeping orphans. Each scenario builds its own healthy standalone database per the
@@ -9,7 +9,7 @@
 import { describe, expect, spyOn, test } from 'bun:test';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
-import { createPulseRegistry, expose, LogLevel } from 'drizzle-pulse/server';
+import { createPulseRegistry, LogLevel, PulseRuntime } from 'drizzle-pulse/server';
 import postgres from 'postgres';
 import { orders } from './fixtures/minimal-orders/schema.js';
 import { createScenarioDb, waitFor } from './helpers/scenario.js';
@@ -22,7 +22,7 @@ async function setupHealthyScenario(label: string, logLevel: LogLevel = LogLevel
 
   const sourceSql = postgres(withQuietPostgresUrl(scenario.databaseUrl));
   const registry = createPulseRegistry({ orders: pulse(orders).query() });
-  const runtime = expose(registry, {
+  const runtime = new PulseRuntime(registry, {
     databaseUrl: scenario.databaseUrl,
     sourceDb: drizzle({ client: sourceSql }),
     pull: true,
@@ -57,7 +57,7 @@ async function metaEpoch(sql: HealthyScenario['sql']): Promise<string | undefine
 // Poll-retry a slot drop (cloned from slot-recovery.test.ts): the previous owning backend's
 // "active" flag can lag its actual termination by a beat, so a single attempt can spuriously
 // hit 55006 (object_in_use). Reconcile scenarios never created a persistent slot before (only
-// provision() was exercised) — a full start() does, and G6 must drop it or leak against the
+// provision() was exercised) — a full start() does, and the DDL-divergence scenario must drop it or leak against the
 // shared container's 4-slot budget.
 async function dropSlotWithRetry(sql: HealthyScenario['sql'], slotName: string): Promise<void> {
   await waitFor(async () => {
@@ -98,7 +98,7 @@ async function nonSnapshotEventCount(sql: HealthyScenario['sql']): Promise<numbe
   return rows.length;
 }
 
-// DISCOVERY (see slot-resume.test.ts G1/G2 for the full empirical trail against unmodified
+// DISCOVERY (see slot-resume.test.ts for the full empirical trail against unmodified
 // expose.ts + minipg): resolveSlotStartup's continuity gate compares the persisted
 // pulse_stream.last_lsn watermark (a commit's own record LSN) against the slot's
 // confirmed_flush_lsn (the transaction's end LSN, always strictly greater after a normal ack) —
@@ -135,7 +135,7 @@ function buildSecondRuntime(
 ) {
   const sourceSql = postgres(withQuietPostgresUrl(databaseUrl));
   const registry = createPulseRegistry({ orders: pulse(orders).query() });
-  const runtime = expose(registry, {
+  const runtime = new PulseRuntime(registry, {
     databaseUrl,
     sourceDb: drizzle({ client: sourceSql }),
     pull: true,
@@ -250,7 +250,7 @@ describe('runtime-owned events-table reconcile', () => {
     }
   });
 
-  test('DDL divergence at boot with an intact slot: start() recreates, reseeds via ensureBaselines, resumes the slot, and streams (G6)', async () => {
+  test('DDL divergence at boot with an intact slot: start() recreates, reseeds via ensureBaselines, resumes the slot, and streams', async () => {
     const label = 'g6full';
     const s = await setupHealthyScenario(label);
     const slotName = `reconcile_slot_${label}`;

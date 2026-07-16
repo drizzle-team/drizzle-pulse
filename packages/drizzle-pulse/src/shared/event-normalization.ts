@@ -1,11 +1,12 @@
 import type { PgColumn } from 'drizzle-orm/pg-core';
 
 /**
- * Extracts a query-keyed row from an SQL-name-keyed event record.
+ * Extracts a query-keyed row from an already JS-property-keyed event record.
  *
  * Iterates over `columns` (mapping query key → PgColumn) and copies
- * `rawEvent[keyPrefix + sqlName]` into the result under the query key,
- * skipping keys whose source value is `undefined`.
+ * `rawEvent[keyPrefix + queryKey]` into the result under the query key, skipping
+ * keys whose source value is `undefined`. The query keys mirror the source
+ * table's JS property keys, so they also index the events-table record.
  *
  * Values arrive already in their JS types: the HTTP-pull path reads the events
  * table via a typed Drizzle select, and the embedded WAL tap receives rows the
@@ -20,8 +21,8 @@ export function extractRow(
   keyPrefix = '',
 ): Record<string, unknown> | null {
   const row: Record<string, unknown> = {};
-  for (const [queryKey, sourceColumn] of Object.entries(columns)) {
-    const value = rawEvent[`${keyPrefix}${sourceColumn.name}`];
+  for (const queryKey of Object.keys(columns)) {
+    const value = rawEvent[`${keyPrefix}${queryKey}`];
     if (value !== undefined) {
       row[queryKey] = value;
     }

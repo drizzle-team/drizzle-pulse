@@ -1,9 +1,8 @@
 /**
- * Integration proof: the LOCKED backfill/resume mechanism (STATE.md §Decisions, phase-19
- * plan-04) auto-heals a lost or invalidated replication slot — mid-run and across a restart —
- * without ever terminating the runtime or consuming a reconnect retry (D-02), recreating via an
- * exported snapshot with epoch rotation and eager events-table seeding (D-03), and gaplessly
- * re-baselining any live embedded collection anchored at the same snapshot (D-01/D-02).
+ * Integration proof: the backfill/resume mechanism auto-heals a lost or invalidated replication
+ * slot — mid-run and across a restart — without ever terminating the runtime or consuming a
+ * reconnect retry, recreating via an exported snapshot with epoch rotation and eager events-table
+ * seeding, and gaplessly re-baselining any live embedded collection anchored at the same snapshot.
  *
  * Each scenario builds its own standalone ephemeral database (bare `orders` table only —
  * reconcile() self-provisions the publication + REPLICA IDENTITY FULL + events schema exactly
@@ -15,7 +14,7 @@ import { describe, expect, test } from 'bun:test';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createPulseClient } from 'drizzle-pulse/client/embedded';
-import { createPulseRegistry, expose, LogLevel } from 'drizzle-pulse/server';
+import { createPulseRegistry, LogLevel, PulseRuntime } from 'drizzle-pulse/server';
 import { createPulseHonoRouter as createServerRouter } from 'drizzle-pulse/server/hono';
 import type { Hono } from 'hono';
 import postgres from 'postgres';
@@ -42,7 +41,7 @@ function buildRuntime(databaseUrl: string, publicationName: string, slotName: st
   const sourceSql = postgres(withQuietPostgresUrl(databaseUrl));
   const sourceDb = drizzle({ client: sourceSql });
   const registry = buildRegistry();
-  const runtime = expose(registry, {
+  const runtime = new PulseRuntime(registry, {
     databaseUrl,
     sourceDb,
     pull: true,
@@ -112,7 +111,7 @@ async function pullUntilEvents(
   }
 }
 
-describe('Slot recovery (DRIVER-02): LOCKED backfill/resume auto-heal', () => {
+describe('Slot recovery: backfill/resume auto-heal', () => {
   test('mid-run: slot loss auto-heals — no terminal error, gapless embedded convergence, PullResetResponse on the stale cursor, fresh $op=snapshot seed', async () => {
     const scenario = await createScenarioDb('pulse_slotrec_midrun');
     const { sql } = scenario;
@@ -167,7 +166,7 @@ describe('Slot recovery (DRIVER-02): LOCKED backfill/resume auto-heal', () => {
       // No terminal error — the recreate auto-healed inside the reconnect cycle.
       expect(terminalError).toBeNull();
 
-      // Epoch rotated (D-03) and a fresh $op='snapshot' seed row was written from the exported
+      // Epoch rotated and a fresh $op='snapshot' seed row was written from the exported
       // snapshot into the recreated events table.
       const epochAfter = await eventsTableEpoch(sql);
       expect(epochAfter).toBeDefined();

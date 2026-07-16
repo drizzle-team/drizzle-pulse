@@ -34,8 +34,8 @@ describe('start() failure rolls back to a restartable state', () => {
       databaseUrl: 'postgresql://user:pass@localhost/test',
     }) as any;
 
-    // Baseline seeding moved inside the supervised connect (resolveSlot's resume branch,
-    // documented delta b) — a failure there now becomes a supervised retry, not a start()
+    // Baseline seeding moved inside the supervised connect (resolveSlot's resume branch) —
+    // a failure there now becomes a supervised retry, not a start()
     // rejection. reconcile() is the only await left in start()'s try block before the guard
     // resolves, so it's the seam that must throw to exercise the rollback path.
     let storeEnded = 0;

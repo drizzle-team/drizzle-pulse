@@ -1,8 +1,8 @@
 /**
- * Integration proof: the resolveSlotStartup resume path (LOCKED backfill/resume spec,
- * STATE.md §Decisions, D-02) — an intact, continuous slot resumes from confirmed_flush with no
- * recreate, no epoch rotation, and replay-tail dedupe (G1); a slot whose active_pid belongs to
- * a stale occupier is evicted and the resume proceeds the same way (G2). Both scenarios build
+ * Integration proof: the resolveSlotStartup resume path — an intact, continuous slot resumes
+ * from confirmed_flush with no recreate, no epoch rotation, and replay-tail dedupe; a slot whose
+ * active_pid belongs to a stale occupier is evicted and the resume proceeds the same way. Both
+ * scenarios build
  * their own standalone ephemeral database and tear themselves down in a `finally` block, per
  * the self-managed pattern in slot-recovery.test.ts — this file's runtimes stop/restart against
  * the SAME slot, which the shared cached harness cannot express.
@@ -12,7 +12,7 @@ import { describe, expect, spyOn, test } from 'bun:test';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createPulseClient } from 'drizzle-pulse/client/embedded';
-import { createPulseRegistry, expose, LogLevel } from 'drizzle-pulse/server';
+import { createPulseRegistry, LogLevel, PulseRuntime } from 'drizzle-pulse/server';
 import { createPulseHonoRouter as createServerRouter } from 'drizzle-pulse/server/hono';
 import type { Hono } from 'hono';
 import { replication } from 'minipg';
@@ -40,7 +40,7 @@ function buildRuntime(databaseUrl: string, publicationName: string, slotName: st
   const sourceSql = postgres(withQuietPostgresUrl(databaseUrl));
   const sourceDb = drizzle({ client: sourceSql });
   const registry = buildRegistry();
-  const runtime = expose(registry, {
+  const runtime = new PulseRuntime(registry, {
     databaseUrl,
     sourceDb,
     pull: true,
@@ -175,7 +175,7 @@ function mentionsRecreated(spy: ReturnType<typeof spyOn>): boolean {
 }
 
 describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeover', () => {
-  test('G1: intact-slot resume — no recreate, no rotation, replay-tail dedupe, floor advances only on new work', async () => {
+  test('intact-slot resume — no recreate, no rotation, replay-tail dedupe, floor advances only on new work', async () => {
     const scenario = await createScenarioDb('pulse_slotresume_g1');
     const { sql } = scenario;
     const publicationName = `slotresume_g1_pub_${randomSuffix()}`;
@@ -281,7 +281,7 @@ describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeo
     }
   });
 
-  test('G2: stale-PID takeover on resume — occupier evicted, no recreate, pipeline live', async () => {
+  test('stale-PID takeover on resume — occupier evicted, no recreate, pipeline live', async () => {
     const scenario = await createScenarioDb('pulse_slotresume_g2');
     const { sql } = scenario;
     const publicationName = `slotresume_g2_pub_${randomSuffix()}`;
@@ -295,7 +295,7 @@ describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeo
         await a.runtime.start();
         await waitForSlotActive(sql, slotName);
 
-        // See the G1 test's cursor-ordering comment above: subscribe MUST precede the insert.
+        // See the intact-slot resume test's cursor-ordering comment above: subscribe MUST precede the insert.
         const cursor = await subscribeClient(a.router, 'ordersByStatus', { status: 'accepted' });
         await sql.unsafe(
           `INSERT INTO "orders" (driver_id, status, price) VALUES (1, 'accepted', 10)`,
@@ -310,13 +310,13 @@ describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeo
         await a.sourceSql.end();
       }
 
-      // See seedContinuousWatermark's DISCOVERY comment on the G1 test above: the stale-PID
+      // See seedContinuousWatermark's DISCOVERY comment on the intact-slot resume test above: the stale-PID
       // eviction branch lives INSIDE resolveSlotStartup's continuity gate, so the same
       // watermark-vs-confirmed_flush gap must be closed here too, or B recreates before it ever
       // reaches the eviction logic this test targets.
       await seedContinuousWatermark(sql, slotName);
 
-      // A raw minipg replication connection — NOT a second expose() runtime, which would evict
+      // A raw minipg replication connection — NOT a second PulseRuntime, which would evict
       // B back the same way B is about to evict this one (a live runtime auto-heals).
       const occ = await replication(scenario.databaseUrl);
       let floatingRejected = false;

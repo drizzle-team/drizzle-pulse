@@ -1,5 +1,5 @@
 /**
- * Integration proof: BUG-02 — a pk-changing UPDATE (`UPDATE orders SET id = id + N`) must
+ * Integration proof: a pk-changing UPDATE (`UPDATE orders SET id = id + N`) must
  * synthesize delete(oldPk) + insert(newPk) so no consumer retains a ghost old-pk row. Proven in
  * both pull modes: pull:true forces REPLICA IDENTITY FULL (the old tuple is always full);
  * pull:false runs REPLICA IDENTITY DEFAULT (the old tuple is key-only), and synthesis reads only
@@ -15,7 +15,7 @@ import { describe, expect, test } from 'bun:test';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createPulseClient, createPulseEvents } from 'drizzle-pulse/client/embedded';
-import { createPulseRegistry, expose, LogLevel } from 'drizzle-pulse/server';
+import { createPulseRegistry, LogLevel, PulseRuntime } from 'drizzle-pulse/server';
 import { createPulseHonoRouter as createServerRouter } from 'drizzle-pulse/server/hono';
 import type { Hono } from 'hono';
 import postgres from 'postgres';
@@ -52,7 +52,7 @@ async function pullUntilEvents(
   }
 }
 
-describe('pk-change (BUG-02): pk-changing UPDATE synthesizes delete(oldPk)+insert(newPk)', () => {
+describe('pk-change: pk-changing UPDATE synthesizes delete(oldPk)+insert(newPk)', () => {
   test('pull: true — embedded collection, HTTP pull cursor, and events table all drop the ghost old-pk row', async () => {
     const scenario = await createScenarioDb('pulse_pkchange_pulltrue');
     const { sql } = scenario;
@@ -61,7 +61,7 @@ describe('pk-change (BUG-02): pk-changing UPDATE synthesizes delete(oldPk)+inser
 
     const sourceSql = postgres(withQuietPostgresUrl(scenario.databaseUrl));
     const sourceDb = drizzle({ client: sourceSql });
-    const runtime = expose(buildRegistry(), {
+    const runtime = new PulseRuntime(buildRegistry(), {
       databaseUrl: scenario.databaseUrl,
       sourceDb,
       pull: true,
@@ -137,7 +137,7 @@ describe('pk-change (BUG-02): pk-changing UPDATE synthesizes delete(oldPk)+inser
 
     const sourceSql = postgres(withQuietPostgresUrl(scenario.databaseUrl));
     const sourceDb = drizzle({ client: sourceSql });
-    const runtime = expose(buildRegistry(), {
+    const runtime = new PulseRuntime(buildRegistry(), {
       databaseUrl: scenario.databaseUrl,
       sourceDb,
       pull: false,

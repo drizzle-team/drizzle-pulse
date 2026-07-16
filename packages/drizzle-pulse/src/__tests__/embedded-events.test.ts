@@ -37,7 +37,7 @@ describe('createPulseEvents — sync rejection paths', () => {
     expect(() => (events as any).orders(() => {})).toThrow(/\.limit\(\)/);
   });
 
-  test('a missing/wrong-arity callback throws synchronously instead of failing silently per event (WR-04)', () => {
+  test('a missing/wrong-arity callback throws synchronously instead of failing silently per event', () => {
     const runtime = makeMockRuntime();
     const events = createPulseEvents(runtime as any);
     // No-args query called as `events.orders(optionsObject)` — the "callback" is really options.

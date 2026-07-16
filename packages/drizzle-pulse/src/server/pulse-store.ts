@@ -59,7 +59,7 @@ export class PulseStore {
           event.eventsTable,
           this.buildEventRow({
             op: event.op,
-            pkColumnName: event.pkColumnName,
+            pkKey: event.pkKey,
             pkValue: event.pkValue,
             row: event.row,
             oldRow: event.oldRow,
@@ -78,7 +78,7 @@ export class PulseStore {
 
   async createBaselineSnapshot(
     table: PgTable,
-    pkColumnName: string,
+    pkKey: string,
     baselineRow: Record<string, unknown> | null,
     dbHandle: DbHandle | TxHandle = this.db,
   ): Promise<void> {
@@ -94,16 +94,16 @@ export class PulseStore {
 
     const row = baselineRow;
     if (!row) return;
-    const pkValue = row[pkColumnName];
+    const pkValue = row[pkKey];
     if (pkValue === undefined) {
-      throw new Error(`Baseline snapshot missing primary key ${pkColumnName}`);
+      throw new Error(`Baseline snapshot missing primary key ${pkKey}`);
     }
 
     await this.insertEventRow(
       table,
       this.buildEventRow({
         op: 'snapshot',
-        pkColumnName,
+        pkKey,
         pkValue,
         row,
         oldRow: row,
@@ -145,22 +145,19 @@ export class PulseStore {
   // original persistDeleteEvent behavior verbatim).
   private buildEventRow(input: {
     op: 'insert' | 'update' | 'delete' | 'snapshot';
-    pkColumnName: string;
+    pkKey: string;
     pkValue: unknown;
     row: Record<string, unknown>;
     oldRow: Record<string, unknown> | null;
   }): Record<string, unknown> {
-    const { pkColumnName, pkValue, op, row, oldRow } = input;
+    const { pkKey, pkValue, op, row, oldRow } = input;
 
-    const nextRowData =
-      op === 'delete' ? null : this.withPrimaryKeyValue(row, pkColumnName, pkValue);
+    const nextRowData = op === 'delete' ? null : this.withPrimaryKeyValue(row, pkKey, pkValue);
     const nextOldRowData =
-      op === 'insert'
-        ? nextRowData
-        : this.withPrimaryKeyValue(oldRow ?? row, pkColumnName, pkValue);
+      op === 'insert' ? nextRowData : this.withPrimaryKeyValue(oldRow ?? row, pkKey, pkValue);
 
     return {
-      [pkColumnName]: pkValue,
+      [pkKey]: pkValue,
       ...(nextRowData ?? nextOldRowData),
       ...this.toOldRowValues(nextOldRowData ?? {}),
       $op: op,
@@ -169,9 +166,9 @@ export class PulseStore {
 
   private withPrimaryKeyValue(
     row: Record<string, unknown>,
-    pkColumnName: string,
+    pkKey: string,
     pkValue: unknown,
   ): Record<string, unknown> {
-    return row[pkColumnName] === undefined ? { ...row, [pkColumnName]: pkValue } : row;
+    return row[pkKey] === undefined ? { ...row, [pkKey]: pkValue } : row;
   }
 }

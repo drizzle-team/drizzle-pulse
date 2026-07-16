@@ -5,7 +5,7 @@ import SuperJSON from 'superjson';
 import { z } from 'zod';
 import { pulse } from '../pulse-table.js';
 import { buildEventsTable } from '../server/events-table-resolver.js';
-import { expose } from '../server/expose.js';
+import { PulseRuntime } from '../server/expose.js';
 import { createPulseHonoRouter } from '../server/hono.js';
 import type { AnyPulseBuilders, PulseRegistry } from '../server/pulse-registry.js';
 import { createPulseRegistry } from '../server/pulse-registry.js';
@@ -588,7 +588,7 @@ describe('subscribe reads the snapshot cursor before the baseline SELECT', () =>
   });
 });
 
-describe('expose() rejects events-table name collisions', () => {
+describe('PulseRuntime rejects events-table name collisions', () => {
   test('distinct source tables deriving the same events-table name throw, naming both', () => {
     // Escaping is not injective: schema "a_" table "b" and schema "a" table "_b" both
     // derive "a___b".
@@ -600,12 +600,13 @@ describe('expose() rejects events-table name collisions', () => {
       b: pulse(tableB).query(),
     });
 
-    expect(() =>
-      expose(registry, {
-        databaseUrl: 'postgresql://unused',
-        sourceDb: createPulseSourceDbMock(() => []),
-        pull: true,
-      }),
+    expect(
+      () =>
+        new PulseRuntime(registry, {
+          databaseUrl: 'postgresql://unused',
+          sourceDb: createPulseSourceDbMock(() => []),
+          pull: true,
+        }),
     ).toThrow(/a_\.b and a\._b both derive the same events-table name drizzle_pulse\.a___b/);
   });
 });

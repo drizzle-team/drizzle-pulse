@@ -33,7 +33,6 @@ export {
 export {
   type ExposeConfig,
   type ExposeWalConfig,
-  expose,
   LogLevel,
   PulseRuntime,
 } from './expose.js';

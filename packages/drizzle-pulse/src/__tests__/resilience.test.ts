@@ -83,7 +83,7 @@ describe('runtime reconnect edge', () => {
   });
 });
 
-describe('WR-02: zero-progress connections never reset attempts', () => {
+describe('zero-progress connections never reset attempts', () => {
   test('connections that clean-end with zero commits exhaust attempts and reach the terminal path', async () => {
     const runtime = makePulseRuntime() as any;
     let terminalError: Error | null = null;
@@ -95,14 +95,14 @@ describe('WR-02: zero-progress connections never reset attempts', () => {
     runtime.resolveSlot = async () => ({ slot: 'test_slot', from: undefined });
     // Every connection clean-ends without processing a single commit — run.attempts is only
     // reset inside stream()'s commit branch, so a runtime whose connections never land a
-    // commit must still exhaust RECONNECT_MAX_RETRIES and reach giveUp() (WR-02).
+    // commit must still exhaust RECONNECT_MAX_RETRIES and reach giveUp().
     runtime.stream = async () => {};
 
     const run = { abort: new AbortController(), attempts: 0 };
 
     await withFastTimers(() => runtime.supervise(run, makeFirst()));
 
-    // RECONNECT_MAX_RETRIES is a hardcoded module constant in expose.ts (D-04: no reconnect
+    // RECONNECT_MAX_RETRIES is a hardcoded module constant in expose.ts (no reconnect
     // knobs), not a per-runtime config surface — mirror its value (10) directly.
     expect(run.attempts).toBe(10);
     expect(terminalError).toBeInstanceOf(Error);

@@ -24,7 +24,7 @@ Live PostgreSQL + WAL integration coverage for the Pulse SDK runtime. These test
 | `src/consistency-oracle.test.ts` | SPLIT-04 oracle: deterministic mid-baseline concurrent insert/update/delete races plus a 15-run randomized property comparing embedded `list()`, an HTTP `PulseQuery` pull, and a direct SQL SELECT against the same runtime |
 | `src/reconcile.test.ts` | runtime self-provisioning: events-schema/`pulse_meta` creation, DDL-hash recreate + epoch rotation, orphan sweep |
 | `src/reconcile-publication.test.ts` | publication create/membership-diff and `REPLICA IDENTITY` reconciliation |
-| `src/reconnect-rebaseline.test.ts` | embedded-collection re-baseline behavior across a real WAL reconnect edge (G7: dropped walsender socket) and a re-baseline pin outliving its 5s window (G5) — same watermark/baseline handshake as initial load |
+| `src/reconnect-rebaseline.test.ts` | embedded-collection re-baseline behavior across a real WAL reconnect edge (dropped walsender socket) and a re-baseline pin outliving its 5s window — same watermark/baseline handshake as initial load |
 | `src/fixtures/` | fixture variants, source-table migrations (events tables are runtime-provisioned, not migrated) |
 
 ## Harness Lifecycle
@@ -34,7 +34,7 @@ beforeAll
   → setupTestSuiteForFixture(fixture, registry)
     → create unique database
     → apply fixture migrations
-    → create runtime via expose(...)
+    → create runtime via new PulseRuntime(...)
     → void runtime.start()
     → waitForWalStartup(...)
     → runtime ensures baseline snapshots

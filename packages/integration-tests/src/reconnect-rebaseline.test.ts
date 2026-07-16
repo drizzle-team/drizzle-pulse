@@ -1,11 +1,11 @@
 /**
- * G7 (WAL-01): a REAL dropped walsender socket — not the private onReplicationStart hook —
+ * A REAL dropped walsender socket — not the private onReplicationStart hook —
  * must still trigger the embedded collection's re-baseline handshake: one onChange with an
  * empty event batch and a fresh watermark lsn, no row loss or duplication, and continued
  * delivery afterwards. Supersedes the deleted resilience.test.ts, which drove the same
  * assertions off a faked edge ((runtime as any).onReplicationStart()).
  *
- * G5 (WAL-01): a reconnect re-baseline whose collection baseline SELECT outlives the 5s
+ * A reconnect re-baseline whose collection baseline SELECT outlives the 5s
  * REBASELINE_PIN_WINDOW_MS still converges gaplessly — pins maybeReleaseSnapshotBaseline's
  * release-awaits-in-flight-read rule (expose.ts): the window timer firing while `inFlight > 0`
  * must defer the release rather than tear down the pin under the live read.
@@ -19,7 +19,7 @@ import { describe, expect, test } from 'bun:test';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createPulseClient } from 'drizzle-pulse/client/embedded';
-import { createPulseRegistry, expose, LogLevel } from 'drizzle-pulse/server';
+import { createPulseRegistry, LogLevel, PulseRuntime } from 'drizzle-pulse/server';
 import postgres from 'postgres';
 import { orders, ordersByStatusArgsSchema } from './fixtures/minimal-orders/schema.js';
 import { createScenarioDb, waitFor } from './helpers/scenario.js';
@@ -75,8 +75,8 @@ async function eventsTableEpoch(sql: ReturnType<typeof postgres>): Promise<strin
   return rows[0]?.epoch;
 }
 
-describe('Reconnect re-baseline (WAL-01, G7/G5)', () => {
-  test('G7: a real dropped socket triggers a re-baseline and the collection stays consistent', async () => {
+describe('Reconnect re-baseline', () => {
+  test('a real dropped socket triggers a re-baseline and the collection stays consistent', async () => {
     const base = new URL(baseDatabaseUrl());
     const proxy = startWalProxy(base.hostname, Number(base.port));
     const proxyPort = await proxy.listen();
@@ -88,7 +88,7 @@ describe('Reconnect re-baseline (WAL-01, G7/G5)', () => {
     const slotName = `reconnrb_g7_slot_${randomSuffix()}`;
     const sourceSql = postgres(withQuietPostgresUrl(scenario.databaseUrl));
 
-    const runtime = expose(buildRegistry(), {
+    const runtime = new PulseRuntime(buildRegistry(), {
       databaseUrl: proxiedDatabaseUrl(scenario.databaseUrl, proxyPort),
       sourceDb: drizzle({ client: sourceSql }),
       pull: true,
@@ -121,7 +121,7 @@ describe('Reconnect re-baseline (WAL-01, G7/G5)', () => {
 
       // Real edge: destroys the walsender's client socket — the minipg iterator fails,
       // handleDisconnect schedules the reconnect (backoff ~1-2s). resolveSlotStartup's
-      // continuity gate is unreachable once any commit has landed (STATE.md: watermark only
+      // continuity gate is unreachable once any commit has landed (watermark only
       // advances on recreate, confirmed_flush always outruns it), so this takes the recreate
       // path in practice — onReplicationStart still fires the reconnect listeners either way.
       proxy.dropClient();
@@ -154,7 +154,7 @@ describe('Reconnect re-baseline (WAL-01, G7/G5)', () => {
     }
   });
 
-  test('G5: a reconnect re-baseline whose SELECT outlives the 5s pin window still converges gaplessly', async () => {
+  test('a reconnect re-baseline whose SELECT outlives the 5s pin window still converges gaplessly', async () => {
     const base = new URL(baseDatabaseUrl());
     const proxy = startWalProxy(base.hostname, Number(base.port));
     const proxyPort = await proxy.listen();
@@ -164,7 +164,7 @@ describe('Reconnect re-baseline (WAL-01, G7/G5)', () => {
     const slotName = `reconnrb_g5_slot_${randomSuffix()}`;
     const sourceSql = postgres(withQuietPostgresUrl(scenario.databaseUrl));
 
-    const runtime = expose(buildRegistry(), {
+    const runtime = new PulseRuntime(buildRegistry(), {
       databaseUrl: proxiedDatabaseUrl(scenario.databaseUrl, proxyPort),
       sourceDb: drizzle({ client: sourceSql }),
       pull: true,

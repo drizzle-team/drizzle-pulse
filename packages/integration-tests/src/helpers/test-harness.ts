@@ -6,11 +6,10 @@ import type { QueryDescriptor } from 'drizzle-pulse';
 import { createPulseClient, PulseQuery } from 'drizzle-pulse/client';
 import {
   type AnyQueries,
-  expose,
   LogLevel,
   type PulseAuthContext,
   type PulseRegistry,
-  type PulseRuntime,
+  PulseRuntime,
 } from 'drizzle-pulse/server';
 import { createPulseHonoRouter as createServerRouter } from 'drizzle-pulse/server/hono';
 import type { Hono } from 'hono';
@@ -247,7 +246,7 @@ function createTestRuntime<TQueries extends AnyQueries>(
   const sourceSql = createQuietPostgresClient(databaseUrl);
   const sourceDb = drizzle({ client: sourceSql });
 
-  const runtime = expose(registry, {
+  const runtime = new PulseRuntime(registry, {
     databaseUrl,
     sourceDb,
     pull: true,

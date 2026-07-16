@@ -1,9 +1,9 @@
 /**
- * Integration proof: expose()'s boot reconciliation against real Postgres, through the full
+ * Integration proof: PulseRuntime's boot reconciliation against real Postgres, through the full
  * start() path (WAL stream and all). All scenarios below run pull:true.
  *
  * Most preconditions the guard once only asserted are now self-provisioned inside reconcile():
- * a missing publication is created, a missing member is added, and (pull:true only — RIF-02) a
+ * a missing publication is created, a missing member is added, and (pull:true only) a
  * source without REPLICA IDENTITY FULL is altered. These scenarios prove start() heals a
  * bare/partial setup and then boots. wal_level stays the one fail-closed assert (the runtime
  * can't fix a server-wide setting), but it can't be toggled on the shared test server, so it has
@@ -15,7 +15,7 @@
 import { describe, expect, test } from 'bun:test';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
-import { createPulseRegistry, expose, LogLevel } from 'drizzle-pulse/server';
+import { createPulseRegistry, LogLevel, PulseRuntime } from 'drizzle-pulse/server';
 import postgres from 'postgres';
 import { orders } from './fixtures/minimal-orders/schema.js';
 import { createScenarioDb } from './helpers/scenario.js';
@@ -71,7 +71,7 @@ describe('Startup reconcile (self-provisioning)', () => {
 
     try {
       const registry = createPulseRegistry({ orders: pulse(orders).query() });
-      const runtime = expose(registry, {
+      const runtime = new PulseRuntime(registry, {
         databaseUrl: ctx.databaseUrl,
         sourceDb: drizzle({ client: sourceSql }),
         pull: true,
@@ -101,7 +101,7 @@ describe('Startup reconcile (self-provisioning)', () => {
       // the way into the CREATE PUBLICATION reconcile() runs. provision() avoids slot setup.
 
       const registry = createPulseRegistry({ orders: pulse(orders).query() });
-      const runtime = expose(registry, {
+      const runtime = new PulseRuntime(registry, {
         databaseUrl: ctx.databaseUrl,
         sourceDb: drizzle({ client: sourceSql }),
         pull: true,
@@ -128,7 +128,7 @@ describe('Startup reconcile (self-provisioning)', () => {
       // Deliberately absent: the events table — the runtime creates it at boot.
 
       const registry = createPulseRegistry({ orders: pulse(orders).query() });
-      const runtime = expose(registry, {
+      const runtime = new PulseRuntime(registry, {
         databaseUrl: ctx.databaseUrl,
         sourceDb: drizzle({ client: sourceSql }),
         pull: true,
@@ -171,7 +171,7 @@ describe('Startup reconcile (self-provisioning)', () => {
       await ctx.sql.unsafe(`CREATE PUBLICATION ${publicationName} FOR TABLE "users"`);
 
       const registry = createPulseRegistry({ orders: pulse(orders).query() });
-      const runtime = expose(registry, {
+      const runtime = new PulseRuntime(registry, {
         databaseUrl: ctx.databaseUrl,
         sourceDb: drizzle({ client: sourceSql }),
         pull: true,

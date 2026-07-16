@@ -124,8 +124,8 @@ export class PulseRequestHandler {
       const rows =
         pageLimit !== undefined && hasMore ? fetchedRows.slice(0, pageLimit) : fetchedRows;
 
-      // Rows here are SELECT-shaped (keyed by JS property name), not events/WAL-shaped
-      // (keyed by SQL name) — index by the PK's JS query key, not pkColumn.name.
+      // Every in-memory row is keyed by JS property key — index by the PK's JS query key,
+      // which can still differ from pkColumn.name (e.g. `orderId: serial('order_id')`).
       const pkQueryKey = this.getPkQueryKey(resolvedQuery);
       const rawRangeStart = rows[0]?.[pkQueryKey] ?? null;
       const rawRangeEnd = rows[rows.length - 1]?.[pkQueryKey] ?? null;
@@ -186,8 +186,8 @@ export class PulseRequestHandler {
         request.rangeEnd,
       );
 
-      // WhereClause keys are matched against query.columns (JS property names), not SQL
-      // names — use the PK's JS query key here, not pkColumn.name.
+      // WhereClause keys are matched against query.columns (JS property keys) — use the PK's
+      // JS query key here, which can still differ from pkColumn.name.
       const cursorCondition: WhereClause = {
         [this.getPkQueryKey(subscription.query)]:
           subscription.query.order === 'asc' ? { gt: cursor } : { lt: cursor },
@@ -211,8 +211,8 @@ export class PulseRequestHandler {
       const hasMore = pageLimit !== undefined ? rows.length > pageLimit : false;
       const fetchedRows = pageLimit !== undefined && hasMore ? rows.slice(0, pageLimit) : rows;
 
-      // fetchedRows are SELECT-shaped (JS property keys) — index by the PK's JS query key,
-      // not pkColumn.name.
+      // Every in-memory row is keyed by JS property key — index by the PK's JS query key,
+      // which can still differ from pkColumn.name.
       const pkRowKey = this.getPkQueryKey(subscription.query);
       const ids = fetchedRows
         .map((row) => row[pkRowKey])
@@ -401,7 +401,7 @@ export class PulseRequestHandler {
   ): NormalizedEvent {
     return {
       snapshot: Number(rawEvent.$snapshot ?? 0),
-      pk: rawEvent[query.pkColumn.name],
+      pk: rawEvent[this.getPkQueryKey(query)],
       op: String(rawEvent.$op) as NormalizedEvent['op'],
       matchesNew: Boolean(rawEvent.$matches_new),
       matchesOld: Boolean(rawEvent.$matches_old),
@@ -468,8 +468,8 @@ export class PulseRequestHandler {
   }
 
   private buildResetWhereClause(subscription: Subscription): WhereClause | null {
-    // WhereClause keys are matched against query.columns (JS property names) — use the
-    // PK's JS query key here, not pkColumn.name.
+    // WhereClause keys are matched against query.columns (JS property keys) — use the PK's JS
+    // query key here, which can still differ from pkColumn.name.
     const pkColumnName = this.getPkQueryKey(subscription.query);
     if (subscription.query.order === 'desc') {
       if (!isPkComparable(subscription.rangeStart)) {
@@ -555,24 +555,24 @@ export class PulseRequestHandler {
     // source table at construction, so this throws rather than returning null for a
     // genuinely unknown query (subscription lookup upstream already guards that case).
     const eventsTable = this.getEventsTable(subscription.queryName);
-    // buildEventsTable() keys every column by its SQL name, so getColumns() lookups by
-    // SQL name below need no re-keying.
+    // buildEventsTable() keys every column by its JS property key (mirroring the source
+    // table), so getColumns() lookups by the query key below need no re-keying.
     const eventTableColumns = getColumns(eventsTable);
     const eventColumns = Object.fromEntries(
-      Object.entries(subscription.query.columns).map(([queryKey, sourceColumn]) => {
-        const eventColumn = eventTableColumns[sourceColumn.name];
+      Object.entries(subscription.query.columns).map(([queryKey]) => {
+        const eventColumn = eventTableColumns[queryKey];
         if (!eventColumn) {
-          throw new Error(`Missing events column "${sourceColumn.name}" for query`);
+          throw new Error(`Missing events column "${queryKey}" for query`);
         }
         return [queryKey, eventColumn] as const;
       }),
     );
     const oldEventColumns = Object.fromEntries(
-      Object.entries(subscription.query.columns).map(([queryKey, sourceColumn]) => {
-        const oldColumnName = `$old_${sourceColumn.name}`;
-        const oldEventColumn = eventTableColumns[oldColumnName];
+      Object.entries(subscription.query.columns).map(([queryKey]) => {
+        const oldColumnKey = `$old_${queryKey}`;
+        const oldEventColumn = eventTableColumns[oldColumnKey];
         if (!oldEventColumn) {
-          throw new Error(`Missing events old column "${oldColumnName}" for query`);
+          throw new Error(`Missing events old column "${oldColumnKey}" for query`);
         }
         return [queryKey, oldEventColumn] as const;
       }),
@@ -603,8 +603,8 @@ export class PulseRequestHandler {
         : (currentPredicate ?? oldPredicate);
     const rawEvents = await eventsDb
       .select({
-        // Projection keys must be SQL column names so the raw record matches extractRow's
-        // contract: rawEvent[$old_ + sourceColumn.name].
+        // Projection keys are the events table's JS property keys (which mirror the source
+        // table's), matching extractRow's contract: rawEvent[keyPrefix + queryKey].
         ...eventTableColumns,
         $matches_new: currentPredicate ? sql<boolean>`(${currentPredicate})` : sql<boolean>`true`,
         $matches_old: oldPredicate ? sql<boolean>`(${oldPredicate})` : sql<boolean>`true`,

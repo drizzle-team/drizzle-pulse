@@ -196,7 +196,7 @@ describe('Embedded Collection', () => {
     collection.dispose();
   });
 
-  // Assumption A3: every event produced by one multi-row transaction must carry the same
+  // Every event produced by one multi-row transaction must carry the same
   // commit lsn — asserted here against the real pgoutput pipeline, not just unit-mocked.
   test('a single-transaction multi-row insert delivers same-lsn changes', async () => {
     const client = createPulseClient(runtime);

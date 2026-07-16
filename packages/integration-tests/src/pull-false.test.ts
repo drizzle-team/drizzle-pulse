@@ -1,9 +1,9 @@
 /**
  * Integration proof: `pull: false` runtimes provision and write zero events-table
  * infrastructure while embedded collections and stateless events subscriptions stay fully
- * live over the WAL tap (DRIVER-06) — and their replication slot is temporary with a
- * randomized suffix so a crashed process can never leak WAL-retaining slot state (D-01).
- * REPLICA IDENTITY is never forced under pull:false (RIF-02) — only the publication is
+ * live over the WAL tap — and their replication slot is temporary with a
+ * randomized suffix so a crashed process can never leak WAL-retaining slot state.
+ * REPLICA IDENTITY is never forced under pull:false — only the publication is
  * self-provisioned. Each scenario builds its own standalone database (bare — no pre-existing
  * publication) so reconcile()'s self-provisioning of the WAL prerequisites is exercised, and
  * tears itself down in a `finally` block.
@@ -13,7 +13,7 @@ import { describe, expect, test } from 'bun:test';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createPulseClient, createPulseEvents } from 'drizzle-pulse/client/embedded';
-import { createPulseRegistry, expose, LogLevel } from 'drizzle-pulse/server';
+import { createPulseRegistry, LogLevel, PulseRuntime } from 'drizzle-pulse/server';
 import postgres from 'postgres';
 import { orders, ordersByStatusArgsSchema } from './fixtures/minimal-orders/schema.js';
 import { createScenarioDb, waitFor } from './helpers/scenario.js';
@@ -31,14 +31,14 @@ function buildRegistry() {
 async function setupPullFalseScenario(label: string) {
   const scenario = await createScenarioDb(`pulse_pullfalse_${label}`);
   // Deliberately absent: the publication — reconcile() still self-provisions it under
-  // pull:false (embedded needs WAL, per A3). REPLICA IDENTITY is left untouched under
-  // pull:false (RIF-02): the tap decodes old-tuple data via oldKind/unchanged instead.
+  // pull:false (embedded needs WAL). REPLICA IDENTITY is left untouched under
+  // pull:false: the tap decodes old-tuple data via oldKind/unchanged instead.
   const publicationName = `pullfalse_pub_${label}`;
   const slotName = `pullfalse_slot_${label}`;
   const sourceSql = postgres(withQuietPostgresUrl(scenario.databaseUrl));
 
   const registry = buildRegistry();
-  const runtime = expose(registry, {
+  const runtime = new PulseRuntime(registry, {
     databaseUrl: scenario.databaseUrl,
     sourceDb: drizzle({ client: sourceSql }),
     pull: false,
@@ -77,7 +77,7 @@ async function eventsSchemaRelationCount(sql: PullFalseScenario['sql']): Promise
   return rows.length;
 }
 
-describe('pull: false — embedded-only runtime writes nothing to events tables (DRIVER-06)', () => {
+describe('pull: false — embedded-only runtime writes nothing to events tables', () => {
   test('provisioning: zero events-schema relations; publication self-provisioned, REPLICA IDENTITY left at DEFAULT', async () => {
     const s = await setupPullFalseScenario('provision');
     try {
@@ -92,7 +92,7 @@ describe('pull: false — embedded-only runtime writes nothing to events tables 
       );
       expect(members.map((row) => row.tablename)).toEqual(['orders']);
 
-      // pull:false never forces REPLICA IDENTITY FULL (RIF-02) — zero durable mutation of user
+      // pull:false never forces REPLICA IDENTITY FULL — zero durable mutation of user
       // tables at boot, no ACCESS EXCLUSIVE lock.
       const replicaIdentity = await s.sql.unsafe<{ relreplident: string }[]>(
         `SELECT relreplident FROM pg_class WHERE relname = 'orders'`,
@@ -113,7 +113,7 @@ describe('pull: false — embedded-only runtime writes nothing to events tables 
     }
   });
 
-  test('slot hygiene (D-01): a temporary, randomized-suffix slot while running; gone after stop', async () => {
+  test('slot hygiene: a temporary, randomized-suffix slot while running; gone after stop', async () => {
     const s = await setupPullFalseScenario('slot');
     try {
       await s.runtime.start();
@@ -145,10 +145,10 @@ describe('pull: false — embedded-only runtime writes nothing to events tables 
     try {
       await s.runtime.start();
 
-      // Sequencing canary (ROADMAP criterion 1): relreplident stays 'd' — the delete below runs
+      // Sequencing canary: relreplident stays 'd' — the delete below runs
       // against a key-only old tuple, filtered by the collection's WHERE on `status` (a non-key
-      // column). This is the exact case that breaks if RIF-02 (key-only old tuple) had landed
-      // before RIF-01 (pk-membership delete detection): a where-evaluation against a tuple
+      // column). This is the exact case that breaks if key-only old-tuple decoding had landed
+      // before pk-membership delete detection: a where-evaluation against a tuple
       // missing `status` would silently keep the row.
       const replicaIdentity = await s.sql.unsafe<{ relreplident: string }[]>(
         `SELECT relreplident FROM pg_class WHERE relname = 'orders'`,
@@ -201,7 +201,7 @@ describe('pull: false — embedded-only runtime writes nothing to events tables 
     }
   });
 
-  test('wire-shape pin (criterion 5): the pull:false delete event is exactly { op, old_row, pk } with a pk-only old_row, and updates carry matchesNew with no old-match flag', async () => {
+  test('wire-shape pin: the pull:false delete event is exactly { op, old_row, pk } with a pk-only old_row, and updates carry matchesNew with no old-match flag', async () => {
     const s = await setupPullFalseScenario('wireshape');
     try {
       await s.runtime.start();
@@ -226,7 +226,7 @@ describe('pull: false — embedded-only runtime writes nothing to events tables 
       expect(updateEvent).toHaveProperty('matchesNew');
       expect(updateEvent).not.toHaveProperty('matchesOld');
 
-      // The sanctioned wire break (RIF-01/RIF-02): a pull:false delete's old_row is pk-only —
+      // The sanctioned wire break: a pull:false delete's old_row is pk-only —
       // no non-key data columns, regardless of the subscriber's WHERE. Any future field
       // addition/removal on this shape must consciously edit this pin.
       await s.sql.unsafe(`DELETE FROM "orders" WHERE id = $1`, [insertedId]);
@@ -245,7 +245,7 @@ describe('pull: false — embedded-only runtime writes nothing to events tables 
     }
   });
 
-  test('mid-run reconnect (G4): walsender kill re-converges a live embedded collection on a fresh temporary slot', async () => {
+  test('mid-run reconnect: walsender kill re-converges a live embedded collection on a fresh temporary slot', async () => {
     const s = await setupPullFalseScenario('reconnect');
     let terminalError: Error | null = null;
     s.runtime.onTerminalError((error) => {
@@ -263,7 +263,7 @@ describe('pull: false — embedded-only runtime writes nothing to events tables 
       );
       await waitFor(() => collection.list().length === 1);
 
-      // Locate the active temp slot (D-01: randomized-suffix, never the base slotName) and its
+      // Locate the active temp slot (randomized-suffix, never the base slotName) and its
       // walsender backend.
       const before = await s.sql.unsafe<{ slot_name: string; active_pid: number | null }[]>(
         `SELECT slot_name, active_pid FROM pg_replication_slots WHERE slot_name LIKE $1`,
@@ -275,7 +275,7 @@ describe('pull: false — embedded-only runtime writes nothing to events tables 
       expect(activePid).not.toBeNull();
 
       // Terminate only — do NOT drop. The temporary slot vanishes with its backend once the
-      // reconnect creates a fresh one (D-01); dropping it ourselves would be redundant and could
+      // reconnect creates a fresh one; dropping it ourselves would be redundant and could
       // race the server's own cleanup.
       await s.sql.unsafe(`SELECT pg_terminate_backend($1)`, [activePid ?? null]);
 

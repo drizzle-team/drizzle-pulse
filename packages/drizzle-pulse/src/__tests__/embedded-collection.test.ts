@@ -427,7 +427,7 @@ describe('embedded client — tap-direct handshake', () => {
     collection.dispose();
   });
 
-  test('a buffered payload drained by a re-baseline after dispose() does not fire onChange (WR-03)', async () => {
+  test('a buffered payload drained by a re-baseline after dispose() does not fire onChange', async () => {
     let reconnectListener: (() => void) | undefined;
     const runtime = makeMockRuntime();
     runtime.onReconnect = (listener: () => void) => {

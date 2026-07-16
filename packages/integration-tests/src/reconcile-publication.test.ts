@@ -1,10 +1,10 @@
 /**
  * Integration proof: reconcile() self-provisions the publication for both pull modes.
- * expose().provision() (the same reconcile path start() runs, minus the replication stream)
+ * PulseRuntime.provision() (the same reconcile path start() runs, minus the replication stream)
  * creates the publication owning exactly the registered sources and keeps its membership in
  * sync (adding new sources, un-pulsing removed ones). REPLICA IDENTITY handling is pull:true
  * only: forces FULL, restores it after drift, and resets to DEFAULT on un-pulse. Under
- * pull:false identity is never touched in either direction (RIF-02) — see the dedicated
+ * pull:false identity is never touched in either direction — see the dedicated
  * pull:false test. Each scenario builds its own standalone database and drops it in a finally
  * block, so the publication/schema it creates go with the database.
  */
@@ -13,7 +13,7 @@ import { describe, expect, test } from 'bun:test';
 import { integer, pgTable, serial } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
-import { createPulseRegistry, expose, LogLevel } from 'drizzle-pulse/server';
+import { createPulseRegistry, LogLevel, PulseRuntime } from 'drizzle-pulse/server';
 import postgres from 'postgres';
 import { orders } from './fixtures/minimal-orders/schema.js';
 import { BARE_ORDERS_DDL, createScenarioDb } from './helpers/scenario.js';
@@ -56,7 +56,7 @@ function makeRuntime(s: Scenario, label: string, tables: 'orders' | 'both', pull
     tables === 'both'
       ? createPulseRegistry({ orders: pulse(orders).query(), extras: pulse(extras).query() })
       : createPulseRegistry({ orders: pulse(orders).query() });
-  return expose(registry, {
+  return new PulseRuntime(registry, {
     databaseUrl: s.databaseUrl,
     sourceDb: drizzle({ client: s.sourceSql }),
     pull,

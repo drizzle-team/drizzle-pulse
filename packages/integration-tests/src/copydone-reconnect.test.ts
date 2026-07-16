@@ -1,5 +1,5 @@
 /**
- * G3 (BUG-01 red-first regression test): a clean walsender CopyDone end (minipg's `'c'`
+ * Red-first regression test: a clean walsender CopyDone end (minipg's `'c'`
  * message-type return, e.g. Postgres restart) must reconnect the same way a thrown
  * replication error already does, instead of silently ending replication. Injecting a real
  * CopyDone frame is the only way to distinguish this from `pg_terminate_backend`, which
@@ -15,7 +15,7 @@ import { describe, expect, test } from 'bun:test';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createPulseClient } from 'drizzle-pulse/client/embedded';
-import { createPulseRegistry, expose, LogLevel } from 'drizzle-pulse/server';
+import { createPulseRegistry, LogLevel, PulseRuntime } from 'drizzle-pulse/server';
 import postgres from 'postgres';
 import { orders, ordersByStatusArgsSchema } from './fixtures/minimal-orders/schema.js';
 import { createScenarioDb, waitFor } from './helpers/scenario.js';
@@ -48,7 +48,7 @@ async function dropSlotWithRetry(
   }, 5000);
 }
 
-describe('CopyDone reconnect (BUG-01, G3)', () => {
+describe('CopyDone reconnect', () => {
   test('a clean walsender CopyDone end reconnects instead of silently ending replication', async () => {
     const base = new URL(baseDatabaseUrl());
     const proxy = startWalProxy(base.hostname, Number(base.port));
@@ -61,7 +61,7 @@ describe('CopyDone reconnect (BUG-01, G3)', () => {
     const slotName = `copydone_slot_${randomSuffix()}`;
     const sourceSql = postgres(withQuietPostgresUrl(scenario.databaseUrl));
 
-    const runtime = expose(buildRegistry(), {
+    const runtime = new PulseRuntime(buildRegistry(), {
       databaseUrl: proxiedDatabaseUrl(scenario.databaseUrl, proxyPort),
       sourceDb: drizzle({ client: sourceSql }),
       pull: true,
@@ -90,7 +90,7 @@ describe('CopyDone reconnect (BUG-01, G3)', () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 1500));
       proxy.injectCopyDone();
 
-      // THE ASSERTION (red today, green after the BUG-01 fix): on unpatched code the loop
+      // THE ASSERTION (red today, green after the fix): on unpatched code the loop
       // returns silently at the 'c' frame — no reconnect is scheduled, this insert never
       // arrives, and waitFor throws. After the fix, handleDisconnect(rep) reconnects
       // (backoff ~1-2s) and resolveSlotStartup resumes the intact slot.

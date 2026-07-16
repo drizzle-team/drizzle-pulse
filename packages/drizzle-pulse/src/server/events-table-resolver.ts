@@ -41,29 +41,33 @@ export function getEventsTableName(sourceTable: PgTable): string {
 const RESERVED_EVENTS_COLUMN_NAMES = new Set(['$snapshot', '$op', '$timestamp']);
 
 // A source column named after a metadata column, or carrying the derived `$old_` prefix,
-// would collide with a synthesized column; fail loudly instead of silently overwriting.
-function assertNotReservedSourceColumnName(name: string): void {
-  if (RESERVED_EVENTS_COLUMN_NAMES.has(name)) {
-    throw new Error(
-      `Source column "${name}" collides with a reserved events-table metadata column name (${[...RESERVED_EVENTS_COLUMN_NAMES].join(', ')}); rename the source column`,
-    );
-  }
-  if (name.startsWith('$old_')) {
-    throw new Error(
-      `Source column "${name}" starts with the reserved "$old_" prefix used for derived old-value columns; rename the source column`,
-    );
+// would collide with a synthesized column; fail loudly instead of silently overwriting. Both
+// the JS property key and the SQL name are now events-table keyspaces, so check each.
+function assertNotReservedSourceColumnName(jsKey: string, sqlName: string): void {
+  for (const name of new Set([jsKey, sqlName])) {
+    if (RESERVED_EVENTS_COLUMN_NAMES.has(name)) {
+      throw new Error(
+        `Source column "${name}" collides with a reserved events-table metadata column name (${[...RESERVED_EVENTS_COLUMN_NAMES].join(', ')}); rename the source column`,
+      );
+    }
+    if (name.startsWith('$old_')) {
+      throw new Error(
+        `Source column "${name}" starts with the reserved "$old_" prefix used for derived old-value columns; rename the source column`,
+      );
+    }
   }
 }
 
 // Serial-family columns must shed their auto-increment identity in the events table (it
-// rejects explicitly-supplied insert values); relax them to plain integer/bigint.
-function relaxSerial(column: PgColumn) {
+// rejects explicitly-supplied insert values); relax them to plain integer/bigint. The name is
+// explicit so the builder's SQL name never drifts from the source column's.
+function relaxSerial(column: PgColumn, name: string) {
   switch (column.getSQLType()) {
     case 'serial':
     case 'smallserial':
-      return integer();
+      return integer(name);
     case 'bigserial':
-      return bigint({ mode: column.columnType === 'PgBigSerial64' ? 'bigint' : 'number' });
+      return bigint(name, { mode: column.columnType === 'PgBigSerial64' ? 'bigint' : 'number' });
   }
 }
 
@@ -101,16 +105,18 @@ export function buildEventsTable(
 
   const columns: Record<string, AnyPgColumnBuilder> = {};
 
-  for (const column of Object.values(getColumns(sourceTable))) {
-    assertNotReservedSourceColumnName(column.name);
+  for (const [jsKey, column] of Object.entries(getColumns(sourceTable))) {
+    assertNotReservedSourceColumnName(jsKey, column.name);
 
-    const newValue = relaxSerial(column) ?? column.toBuilder(stripSourceConfig);
-    columns[column.name] = column.name === pkColumnName ? newValue.notNull() : newValue;
+    const newValue =
+      relaxSerial(column, column.name) ??
+      column.toBuilder({ ...stripSourceConfig, name: column.name });
+    columns[jsKey] = column.name === pkColumnName ? newValue.notNull() : newValue;
 
     const oldName = `$old_${column.name}`;
     assertIdentifierLength(oldName);
-    columns[oldName] =
-      relaxSerial(column) ?? column.toBuilder({ ...stripSourceConfig, name: oldName });
+    columns[`$old_${jsKey}`] =
+      relaxSerial(column, oldName) ?? column.toBuilder({ ...stripSourceConfig, name: oldName });
   }
 
   Object.assign(columns, {

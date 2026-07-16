@@ -37,7 +37,7 @@ export const ordersCollection = pulse(orders);
 
 ```ts
 // server.ts
-import { createPulseRegistry, expose } from 'drizzle-pulse/server';
+import { createPulseRegistry, PulseRuntime } from 'drizzle-pulse/server';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import { ordersCollection } from './schema.js';
@@ -51,7 +51,7 @@ const registry = createPulseRegistry({ activeOrders });
 
 const sourceDb = drizzle({ client: postgres(process.env.DATABASE_URL!) });
 
-const runtime = expose(registry, {
+const runtime = new PulseRuntime(registry, {
   databaseUrl: process.env.DATABASE_URL!, // must have wal_level=logical
   sourceDb,
   pull: true,
@@ -96,13 +96,13 @@ Derive queries from collections outside the schema file, register them, and expo
 - Queries that read `ctx.args` in their `queryFn` MUST chain `.args(zodSchema)` first. Without a schema, `ctx.args` is always `{}` at runtime (the registry never forwards unvalidated client input as args) — reading `ctx.args` on a schemaless query silently sees no fields rather than attacker-controlled data.
 - `.columns()` must be called before `.transform()` in the chain — calling it after throws, rather than silently discarding the transform.
 - `createPulseRegistry(queries)` — collects builders into a `PulseRegistry`; queries must be `.query()` builder chains — passing a bare `PulseTable` is a compile-time type error via the `AnyPulseBuilders` constraint, not a runtime rejection
-- `expose(registry, config)` — returns a `PulseRuntime`; call `.start()` to self-provision infrastructure and connect WAL, `runtime.handlers.{subscribe,pull,loadMore}` to serve requests
+- `new PulseRuntime(registry, config)` — call `.start()` to self-provision infrastructure and connect WAL, `runtime.handlers.{subscribe,pull,loadMore}` to serve requests
 - `PulseRuntime` — WAL listener + request handlers; `.start()` / `.stop()`. The server is stateless: each pull re-resolves auth and validates its own opaque cursor token, so there's no per-subscription server state, no TTL, and no `unsubscribe` — a client simply stops pulling.
 - `PulseRuntime.provision()` — runs the same infrastructure reconciliation as `.start()` without opening the WAL stream, for split-role deploys (see "Provisioning & privileges" below)
 
 ```ts
 import { pulse } from 'drizzle-pulse';
-import { createPulseRegistry, expose } from 'drizzle-pulse/server';
+import { createPulseRegistry, PulseRuntime } from 'drizzle-pulse/server';
 
 const ordersByStatus = pulse(orders)
   .query()
@@ -111,7 +111,7 @@ const ordersByStatus = pulse(orders)
   .query((ctx) => ctx.query({ status: ctx.args.status }));
 
 const registry = createPulseRegistry({ ordersByStatus });
-const runtime = expose(registry, { databaseUrl, sourceDb, pull: true }); // publication/slot default to 'drizzle_pulse'
+const runtime = new PulseRuntime(registry, { databaseUrl, sourceDb, pull: true }); // publication/slot default to 'drizzle_pulse'
 await runtime.start();
 ```
 
@@ -119,8 +119,8 @@ await runtime.start();
 
 Every pulsed source table gets a matching **events table** — WAL changes are persisted there and replayed to clients. Events tables are runtime-owned infrastructure, resolved entirely by convention (no hand-declared Drizzle table, no `.$eventsTable()` linkage, no drizzle-kit migration):
 
-- **Location:** `<eventsSchema>.<sourceSchema>_<sourceTable>`, with each component's `_` doubled to `__` before joining — `eventsSchema` defaults to `'drizzle_pulse'` (override via `expose()`'s `eventsSchema` option)
-- **Self-provisioning:** `runtime.start()` reconciles everything itself inside one advisory-locked transaction — creates the events schema, the events tables and their `pulse_meta` bookkeeping, and the publication (plus membership diff). `REPLICA IDENTITY FULL` on each source is provisioned **only under `pull: true`**; under `pull: false` replica identity is never touched (RIF-02) — reconcile self-provisions the publication alone, so the WAL tap comes up with zero durable mutation of your tables at boot and no `ACCESS EXCLUSIVE` lock. An events table is recreated when the sha256 of its rendered DDL diverges (a source-column change), which rotates a per-table epoch so stale client cursors reset. `wal_level = logical` is the one precondition the runtime can't fix — it stays a fail-fast assert.
+- **Location:** `<eventsSchema>.<sourceSchema>_<sourceTable>`, with each component's `_` doubled to `__` before joining — `eventsSchema` defaults to `'drizzle_pulse'` (override via `PulseRuntime`'s `eventsSchema` option)
+- **Self-provisioning:** `runtime.start()` reconciles everything itself inside one advisory-locked transaction — creates the events schema, the events tables and their `pulse_meta` bookkeeping, and the publication (plus membership diff). `REPLICA IDENTITY FULL` on each source is provisioned **only under `pull: true`**; under `pull: false` replica identity is never touched — reconcile self-provisions the publication alone, so the WAL tap comes up with zero durable mutation of your tables at boot and no `ACCESS EXCLUSIVE` lock. An events table is recreated when the sha256 of its rendered DDL diverges (a source-column change), which rotates a per-table epoch so stale client cursors reset. `wal_level = logical` is the one precondition the runtime can't fix — it stays a fail-fast assert.
 
 **Migrating an existing `pull: false` deployment:** the runtime decodes old-tuple data by inspecting each WAL event's own identity (`oldKind`/`unchanged`), never by mode, so upgrading is zero-step for `REPLICA IDENTITY DEFAULT` or `FULL` — a table an older version already forced to `FULL` keeps working exactly as before. This scoping matters: `reconcile()` fails closed at boot under `pull: false` if a source has `REPLICA IDENTITY NOTHING`, or `USING INDEX` on an index other than the primary key, since deletes can't be decoded off either. The runtime itself never resets `FULL` back to `DEFAULT` (that reset would take the same `ACCESS EXCLUSIVE` lock this phase removes, and could clobber an identity another logical consumer still needs). To actually reclaim the WAL savings, run the one-line manual ALTER yourself once you've confirmed nothing else depends on the full old-row image:
 

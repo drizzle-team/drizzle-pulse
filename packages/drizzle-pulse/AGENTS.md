@@ -5,7 +5,7 @@
 Type-safe Pulse SDK shared by server, client, React, and embedded layers.
 
 - root side: `pulse`, `PulseTable` — the collection entity, exported once per table from schema files
-- server side: `PulseBuilder` (seeded via `PulseTable.query(fn?)`), `createPulseRegistry`, `expose`, the transport-agnostic request handler (SDK), and the events-table machinery (`buildEventsTable` resolver + internal DDL renderer + `reconcile`/`provision`)
+- server side: `PulseBuilder` (seeded via `PulseTable.query(fn?)`), `createPulseRegistry`, `PulseRuntime`, the transport-agnostic request handler (SDK), and the events-table machinery (`buildEventsTable` resolver + internal DDL renderer + `reconcile`/`provision`)
 - server/hono side: `createPulseHonoRouter` — an optional Hono wrapper over the SDK on the `./server/hono` subpath
 - client side: `createPulseClient`, `PulseQuery` (over a pluggable transport)
 - React side: `usePulseQuery`
@@ -62,7 +62,7 @@ tables. `PulseRuntime.reconcile()` runs inside one transaction under a per-event
 advisory lock and: asserts `wal_level=logical` (the one precondition it can't fix), creates/diffs
 the publication (mode-independent), creates the events schema + `pulse_meta` bookkeeping,
 creates/recreates each events table whose rendered-DDL sha256 diverges (rotating its epoch), and
-sweeps orphans. `pull: true` only (RIF-02): sets `REPLICA IDENTITY FULL` on each source and
+sweeps orphans. `pull: true` only: sets `REPLICA IDENTITY FULL` on each source and
 resets it to `DEFAULT` on un-pulse — `pull: false` never forces or resets identity in either
 direction (old-tuple data comes from `oldKind`/`unchanged` instead, gated per-event not per-mode,
 so upgrading a `pull: false` deployment is zero-step). `start()` runs it then opens WAL;
@@ -85,7 +85,7 @@ Server (derive queries outside the schema file):
     → queries must be .query() builder chains — a bare PulseTable is a compile-time type
       error via AnyPulseBuilders; defensive composite-PK re-check
 
-  expose(registry, config) → PulseRuntime
+  new PulseRuntime(registry, config)
     → resolves each source table's events table via buildEventsTable (no hand-declared
       events tables)
     → start() runs reconcile() (self-provision), then connects WAL
@@ -133,7 +133,7 @@ QueryDescriptor
 type ColumnOperators, WhereCondition
 
 // drizzle-pulse/server
-expose, PulseRuntime, LogLevel, type ExposeConfig, type ExposeWalConfig
+PulseRuntime, LogLevel, type ExposeConfig, type ExposeWalConfig
 createPulseRegistry, PulseRegistry
 PulseBuilder, type AnyPulseBuilder, AnyQueries
 buildEventsTable, getEventsTableName, DEFAULT_EVENTS_SCHEMA
