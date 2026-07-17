@@ -1225,7 +1225,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       }
 
       if (this.pullEnabled) {
-        await this.getPulseStore().persistCommitAndAdvanceWatermark(
+        await this.getPulseStore().ingestCommit(
           t.events,
           this.slotName,
           t.commitLsn,
@@ -1322,7 +1322,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         }
       }
       // A partially-null-rendered old row (non-key columns null from a 'key' tuple) must never
-      // reach persistCommitAndAdvanceWatermark or the tap — only a genuinely full old tuple is emitted.
+      // reach ingestCommit or the tap — only a genuinely full old tuple is emitted.
       oldRow = ev.oldKind === 'full' ? rawOld : null;
     } else {
       // Deliberately empty: the tap's dedupe-by-absence contract for deletes. The persisted
@@ -1397,6 +1397,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     });
   }
 
+  // TOAST = Postgres's out-of-line storage for oversized column values; pgoutput omits an
+  // update's unchanged TOASTed columns from the new tuple, so they must be read back here.
   // One pk-SELECT of exactly the omitted TOASTed columns, on the admin pool — required for
   // correctness under a non-full identity (see decodeInto), not an optimization. No cache, no
   // batcher, no retries: read-your-latest is the accepted consistency model, same as the

@@ -45,7 +45,7 @@ export class PulseStore {
   // db.transaction, so rows and watermark move together and the caller (pulse-runtime.ts) acks
   // only after this resolves. An empty `events` array still upserts the watermark (a data-less
   // commit advances the dedupe floor).
-  async persistCommitAndAdvanceWatermark(
+  async ingestCommit(
     events: PendingWalEvent[],
     slotName: string,
     commitLsn: string,
