@@ -18,7 +18,7 @@ import { PulseStore } from './pulse-store.js';
 import { getQueryColumnKey } from './pulse-types.js';
 import { DEFAULT_PULL_EVENT_LIMIT, PulseRequestHandler } from './sdk.js';
 import { WalEventEmitter } from './wal-event-emitter.js';
-import { createShapeRowNormalizer } from './wal-shape-bridge.js';
+import { createShapeRowNormalizer, walTextDecoders } from './wal-shape-bridge.js';
 
 type RuntimeLifecycleListener = () => void;
 // Reconnect listeners receive the mid-round re-baseline pin (or null under pull:false / no
@@ -818,7 +818,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       // awaiting supervise() itself.
       const kill = () => rep?.end();
       try {
-        rep = await replication(this.config.databaseUrl);
+        rep = await replication({ url: this.config.databaseUrl, types: walTextDecoders });
         signal.addEventListener('abort', kill);
 
         const { slot, from } = this.pullEnabled
@@ -833,6 +833,10 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
           statusIntervalMs: 1000,
           idleAck: true,
           messages: false,
+          // Pin text tuples: the default (binary:'auto') runs a per-start binary-negotiation probe
+          // on PG14+, whose extra round-trip perturbs reconnect/resume timing. Keep pre-upgrade
+          // no-binary behavior.
+          binary: false,
         });
 
         const round = everConnected
@@ -1225,11 +1229,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       }
 
       if (this.pullEnabled) {
-        await this.getPulseStore().ingestCommit(
-          t.events,
-          this.slotName,
-          t.commitLsn,
-        );
+        await this.getPulseStore().ingestCommit(t.events, this.slotName, t.commitLsn);
         this.lastPersistedCommitLsn = t.commitLsn;
       }
 

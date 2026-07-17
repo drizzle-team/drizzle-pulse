@@ -1,8 +1,23 @@
 import { type Column, getColumns } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
-import { miniPgCodecs } from 'drizzle-orm/postgres/codecs';
+import { minipgCodecs } from 'drizzle-orm/postgres/codecs';
 import { buildShape } from 'drizzle-orm/postgres/shape';
-import { Shape } from 'minipg';
+import { type Decoder, Shape } from 'minipg';
+
+// The normalizer below reproduces query-time decode from a replication tuple's RAW TEXT, keyed
+// off each column's drizzle `mode`. minipg's tuple decoder natively turns int8 -> bigint and
+// date/timestamp/timestamptz -> Date at the OID's DEFAULT js target, discarding both the raw text
+// and the mode — so a mode:number/string or mode:date/string column lands on the wrong JS shape,
+// and a decoded Date can't be re-serialized back to its source text for a :string column. These
+// are the only non-basic OIDs whose native decode isn't already the raw string this bridge
+// expects; wiring these into `replication({ types: walTextDecoders })` keeps them as raw text.
+const asWalText: Decoder = (buf) => buf.toString('utf8');
+export const walTextDecoders: Record<number, Decoder> = {
+  20: asWalText, // int8
+  1082: asWalText, // date
+  1114: asWalText, // timestamp
+  1184: asWalText, // timestamptz
+};
 
 type ShapeCol = ReturnType<typeof Shape>['$cols'][number];
 type CodecNormalize = (value: unknown) => unknown;
@@ -71,7 +86,7 @@ export function createShapeRowNormalizer(
       const codec = codecBySqlName.get(name);
       const codecEntry = codec
         ? (
-            miniPgCodecs as Record<
+            minipgCodecs as Record<
               string,
               { normalize?: CodecNormalize; normalizeArray?: CodecNormalizeArray } | undefined
             >

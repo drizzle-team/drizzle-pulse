@@ -19,7 +19,7 @@
     "verify:publish": "bun run build && bun run --filter drizzle-pulse verify:publish"
   },
   "catalog": {
-    "drizzle-orm": "npm:@drizzle-team/drizzle-orm@1.0.0-rc.4-b4881cd"
+    "drizzle-orm": "npm:drizzle-orm@1.0.0-rc.4-de6c356"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.4",
