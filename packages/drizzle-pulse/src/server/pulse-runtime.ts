@@ -884,10 +884,6 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
           statusIntervalMs: 1000,
           idleAck: true,
           messages: false,
-          // Pin text tuples: the default (binary:'auto') runs a per-start binary-negotiation probe
-          // on PG14+, whose extra round-trip perturbs reconnect/resume timing. Keep pre-upgrade
-          // no-binary behavior.
-          binary: false,
         });
 
         const round = everConnected

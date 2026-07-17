@@ -123,6 +123,24 @@ async function streamLastLsn(
   return rows[0]?.last_lsn;
 }
 
+// Poll until the stream floor stops advancing across a settle interval — a resume replays the
+// downtime commit(s) as floor advances that a single read can race, so return the value only once
+// two consecutive reads agree.
+async function waitForStableStreamLsn(
+  sql: ReturnType<typeof postgres>,
+  slotName: string,
+): Promise<string> {
+  let prev = await streamLastLsn(sql, slotName);
+  await waitFor(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const cur = await streamLastLsn(sql, slotName);
+    if (cur !== undefined && cur === prev) return true;
+    prev = cur;
+    return false;
+  }, 10000);
+  return prev as string;
+}
+
 // DISCOVERY (verified empirically against unmodified pulse-runtime.ts + minipg, not a test flake):
 // resolveSlotStartup's continuity gate compares the persisted `pulse_stream.last_lsn` watermark
 // against the slot's `confirmed_flush_lsn`. The watermark is written from a commit's OWN record
@@ -242,10 +260,6 @@ describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeo
         expect(await snapshotSeedCount(sql)).toBe(seedCountBefore);
         expect(mentionsRecreated(errorSpy)).toBe(false);
 
-        // The durable floor doesn't move on its own — start() only resumes, it doesn't persist
-        // a commit until new work arrives.
-        expect(await streamLastLsn(sql, slotName)).toBe(lsnBefore);
-
         const client = createPulseClient(b.runtime);
         const collection = await client.ordersByStatus({ status: 'accepted' });
         await waitFor(() => collection.list().length === 2);
@@ -260,13 +274,26 @@ describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeo
         });
         expect(freshCursor.rows).toHaveLength(2);
 
+        // The durable floor advances only on new work. Resume legitimately replays the downtime
+        // commit (order #2), which ingestCommit records as a new floor — so the pre-resume
+        // watermark is not a probe-insensitive reference (whether that replay has landed by any
+        // given instant is a race the pre-START_REPLICATION probe round-trip now shifts). Instead
+        // settle at the replayed floor, then prove a quiet window with no committed work leaves it
+        // exactly put.
+        const settledFloor = await waitForStableStreamLsn(sql, slotName);
+        expect(settledFloor).not.toBe(lsnBefore); // the replayed downtime work did advance it
+        await new Promise((resolve) => setTimeout(resolve, 750));
+        expect(await streamLastLsn(sql, slotName)).toBe(settledFloor);
+
         await sql.unsafe(
           `INSERT INTO "orders" (driver_id, status, price) VALUES (3, 'accepted', 30)`,
         );
         await waitFor(() => collection.list().length === 3);
+        // Genuinely new work moves the floor past the quiet-window value (not merely past the
+        // pre-resume watermark, which the downtime replay already cleared).
         await waitFor(async () => {
           const lsn = await streamLastLsn(sql, slotName);
-          return lsn !== undefined && lsn !== lsnBefore;
+          return lsn !== undefined && lsn !== settledFloor;
         });
 
         collection.dispose();
