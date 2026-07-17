@@ -1,8 +1,7 @@
 import { getTableUniqueName } from 'drizzle-orm';
 import type { AnyPulseBuilders } from '../../server/pulse-registry.js';
-import type { BaselinePin, PulseRuntime } from '../../server/pulse-runtime.js';
+import type { BaselinePin, PendingWalEvent, PulseRuntime } from '../../server/pulse-runtime.js';
 import type { PulseClientContract } from '../../server/pulse-types.js';
-import type { WalTapPayload } from '../../server/wal-event-emitter.js';
 import { compareLsn } from '../../shared/lsn.js';
 import { applyProjectionPipeline } from '../../shared/projection.js';
 import type { PulseEvent } from '../../shared/pulse-events.js';
@@ -165,26 +164,26 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
 
         const core = new PulseMergeCore<AnyRow>({ order: resolved.order });
 
-        // Tap-direct handshake state: while `baselining` is up, tapped payloads are buffered
+        // Tap-direct handshake state: while `baselining` is up, tapped events are buffered
         // instead of applied so nothing committed during the baseline SELECT is lost or
         // double-applied — the buffer is drained afterward against the read watermark.
         let baselining = true;
-        let buffer: WalTapPayload[] = [];
+        let buffer: Array<{ event: PendingWalEvent; lsn: string }> = [];
         let collection!: PulseCollection<AnyRow>;
 
-        function applyPayload(payload: WalTapPayload): void {
-          const event = buildTapEvent(payload, resolved);
+        function applyEvent(walEvent: PendingWalEvent, lsn: string): void {
+          const event = buildTapEvent(walEvent, resolved);
           if (!event) return;
           const mutated = core.applyEvents([event]);
-          if (mutated) collection.fireOnChange([event], payload.lsn);
+          if (mutated) collection.fireOnChange([event], lsn);
         }
 
-        function handleTapPayload(payload: WalTapPayload): void {
+        function handleTapEvent(walEvent: PendingWalEvent, lsn: string): void {
           if (baselining) {
-            buffer.push(payload);
+            buffer.push({ event: walEvent, lsn });
             return;
           }
-          applyPayload(payload);
+          applyEvent(walEvent, lsn);
         }
 
         // Same handshake for the initial load AND every re-baseline (reconnect): subscribe
@@ -225,9 +224,9 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
           const pending = buffer;
           buffer = [];
           baselining = false;
-          for (const payload of pending) {
-            if (compareLsn(payload.lsn, baseline.watermark) < 0) continue;
-            applyPayload(payload);
+          for (const { event, lsn } of pending) {
+            if (compareLsn(lsn, baseline.watermark) < 0) continue;
+            applyEvent(event, lsn);
           }
           return baseline.watermark;
         }
@@ -237,7 +236,7 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
           for (const unsub of unsubs) unsub();
         });
 
-        unsubs.push(runtime.walEventEmitter.subscribe(tableKey, handleTapPayload));
+        unsubs.push(runtime.subscribeTap(tableKey, handleTapEvent));
         unsubs.push(
           runtime.onReconnect((pin) => {
             // Returning this promise (rather than firing it and forgetting) lets the

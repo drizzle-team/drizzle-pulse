@@ -1,12 +1,33 @@
 import { eq, getColumns, sql } from 'drizzle-orm';
-import type { PgTable } from 'drizzle-orm/pg-core';
+import { type PgTable, pgSchema, text, uuid } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/postgres';
 import { type Connection, createPool, type Pool } from 'minipg';
-import { buildMetaTables } from './meta-tables.js';
 import type { PendingWalEvent } from './pulse-runtime.js';
 
 type DbHandle = ReturnType<typeof drizzle>;
 type TxHandle = Parameters<Parameters<DbHandle['transaction']>[0]>[0];
+
+// Drizzle objects for the two bookkeeping tables reconcile() creates in the events schema, so
+// their DML runs through the query builder. The raw CREATE TABLE IF NOT EXISTS statements in
+// reconcile() must keep producing the identical column definitions declared here.
+function buildMetaTables(eventsSchema: string) {
+  const schema = pgSchema(eventsSchema);
+  return {
+    // One row per events table: the DDL hash reconcile() compares against, plus the epoch that
+    // rotates on every recreate.
+    pulseMeta: schema.table('pulse_meta', {
+      tableName: text('table_name').primaryKey(),
+      ddlHash: text('ddl_hash').notNull(),
+      epoch: uuid('epoch').notNull(),
+    }),
+    // Durable commit-LSN dedupe watermark, keyed by slot.
+    pulseStream: schema.table('pulse_stream', {
+      slotName: text('slot_name').primaryKey(),
+      lastLsn: text('last_lsn').notNull(),
+    }),
+  };
+}
+
 type MetaTables = ReturnType<typeof buildMetaTables>;
 
 export class PulseStore {

@@ -99,10 +99,10 @@ export function createPulseEvents<TQueries extends AnyPulseBuilders>(
         // The WAL listener processes pgoutput messages sequentially and the emitter dispatches
         // synchronously off that, so subscription-time delivery is already commit order — no
         // reordering buffer needed (unlike the collections' baseline/watermark handshake).
-        const tapUnsub = runtime.walEventEmitter.subscribe(tableKey, (payload) => {
-          const event = buildTapEvent(payload, resolved);
+        const tapUnsub = runtime.subscribeTap(tableKey, (walEvent, lsn) => {
+          const event = buildTapEvent(walEvent, resolved);
           if (!event) return;
-          callback(event, payload.lsn);
+          callback(event, lsn);
         });
 
         let detached = false;

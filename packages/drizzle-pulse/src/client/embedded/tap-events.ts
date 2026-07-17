@@ -1,4 +1,4 @@
-import type { WalTapPayload } from '../../server/wal-event-emitter.js';
+import type { PendingWalEvent } from '../../server/pulse-runtime.js';
 import { extractRow } from '../../shared/event-normalization.js';
 import { evaluateCondition } from '../../shared/filter-ast.js';
 import { applyProjectionPipeline } from '../../shared/projection.js';
@@ -12,9 +12,9 @@ import type { ResolvedPulseQuery } from '../../types.js';
 export type TapRow = Record<string, unknown> & { $pk: unknown };
 
 /**
- * Builds a `PulseEvent` from a raw WAL tap payload, or `null` when the event should not be
+ * Builds a `PulseEvent` from a decoded WAL event, or `null` when the event should not be
  * delivered at all. Insert is gated on `resolved.where` as always. Update/delete are gated too,
- * but only when `payload.oldRowComplete` makes that evaluable (a full old tuple — RID FULL, or
+ * but only when `event.oldRowComplete` makes that evaluable (a full old tuple — RID FULL, or
  * pull:true which always forces it): if the old tuple fully misses `where` and the new row (or
  * absence of one, for deletes) doesn't match either, the event is suppressed. When the old tuple
  * is absent or a key-only degradation (RID DEFAULT under pull:false), `where` can't be evaluated
@@ -22,25 +22,25 @@ export type TapRow = Record<string, unknown> & { $pk: unknown };
  * row is redacted to pk-only rather than leaking out-of-scope column data to every subscriber.
  */
 export function buildTapEvent(
-  payload: WalTapPayload,
+  event: PendingWalEvent,
   resolved: ResolvedPulseQuery,
 ): PulseEvent<TapRow> | null {
-  // Delete payloads carry an empty rowData object (not null); extractRow returns null when
+  // Delete events carry an empty `row` object (not null); extractRow returns null when
   // every column is absent, so the delete case falls out of this call for free.
-  const newRow = extractRow(payload.rowData, resolved.columns);
-  const oldRow = payload.oldRowData ? extractRow(payload.oldRowData, resolved.columns) : null;
+  const newRow = extractRow(event.row, resolved.columns);
+  const oldRow = event.oldRow ? extractRow(event.oldRow, resolved.columns) : null;
 
   const matchesNew = newRow ? evaluateCondition(resolved.where, newRow) : false;
-  const oldEvaluable = payload.oldRowComplete && oldRow !== null;
+  const oldEvaluable = event.oldRowComplete && oldRow !== null;
   const matchesOld = oldEvaluable && oldRow ? evaluateCondition(resolved.where, oldRow) : false;
 
-  if (payload.operation === 'insert') {
+  if (event.op === 'insert') {
     if (!matchesNew || !newRow) return null;
     const row = applyProjectionPipeline([newRow], resolved)[0] as TapRow;
     return { op: 'insert', row, pk: row.$pk };
   }
 
-  if (payload.operation === 'update') {
+  if (event.op === 'update') {
     const projectedNew = newRow ? (applyProjectionPipeline([newRow], resolved)[0] as TapRow) : null;
     const projectedOld = oldRow ? (applyProjectionPipeline([oldRow], resolved)[0] as TapRow) : null;
     const fallback = projectedNew ?? projectedOld;

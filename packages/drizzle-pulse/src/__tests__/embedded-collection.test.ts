@@ -48,8 +48,8 @@ describe('embedded client — user-facing error paths', () => {
     };
 
     let unsubCount = 0;
-    const realSubscribe = runtime.walEventEmitter.subscribe.bind(runtime.walEventEmitter);
-    runtime.walEventEmitter.subscribe = (key: string, listener: any) => {
+    const realSubscribe = runtime.subscribeTap;
+    runtime.subscribeTap = (key: string, listener: any) => {
       const inner = realSubscribe(key, listener);
       return () => {
         unsubCount++;
@@ -115,13 +115,7 @@ describe('embedded client — zero wire protocol (SPLIT-03)', () => {
     const collection = await (client as any).orders();
     expect(collection.list()).toHaveLength(1);
 
-    runtime.walEventEmitter.emit(
-      tableKey,
-      'insert',
-      { id: 2, status: 'accepted', price: 20 },
-      null,
-      '0/999',
-    );
+    runtime.emitTap(tableKey, 'insert', { id: 2, status: 'accepted', price: 20 }, null, '0/999');
     expect(collection.list()).toHaveLength(2);
 
     collection.dispose();
@@ -141,24 +135,12 @@ describe('embedded client — tap-direct handshake', () => {
     collection.onChange((c: any) => changes.push(c));
 
     // Below the watermark: guaranteed already present in the baseline, so it's dropped.
-    runtime.walEventEmitter.emit(
-      tableKey,
-      'insert',
-      { id: 1, status: 'accepted', price: 10 },
-      null,
-      '0/90',
-    );
+    runtime.emitTap(tableKey, 'insert', { id: 1, status: 'accepted', price: 10 }, null, '0/90');
     expect(collection.list()).toHaveLength(1);
     expect(changes).toHaveLength(0);
 
     // At-or-above the watermark: applied and onChange fires with that payload's lsn.
-    runtime.walEventEmitter.emit(
-      tableKey,
-      'insert',
-      { id: 2, status: 'accepted', price: 20 },
-      null,
-      '0/110',
-    );
+    runtime.emitTap(tableKey, 'insert', { id: 2, status: 'accepted', price: 20 }, null, '0/110');
     expect(collection.list()).toHaveLength(2);
     expect(changes).toHaveLength(1);
     expect(changes[0]!.lsn).toBe('0/110');
@@ -174,13 +156,7 @@ describe('embedded client — tap-direct handshake', () => {
     const client = createPulseClient(runtime as any);
     const collection = await (client as any).orders();
 
-    runtime.walEventEmitter.emit(
-      tableKey,
-      'insert',
-      { id: 1, status: 'accepted', price: 10 },
-      null,
-      '0/110',
-    );
+    runtime.emitTap(tableKey, 'insert', { id: 1, status: 'accepted', price: 10 }, null, '0/110');
 
     expect(collection.list()).toHaveLength(1);
     expect(collection.list().map((r: any) => r.id)).toEqual([1]);
@@ -200,7 +176,7 @@ describe('embedded client — tap-direct handshake', () => {
     collection.onChange((c: any) => changes.push(c));
 
     // UPDATE out of filter: accepted -> completed (matchesNew=false; membership removes the row)
-    runtime.walEventEmitter.emit(
+    runtime.emitTap(
       tableKey,
       'update',
       { id: 1, status: 'completed', price: 15 },
@@ -212,22 +188,10 @@ describe('embedded client — tap-direct handshake', () => {
     expect(changes[0]!.events[0].matchesNew).toBe(false);
 
     // INSERT another matching row, then DELETE it.
-    runtime.walEventEmitter.emit(
-      tableKey,
-      'insert',
-      { id: 2, status: 'accepted', price: 20 },
-      null,
-      '0/400',
-    );
+    runtime.emitTap(tableKey, 'insert', { id: 2, status: 'accepted', price: 20 }, null, '0/400');
     expect(collection.list()).toHaveLength(1);
 
-    runtime.walEventEmitter.emit(
-      tableKey,
-      'delete',
-      {},
-      { id: 2, status: 'accepted', price: 20 },
-      '0/500',
-    );
+    runtime.emitTap(tableKey, 'delete', {}, { id: 2, status: 'accepted', price: 20 }, '0/500');
     expect(collection.list()).toHaveLength(0);
     expect(changes[2]!.events[0].op).toBe('delete');
 
@@ -252,13 +216,7 @@ describe('embedded client — tap-direct handshake', () => {
     const offChange = collection.onChange(() => changeCount++);
     const offError = collection.onError(() => errorCount++);
 
-    runtime.walEventEmitter.emit(
-      tableKey,
-      'insert',
-      { id: 1, status: 'accepted', price: 10 },
-      null,
-      '0/200',
-    );
+    runtime.emitTap(tableKey, 'insert', { id: 1, status: 'accepted', price: 10 }, null, '0/200');
     terminalErrorListener?.(new Error('boom'));
     expect(changeCount).toBe(1);
     expect(errorCount).toBe(1);
@@ -266,13 +224,7 @@ describe('embedded client — tap-direct handshake', () => {
     offChange();
     offError();
 
-    runtime.walEventEmitter.emit(
-      tableKey,
-      'insert',
-      { id: 2, status: 'accepted', price: 20 },
-      null,
-      '0/300',
-    );
+    runtime.emitTap(tableKey, 'insert', { id: 2, status: 'accepted', price: 20 }, null, '0/300');
     terminalErrorListener?.(new Error('boom again'));
     expect(changeCount).toBe(1);
     expect(errorCount).toBe(1);
@@ -415,13 +367,7 @@ describe('embedded client — tap-direct handshake', () => {
 
     // The collection must not be left permanently latched into buffering (CR-02): a live tap
     // payload after the failed re-baseline should apply immediately, not queue forever.
-    runtime.walEventEmitter.emit(
-      tableKey,
-      'insert',
-      { id: 2, status: 'accepted', price: 20 },
-      null,
-      '0/999',
-    );
+    runtime.emitTap(tableKey, 'insert', { id: 2, status: 'accepted', price: 20 }, null, '0/999');
     expect(collection.list()).toHaveLength(1);
 
     collection.dispose();
@@ -455,13 +401,7 @@ describe('embedded client — tap-direct handshake', () => {
     reconnectListener?.();
     // While the re-baseline is in flight, this payload is buffered (above the watermark, so
     // it will be applied when the buffer drains).
-    runtime.walEventEmitter.emit(
-      tableKey,
-      'insert',
-      { id: 9, status: 'accepted', price: 90 },
-      null,
-      '0/200',
-    );
+    runtime.emitTap(tableKey, 'insert', { id: 9, status: 'accepted', price: 90 }, null, '0/200');
 
     // dispose() before the buffer drains — the drain (inside runHandshake, before the
     // reconnect wrapper's own isDisposed check runs) must not fire onChange into it.

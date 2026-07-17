@@ -9,9 +9,10 @@ import type { PgColumn } from 'drizzle-orm/pg-core';
  * table's JS property keys, so they also index the events-table record.
  *
  * Values arrive already in their JS types: the HTTP-pull path reads the events
- * table via a typed Drizzle select, and the embedded WAL tap receives rows the
- * server has normalized via the shape bridge (see server/wal-shape-bridge.ts).
- * So this only re-keys and prunes — no type coercion happens here.
+ * table via a typed Drizzle select, and the embedded WAL tap receives rows
+ * minipg decoded through the per-table replication shapes, re-keyed to JS
+ * property keys (see server/wal-shape-bridge.ts). So this only re-keys and
+ * prunes — no type coercion happens here.
  *
  * Returns `null` when all column values are absent (all-undefined event).
  */

@@ -62,13 +62,7 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
       }),
     ).not.toThrow();
 
-    runtime.walEventEmitter.emit(
-      tableKey,
-      'insert',
-      { id: 1, status: 'accepted', price: 10 },
-      null,
-      '0/100',
-    );
+    runtime.emitTap(tableKey, 'insert', { id: 1, status: 'accepted', price: 10 }, null, '0/100');
     expect(received).toHaveLength(1);
   });
 
@@ -78,22 +72,10 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
     const received: unknown[] = [];
     (events as any).orders((event: unknown) => received.push(event));
 
-    runtime.walEventEmitter.emit(
-      tableKey,
-      'insert',
-      { id: 1, status: 'requested', price: 10 },
-      null,
-      '0/100',
-    );
+    runtime.emitTap(tableKey, 'insert', { id: 1, status: 'requested', price: 10 }, null, '0/100');
     expect(received).toHaveLength(0);
 
-    runtime.walEventEmitter.emit(
-      tableKey,
-      'insert',
-      { id: 2, status: 'accepted', price: 20 },
-      null,
-      '0/200',
-    );
+    runtime.emitTap(tableKey, 'insert', { id: 2, status: 'accepted', price: 20 }, null, '0/200');
     expect(received).toHaveLength(1);
   });
 
@@ -103,13 +85,7 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
     const received: Array<[string, string]> = [];
     (events as any).orders((event: any, lsn: string) => received.push([event.op, lsn]));
 
-    runtime.walEventEmitter.emit(
-      tableKey,
-      'insert',
-      { id: 1, status: 'accepted', price: 10 },
-      null,
-      '0/1A2B',
-    );
+    runtime.emitTap(tableKey, 'insert', { id: 1, status: 'accepted', price: 10 }, null, '0/1A2B');
     expect(received).toEqual([['insert', '0/1A2B']]);
   });
 
@@ -119,7 +95,7 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
     const received: Array<{ matchesNew: boolean }> = [];
     (events as any).orders((event: any) => received.push(event));
 
-    runtime.walEventEmitter.emit(
+    runtime.emitTap(
       tableKey,
       'update',
       { id: 1, status: 'completed', price: 10 },
@@ -137,13 +113,7 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
     const received: Array<{ matchesNew: boolean }> = [];
     (events as any).orders((event: any) => received.push(event));
 
-    runtime.walEventEmitter.emit(
-      tableKey,
-      'update',
-      { id: 1, status: 'completed', price: 10 },
-      null,
-      '0/301',
-    );
+    runtime.emitTap(tableKey, 'update', { id: 1, status: 'completed', price: 10 }, null, '0/301');
 
     expect(received).toHaveLength(1);
     expect(received[0]!.matchesNew).toBe(false);
@@ -157,7 +127,7 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
 
     // oldRowComplete omitted (defaults false): a pk-only old row can't be evaluated against
     // where, so the event must still be delivered for membership correctness (CR-01).
-    runtime.walEventEmitter.emit(tableKey, 'delete', {}, { id: 1 }, '0/302');
+    runtime.emitTap(tableKey, 'delete', {}, { id: 1 }, '0/302');
 
     expect(received).toHaveLength(1);
     expect(received[0]!.op).toBe('delete');
@@ -169,7 +139,7 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
     const received: Array<{ op: string }> = [];
     (events as any).orders((event: any) => received.push(event));
 
-    runtime.walEventEmitter.emit(
+    runtime.emitTap(
       tableKey,
       'delete',
       {},
@@ -187,7 +157,7 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
     const received: Array<{ op: string }> = [];
     (events as any).orders((event: any) => received.push(event));
 
-    runtime.walEventEmitter.emit(
+    runtime.emitTap(
       tableKey,
       'delete',
       {},
@@ -206,7 +176,7 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
     const received: unknown[] = [];
     (events as any).orders((event: unknown) => received.push(event));
 
-    runtime.walEventEmitter.emit(
+    runtime.emitTap(
       tableKey,
       'update',
       { id: 1, status: 'requested', price: 10 },
@@ -224,7 +194,7 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
     const received: Array<{ row: unknown; matchesNew: boolean }> = [];
     (events as any).orders((event: any) => received.push(event));
 
-    runtime.walEventEmitter.emit(
+    runtime.emitTap(
       tableKey,
       'update',
       { id: 1, status: 'completed', price: 10 },
@@ -244,25 +214,13 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
     let count = 0;
     const unsub = (events as any).orders(() => count++);
 
-    runtime.walEventEmitter.emit(
-      tableKey,
-      'insert',
-      { id: 1, status: 'accepted', price: 10 },
-      null,
-      '0/100',
-    );
+    runtime.emitTap(tableKey, 'insert', { id: 1, status: 'accepted', price: 10 }, null, '0/100');
     expect(count).toBe(1);
 
     unsub();
     unsub(); // idempotent — no throw, no double-detach error
 
-    runtime.walEventEmitter.emit(
-      tableKey,
-      'insert',
-      { id: 2, status: 'accepted', price: 20 },
-      null,
-      '0/200',
-    );
+    runtime.emitTap(tableKey, 'insert', { id: 2, status: 'accepted', price: 20 }, null, '0/200');
     expect(count).toBe(1);
   });
 
@@ -280,24 +238,12 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
     let count = 0;
     (events as any).orders(() => count++);
 
-    runtime.walEventEmitter.emit(
-      tableKey,
-      'insert',
-      { id: 1, status: 'accepted', price: 10 },
-      null,
-      '0/100',
-    );
+    runtime.emitTap(tableKey, 'insert', { id: 1, status: 'accepted', price: 10 }, null, '0/100');
     expect(count).toBe(1);
 
     stopListener?.();
 
-    runtime.walEventEmitter.emit(
-      tableKey,
-      'insert',
-      { id: 2, status: 'accepted', price: 20 },
-      null,
-      '0/200',
-    );
+    runtime.emitTap(tableKey, 'insert', { id: 2, status: 'accepted', price: 20 }, null, '0/200');
     expect(count).toBe(1);
   });
 });

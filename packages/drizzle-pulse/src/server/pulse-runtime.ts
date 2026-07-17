@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { desc, type EmptyRelations, eq, getColumns, getTableUniqueName, sql } from 'drizzle-orm';
-import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
+import { getTableConfig, type PgColumn, type PgTable } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/postgres';
 import {
   type Connection,
@@ -8,6 +8,7 @@ import {
   type ReplicationConnection,
   type ReplicationEvent,
   replication,
+  type TableShape,
 } from 'minipg';
 import type { ResolvedPulseQuery } from '../types.js';
 import { emitEventsTableDdl } from './events-table-ddl.js';
@@ -17,8 +18,7 @@ import { buildSelectQuery, type PulseSourceDb } from './pulse-sql.js';
 import { PulseStore } from './pulse-store.js';
 import { getQueryColumnKey } from './pulse-types.js';
 import { DEFAULT_PULL_EVENT_LIMIT, PulseRequestHandler } from './sdk.js';
-import { WalEventEmitter } from './wal-event-emitter.js';
-import { createShapeRowNormalizer, walTextDecoders } from './wal-shape-bridge.js';
+import { buildTableShape, indexColumnsBySqlName, reKeyToJsProps } from './wal-shape-bridge.js';
 
 type RuntimeLifecycleListener = () => void;
 // Reconnect listeners receive the mid-round re-baseline pin (or null under pull:false / no
@@ -70,17 +70,19 @@ export type PulseRuntimeConfig = {
 
 type SourceTableMetadata = {
   sourceTable: PgTable;
-  // The pk column's JS property key — indexes into the (now JS-keyed) in-memory row objects.
+  // The pk column's JS property key — indexes into the (JS-keyed) in-memory row objects.
   pkKey: string;
-  // The pk column's SQL name — used only where a raw sql.identifier is emitted.
-  pkSqlName: string;
+  // The pk column itself — carries the SQL-name identity and drives the pk read-back's WHERE.
+  pkColumn: PgColumn;
   eventsTable: PgTable;
-  normalizeRow: (row: Record<string, unknown>) => Record<string, unknown>;
+  // SQL column name -> { JS property key, column }: re-keys decoded WAL rows and builds the
+  // JS-keyed selection for a TOAST fill read-back.
+  columnsBySqlName: Map<string, { jsKey: string; column: PgColumn }>;
 };
 
 // A decoded WAL row event, buffered between a transaction's `begin` and `commit` so the whole
-// transaction persists atomically and acks together. `row`/`oldRow` are already normalized via
-// the shape bridge into JS-property-keyed rows — for delete, `row` is deliberately `{}` (the
+// transaction persists atomically and acks together. `row`/`oldRow` arrive decoded by minipg's
+// per-table shapes and re-keyed to JS property keys — for delete, `row` is deliberately `{}` (the
 // tap's dedupe-by-absence contract); the persisted events-table row still carries the old row's
 // data (PulseStore's buildEventRow), so persistence and the tap emit stay correctly divergent
 // for deletes.
@@ -91,11 +93,18 @@ export type PendingWalEvent = {
   op: 'insert' | 'update' | 'delete';
   row: Record<string, unknown>;
   oldRow: Record<string, unknown> | null;
-  // Mirrors WalTapPayload['oldRowComplete'] — whether `oldRow` is a full old tuple (safe to
-  // evaluate against a WHERE) or a null/pk-only degradation under a non-full identity.
+  // Whether `oldRow` is a full old tuple (safe to evaluate a WHERE against) or a null/pk-only
+  // degradation under a non-full identity; the tap uses it to decide if `oldRow` is evaluable.
   oldRowComplete: boolean;
   tableQualifiedName: string;
 };
+
+// In-process (embedded) tap subscribers receive each decoded WAL event with its transaction's
+// commit LSN. There is no separate tap-payload shape: a PendingWalEvent already carries the
+// operation, new/old rows, and completeness flag a subscriber needs — the commit LSN is the only
+// per-transaction field it lacks, so it is passed alongside. `lsn` is shared by every event in
+// the commit.
+export type TapListener = (event: PendingWalEvent, lsn: string) => void;
 
 // A TOAST fill-by-pk that returned zero rows — recorded transiently in decodeInto, resolved at
 // commit time in stream() against a trailing delete on the same pk.
@@ -214,6 +223,7 @@ function backoffDelay(attempts: number): number {
 
 export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   private readonly sourceTableMetadata: Map<string, SourceTableMetadata>;
+  private readonly tableShapes: TableShape[];
   private readonly requestHandler: PulseRequestHandler;
   private readonly logLevel: LogLevel;
   readonly publicationName: string;
@@ -235,7 +245,9 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   // In-memory mirror of the durable pulse_stream watermark — dedupes at-least-once replay after
   // a reconnect without a store round trip on every commit.
   private lastPersistedCommitLsn: string | null = null;
-  readonly walEventEmitter = new WalEventEmitter();
+  // Source-table qualified name -> in-process (embedded) tap subscribers. Keyed by the same
+  // getTableUniqueName convention decodeInto stamps onto each PendingWalEvent.tableQualifiedName.
+  private readonly tapListeners = new Map<string, Set<TapListener>>();
   private readonly reconnectListeners = new Set<ReconnectListener>();
   private readonly stopListeners = new Set<RuntimeLifecycleListener>();
   private readonly terminalErrorListeners = new Set<(error: Error) => void>();
@@ -260,6 +272,33 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   onStop(listener: RuntimeLifecycleListener): () => void {
     this.stopListeners.add(listener);
     return () => this.stopListeners.delete(listener);
+  }
+
+  // In-process (embedded) subscription to a source table's decoded WAL events, keyed by the
+  // table's qualified name (getTableUniqueName — the same value the embedded modules derive from
+  // their resolved query). The WAL loop dispatches synchronously in commit order.
+  subscribeTap(tableQualifiedName: string, listener: TapListener): () => void {
+    let set = this.tapListeners.get(tableQualifiedName);
+    if (!set) {
+      set = new Set();
+      this.tapListeners.set(tableQualifiedName, set);
+    }
+    const listeners = set;
+    listeners.add(listener);
+    return () => listeners.delete(listener);
+  }
+
+  private emitTap(event: PendingWalEvent, lsn: string): void {
+    const set = this.tapListeners.get(event.tableQualifiedName);
+    if (!set) return;
+    for (const listener of set) {
+      try {
+        listener(event, lsn);
+      } catch (err) {
+        // A listener error must not drop remaining listeners or block the WAL ack path upstream.
+        this.logError('tap listener error:', err);
+      }
+    }
   }
 
   // Fires once replication gives up permanently (reconnect attempts exhausted) — the runtime
@@ -315,11 +354,17 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         pkKey:
           getQueryColumnKey(getColumns(sourceTable), pulseQuery.pkColumn) ??
           pulseQuery.pkColumn.name,
-        pkSqlName: pulseQuery.pkColumn.name,
+        pkColumn: pulseQuery.pkColumn,
         eventsTable,
-        normalizeRow: createShapeRowNormalizer(sourceTable),
+        columnsBySqlName: indexColumnsBySqlName(sourceTable),
       });
     }
+
+    // Handed to every rep.start() so minipg decodes each declared column exactly as its query()
+    // spec would — new and old tuples alike — instead of at the OID's default JS target.
+    this.tableShapes = [...this.sourceTableMetadata.values()].map((meta) =>
+      buildTableShape(meta.sourceTable),
+    );
 
     this.logLevel = this.config.logLevel ?? LogLevel.Info;
 
@@ -821,7 +866,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       // awaiting supervise() itself.
       const kill = () => rep?.end();
       try {
-        rep = await replication({ url: this.config.databaseUrl, types: walTextDecoders });
+        rep = await replication({ url: this.config.databaseUrl });
         signal.addEventListener('abort', kill);
 
         const { slot, from } = this.pullEnabled
@@ -832,6 +877,9 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         const iterator = rep.start({
           slot,
           publications: [this.publicationName],
+          // Per-table decode shapes: minipg lands each declared column in the same JS type its
+          // query() spec would, keyed by SQL column name (see buildTableShape).
+          shapes: this.tableShapes,
           from,
           statusIntervalMs: 1000,
           idleAck: true,
@@ -1260,14 +1308,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       }
 
       for (const event of t.events) {
-        this.walEventEmitter.emit(
-          event.tableQualifiedName,
-          event.op,
-          event.row,
-          event.oldRow,
-          t.commitLsn,
-          event.oldRowComplete,
-        );
+        this.emitTap(event, t.commitLsn);
       }
 
       // endLsn, never lsn — idleAck's gate tracks endLsn, and only after persist resolves.
@@ -1295,13 +1336,14 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     // OTHER column off a 'key' tuple is still not safe: minipg null-renders them, indistinguishable
     // from a real SQL null. `rawOld` may therefore only be used in full for oldKind === 'full';
     // elsewhere only its pk column may be read.
-    const rawOld = ev.kind !== 'insert' && ev.old ? metadata.normalizeRow(ev.old) : null;
+    const rawOld =
+      ev.kind !== 'insert' && ev.old ? reKeyToJsProps(ev.old, metadata.columnsBySqlName) : null;
 
     if (ev.kind === 'insert') {
-      row = metadata.normalizeRow(ev.new);
+      row = reKeyToJsProps(ev.new, metadata.columnsBySqlName);
       oldRow = null;
     } else if (ev.kind === 'update') {
-      const base = metadata.normalizeRow(ev.new);
+      const base = reKeyToJsProps(ev.new, metadata.columnsBySqlName);
       row = base;
       if (ev.oldKind === 'full' && rawOld) {
         // pgoutput omits an UPDATE's unchanged TOASTed columns from the new tuple; the
@@ -1342,7 +1384,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     }
 
     // Mirrors the oldKind checks above: true only when `oldRow` is a genuine full tuple, safe
-    // to evaluate a WHERE against (threaded to the tap via WalTapPayload.oldRowComplete).
+    // to evaluate a WHERE against (threaded to the tap via PendingWalEvent.oldRowComplete).
     const oldRowComplete = ev.kind !== 'insert' && ev.oldKind === 'full';
 
     const pkSource = ev.kind === 'delete' ? oldRow : row;
@@ -1402,32 +1444,28 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
   // TOAST = Postgres's out-of-line storage for oversized column values; pgoutput omits an
   // update's unchanged TOASTed columns from the new tuple, so they must be read back here.
-  // One pk-SELECT of exactly the omitted TOASTed columns, on the admin pool — required for
+  // One pk-select of exactly the omitted TOASTed columns, on the admin pool — required for
   // correctness under a non-full identity (see decodeInto), not an optimization. No cache, no
   // batcher, no retries: read-your-latest is the accepted consistency model, same as the
-  // baseline MVCC race — any later change arrives explicitly in a later WAL event.
+  // baseline MVCC race — any later change arrives explicitly in a later WAL event. The selection
+  // is keyed by JS property name, so the row comes back in the in-memory keyspace directly.
   private async fillUnchangedByPk(
     metadata: SourceTableMetadata,
     pkValue: unknown,
     unchanged: string[],
   ): Promise<Record<string, unknown> | null> {
-    const sourceConfig = getTableConfig(metadata.sourceTable);
-    const sourceIdentifier = sql`${sql.identifier(sourceConfig.schema ?? 'public')}.${sql.identifier(sourceConfig.name)}`;
-    const columnsIdentifier = sql.join(
-      unchanged.map((name) => sql`${sql.identifier(name)}`),
-      sql`, `,
-    );
-    const {
-      rows: [row],
-    } = await this.getPulseStore()
+    const selection: Record<string, PgColumn> = {};
+    for (const sqlName of unchanged) {
+      const entry = metadata.columnsBySqlName.get(sqlName);
+      if (entry) selection[entry.jsKey] = entry.column;
+    }
+    const [row] = await this.getPulseStore()
       .getDb()
-      .execute<Record<string, unknown>>(sql`
-      select ${columnsIdentifier}
-      from ${sourceIdentifier}
-      where ${sql.identifier(metadata.pkSqlName)} = ${pkValue}
-      limit 1
-    `);
-    return row ? metadata.normalizeRow(row) : null;
+      .select(selection)
+      .from(metadata.sourceTable)
+      .where(eq(metadata.pkColumn, pkValue))
+      .limit(1);
+    return row ?? null;
   }
 
   private getPulseStore(): PulseStore {

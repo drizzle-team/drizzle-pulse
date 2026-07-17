@@ -302,8 +302,8 @@ describe('SPLIT-05 embedded/events per-root inclusion and exclusion contract', (
           join(SRC_ROOT, 'server/pulse-store.ts'),
           join(SRC_ROOT, 'server/cursor.ts'),
           join(SRC_ROOT, 'server/pulse-sql.ts'),
-          // The bridge value-imports minipg and drizzle-orm/postgres/* — must never become
-          // client-reachable.
+          // The bridge value-imports drizzle-orm/postgres/shape (which pulls in minipg's postgres
+          // codecs) — must never become client-reachable.
           join(SRC_ROOT, 'server/wal-shape-bridge.ts'),
         ],
       ],

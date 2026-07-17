@@ -1,9 +1,13 @@
 import { getColumns } from 'drizzle-orm';
 import { integer, pgTable, serial, text } from 'drizzle-orm/pg-core';
 import { createPulseRegistry } from '../server/pulse-registry.js';
-import { PulseRuntime } from '../server/pulse-runtime.js';
+import {
+  type LogLevel,
+  type PendingWalEvent,
+  PulseRuntime,
+  type TapListener,
+} from '../server/pulse-runtime.js';
 import type { PulseSourceDb } from '../server/pulse-sql.js';
-import { WalEventEmitter } from '../server/wal-event-emitter.js';
 import type { PulseRegistryQuery, ResolvedPulseQuery } from '../types.js';
 
 // Shared inline fixtures (no DB required) — used by embedded-collection.test.ts and
@@ -95,18 +99,53 @@ export interface MockRuntimeOptions {
 // Shared mock runtime for createPulseClient/createPulseEvents tests — deliberately has no
 // `handlers` property: the tap-direct embedded path must not need the SDK/wire-protocol
 // surface (SPLIT-03). Tests override individual methods (registry, onStop, etc.) post-
-// construction the same way they already override walEventEmitter.subscribe.
+// construction the same way they reassign subscribeTap.
 export function makeMockRuntime(opts: MockRuntimeOptions = {}) {
-  const walEventEmitter = new WalEventEmitter();
   const registryStub = makeRegistryStub({
     hasTransform: opts.hasTransform ?? false,
     limit: opts.limit ?? null,
   });
   const resolved = makeResolvedQuery({ limit: opts.limit ?? null, where: opts.where ?? null });
 
+  // Stand-in for PulseRuntime's in-process tap registry. `emitTap` mirrors the runtime's
+  // per-event fan-out so tests drive events the same way the WAL loop would, building the
+  // PendingWalEvent the embedded modules consume.
+  const tapListeners = new Map<string, Set<TapListener>>();
+  const subscribeTap = (key: string, listener: TapListener): (() => void) => {
+    let set = tapListeners.get(key);
+    if (!set) {
+      set = new Set();
+      tapListeners.set(key, set);
+    }
+    const listeners = set;
+    listeners.add(listener);
+    return () => listeners.delete(listener);
+  };
+  const emitTap = (
+    tableQualifiedName: string,
+    op: PendingWalEvent['op'],
+    row: Record<string, unknown>,
+    oldRow: Record<string, unknown> | null,
+    lsn: string,
+    oldRowComplete = false,
+  ): void => {
+    const event: PendingWalEvent = {
+      eventsTable: ordersTable,
+      pkKey: 'id',
+      pkValue: (row as { id?: unknown }).id ?? (oldRow as { id?: unknown } | null)?.id,
+      op,
+      row,
+      oldRow,
+      oldRowComplete,
+      tableQualifiedName,
+    };
+    for (const listener of tapListeners.get(tableQualifiedName) ?? []) listener(event, lsn);
+  };
+
   return {
     isRunning: opts.isRunning ?? true,
-    walEventEmitter,
+    subscribeTap,
+    emitTap,
     readCollectionBaseline: async () => ({
       rows: opts.baselineRows ?? [],
       watermark: opts.watermark ?? '0/100',
@@ -127,6 +166,7 @@ export function makePulseRuntime(
     databaseUrl?: string;
     sourceDb?: PulseSourceDb;
     pull?: boolean | { eventsSchema?: string; eventLimit?: number };
+    logLevel?: LogLevel;
   } = {},
 ): PulseRuntime<any> {
   const emptyRegistry = createPulseRegistry({});
@@ -135,5 +175,6 @@ export function makePulseRuntime(
     sourceDb: opts.sourceDb ?? ({} as PulseSourceDb),
     pull: opts.pull ?? true,
     wal: { publicationName: 'test_pub', slotName: 'test_slot' },
+    logLevel: opts.logLevel,
   });
 }
