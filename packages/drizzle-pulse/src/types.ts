@@ -119,8 +119,7 @@ export class QueryDescriptor<TResult> {
     readonly queryName: string,
     readonly args: Record<string, unknown>,
     readonly url: string,
-    // Batches this query's polls with its siblings on the HTTP path; the embedded direct path
-    // that left it undefined no longer exists.
+    // Batches this query's polls with its siblings on the HTTP path.
     readonly pullClient: PullClient,
   ) {}
 }

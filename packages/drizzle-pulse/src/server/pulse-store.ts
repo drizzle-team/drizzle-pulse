@@ -125,11 +125,10 @@ export class PulseStore {
     return Object.fromEntries(Object.entries(row).map(([key, value]) => [`$old_${key}`, value]));
   }
 
-  // Consolidated builder for all four event-row shapes (insert/update/delete/snapshot),
-  // driven by `op` rather than which fields are present — replaces the prior 3-branch union.
-  // `row` is always passed (delete's is `{}` per PendingWalEvent's tap contract, but is
-  // deliberately ignored below since a delete's persisted row is old-row-derived, matching the
-  // original persistDeleteEvent behavior verbatim).
+  // One builder for all four event-row shapes (insert/update/delete/snapshot), driven by `op`
+  // rather than which fields are present. `row` is always passed (delete's is `{}` per
+  // PendingWalEvent's tap contract) but deliberately ignored for deletes below — a delete's
+  // persisted row is old-row-derived.
   private buildEventRow(input: {
     op: 'insert' | 'update' | 'delete' | 'snapshot';
     pkKey: string;

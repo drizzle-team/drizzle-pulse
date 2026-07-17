@@ -53,8 +53,8 @@ export type PulseHandlerResult<TBody> = {
   body: TBody;
 };
 
-// The per-request replacement for the old server-held Subscription: reconstructed on every
-// request from the (auth-re-resolved) query plus the client's current window. order/limit
+// Reconstructed on every request from the (auth-re-resolved) query plus the client's current
+// window — the server holds no subscription state between requests. order/limit
 // come from `query` (server-derived, never trusted from the client); rangeStart/rangeEnd and
 // hasMore are client-supplied and only narrow/annotate the window.
 type Subscription = {

@@ -124,7 +124,7 @@ const REBASELINE_PIN_WINDOW_MS = 5000;
 
 // One connection lifecycle attempt: aborting closes the socket (the only way to stop a parked
 // minipg next() — see supervise()) and wakes an in-progress backoff sleep. `attempts` is the
-// terminal-path test seam replacing the old reconnectAttempts field.
+// terminal-path test seam.
 type Run = { abort: AbortController; attempts: number };
 
 // The snapshot-anchored embedded re-baseline pin: a checked-out admin connection holding the
@@ -802,9 +802,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   }
 
   // The linear supervisor loop: one connection attempt per iteration, `try/catch/finally` in
-  // statement order instead of a callback ring. `signal.aborted` is the single successor to the
-  // three superseded-connection guards the old code needed — exactly one connection exists per
-  // iteration, so there is nothing left to supersede.
+  // statement order. `signal.aborted` is the only teardown signal — exactly one connection
+  // exists per iteration, so nothing can be superseded.
   private async supervise(run: Run, first: { promise: Promise<void>; resolve: () => void }) {
     const { signal } = run.abort;
     // Per-run, not per-instance: a stopped-then-restarted runtime fires no reconnect edge on
@@ -1133,7 +1132,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
   // Checked-out-connection pin: a dedicated admin connection running BEGIN READ ONLY + SET
   // TRANSACTION SNAPSHOT sequentially, so a setup failure is an ordinary rejection (release()
-  // then rethrow) instead of the old parked-deferred hang class. Must be called BEFORE the
+  // then rethrow). Must be called BEFORE the
   // caller issues rep.start() — the exported snapshot dies on this connection's next command.
   private async openPin(snapshot: string, watermark: string): Promise<void> {
     assertSnapshotName(snapshot);
@@ -1183,9 +1182,9 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     await pin.close();
   }
 
-  // One local per connection (`tx`) replaces the old currentCommitLsn + pending fields — this
-  // also closes the stale-buffer-across-reconnect quirk for free. A clean iterator end simply
-  // returns; the supervisor's loop tail supplies the reconnect (the CopyDone fix stays closed).
+  // One `tx` local per connection, so a reconnect can never observe a stale half-buffered
+  // transaction. A clean iterator end simply returns; the supervisor's loop tail supplies the
+  // reconnect.
   private async stream(
     rep: ReplicationConnection,
     iterator: AsyncGenerator<ReplicationEvent>,
