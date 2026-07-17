@@ -38,7 +38,7 @@ The events table itself lives in a dedicated **events schema** — never in the 
 table's own schema, and independent of the project's migrations schema. It defaults to
 **`drizzle_pulse`**, a constant both the runtime resolver and drizzle-kit's codegen
 hardcode, so the two agree with no configuration. It can be overridden at runtime via
-`ExposeConfig.eventsSchema`, but the override must then match whatever drizzle-kit
+`PulseRuntimeConfig.eventsSchema`, but the override must then match whatever drizzle-kit
 generated.
 
 **Worked example:** a source table `orders` in the default `public` schema, with
@@ -218,14 +218,14 @@ before any statement reaches Postgres.
 
 Nothing outside the runtime creates or migrates these tables. On `PulseRuntime.start()`
 — and, identically, on `provision()` (section 5.5) — the runtime runs `reconcile()`
-([`expose.ts`](../packages/drizzle-pulse/src/server/expose.ts)): one transaction, guarded by a
+([`pulse-runtime.ts`](../packages/drizzle-pulse/src/server/pulse-runtime.ts)): one transaction, guarded by a
 `pg_advisory_xact_lock` keyed on the events schema so two booting runtimes can't race the same
 DDL. In that transaction it, in order:
 
-1. asserts `wal_level = logical` (server-wide, the one precondition it can't fix — fail-closed);
+1. asserts `wal_level = logical` (server-wide, the one precondition it can't fix — boot rejects rather than proceeding without it);
 2. under `pull: true`, sets `REPLICA IDENTITY FULL` on every registered source table (and resets
    it to `DEFAULT` on any table it un-pulses); under `pull: false`, replica identity is never
-   touched — reconcile instead reads each source's `relreplident` and fails closed if it is
+   touched — reconcile instead reads each source's `relreplident` and rejects at boot if it is
    `NOTHING`, or `USING INDEX` on an index other than the primary key, since deletes can't be
    decoded off a `'key'` old tuple in either case;
 3. creates the `CREATE PUBLICATION` (owning exactly the registered sources) or — unless the
@@ -282,7 +282,7 @@ changes a pulsed table's shape (hence recreates its events table) resets that ta
 subscribers. This is accepted by design.
 
 The same reset path covers the per-pull event cap: a pull that would replay more than
-`ExposeConfig.pullEventLimit` events (default 1000) resets instead of streaming an unbounded batch.
+`PulseRuntimeConfig.pullEventLimit` events (default 1000) resets instead of streaming an unbounded batch.
 
 ### 5.4 Orphan policy
 
@@ -330,7 +330,7 @@ can also be a benign update-then-delete race decoded across two commits).
 drizzle-kit is not involved in events-table DDL, but your `drizzle-kit push`/`pull` must not try
 to manage or drop the pulse-owned schema. kit's `schemaFilter` is an **allowlist** of schemas it
 manages (default `['public']`): make sure your pulse events schema — `'drizzle_pulse'` by default,
-or whatever you pass as `ExposeConfig.eventsSchema` — is **not** in it. At the default it already
+or whatever you pass as `PulseRuntimeConfig.eventsSchema` — is **not** in it. At the default it already
 is excluded; only a config that widens `schemaFilter` (or moves your app off `public`) needs the
 explicit exclusion.
 

@@ -1,22 +1,24 @@
-import { sql } from 'drizzle-orm';
+import { eq, getColumns, sql } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
-import { getTableConfig } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/postgres';
 import { type Connection, createPool, type Pool } from 'minipg';
-import type { PendingWalEvent } from './expose.js';
+import { buildMetaTables } from './meta-tables.js';
+import type { PendingWalEvent } from './pulse-runtime.js';
 
 type DbHandle = ReturnType<typeof drizzle>;
 type TxHandle = Parameters<Parameters<DbHandle['transaction']>[0]>[0];
+type MetaTables = ReturnType<typeof buildMetaTables>;
 
 export class PulseStore {
   private readonly pool: Pool;
   private readonly db: DbHandle;
-  private readonly eventsSchema: string;
+  readonly pulseMeta: MetaTables['pulseMeta'];
+  readonly pulseStream: MetaTables['pulseStream'];
 
   constructor(databaseUrl: string, eventsSchema: string) {
     this.pool = createPool(databaseUrl);
     this.db = drizzle({ client: this.pool });
-    this.eventsSchema = eventsSchema;
+    ({ pulseMeta: this.pulseMeta, pulseStream: this.pulseStream } = buildMetaTables(eventsSchema));
   }
 
   getDb(): DbHandle {
@@ -31,24 +33,19 @@ export class PulseStore {
     return this.pool.connect();
   }
 
-  private streamTableIdentifier() {
-    return sql`${sql.identifier(this.eventsSchema)}.${sql.identifier('pulse_stream')}`;
-  }
-
   async getStreamWatermark(slotName: string): Promise<string | null> {
-    const result = await this.db.execute<{ last_lsn: string }>(sql`
-      select last_lsn
-      from ${this.streamTableIdentifier()}
-      where slot_name = ${slotName}
-    `);
-    return result.rows[0]?.last_lsn ?? null;
+    const [row] = await this.db
+      .select({ lastLsn: this.pulseStream.lastLsn })
+      .from(this.pulseStream)
+      .where(eq(this.pulseStream.slotName, slotName));
+    return row?.lastLsn ?? null;
   }
 
-  // Transaction-atomic persist for a WAL commit: every buffered row event inserts, then the
-  // durable dedupe watermark upserts, all in one db.transaction — rows and watermark move
-  // together, and the caller (expose.ts) acks only after this resolves. An empty `events` array
-  // still upserts the watermark (a data-less commit advances the dedupe floor).
-  async persistCommit(
+  // Writes a WAL commit's event rows and advances the durable dedupe watermark in one
+  // db.transaction, so rows and watermark move together and the caller (pulse-runtime.ts) acks
+  // only after this resolves. An empty `events` array still upserts the watermark (a data-less
+  // commit advances the dedupe floor).
+  async persistCommitAndAdvanceWatermark(
     events: PendingWalEvent[],
     slotName: string,
     commitLsn: string,
@@ -68,11 +65,10 @@ export class PulseStore {
         );
       }
 
-      await tx.execute(sql`
-        insert into ${this.streamTableIdentifier()} (slot_name, last_lsn)
-        values (${slotName}, ${commitLsn})
-        on conflict (slot_name) do update set last_lsn = excluded.last_lsn
-      `);
+      await tx
+        .insert(this.pulseStream)
+        .values({ slotName, lastLsn: commitLsn })
+        .onConflictDoUpdate({ target: this.pulseStream.slotName, set: { lastLsn: commitLsn } });
     });
   }
 
@@ -82,15 +78,8 @@ export class PulseStore {
     baselineRow: Record<string, unknown> | null,
     dbHandle: DbHandle | TxHandle = this.db,
   ): Promise<void> {
-    const eventsTableConfig = getTableConfig(table);
-    const eventsTableIdentifier = sql`${sql.identifier(eventsTableConfig.schema ?? 'public')}.${sql.identifier(eventsTableConfig.name)}`;
-    const existingRows = await dbHandle.execute<{ has_rows: boolean }>(sql`
-      select exists(
-        select 1
-        from ${eventsTableIdentifier}
-      ) as has_rows
-    `);
-    if (existingRows.rows[0]?.has_rows) return;
+    const [existing] = await dbHandle.select({ one: sql`1` }).from(table).limit(1);
+    if (existing) return;
 
     const row = baselineRow;
     if (!row) return;
@@ -113,13 +102,11 @@ export class PulseStore {
   }
 
   async getLatestSnapshot(table: PgTable): Promise<number> {
-    const eventsTableConfig = getTableConfig(table);
-    const eventsTableIdentifier = sql`${sql.identifier(eventsTableConfig.schema ?? 'public')}.${sql.identifier(eventsTableConfig.name)}`;
-    const result = await this.db.execute<{ snapshot: number | null }>(sql`
-      select max("$snapshot")::int as snapshot
-      from ${eventsTableIdentifier}
-    `);
-    return result.rows[0]?.snapshot ?? 0;
+    const snapshotColumn = getColumns(table)['$snapshot'];
+    const [row] = await this.db
+      .select({ snapshot: sql<number | null>`max(${snapshotColumn})::int` })
+      .from(table);
+    return row?.snapshot ?? 0;
   }
 
   private async insertEventRow(

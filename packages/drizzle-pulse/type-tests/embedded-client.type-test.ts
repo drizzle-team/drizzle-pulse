@@ -7,8 +7,8 @@ import {
   type PulseRow,
 } from '../src/client/embedded/index.js';
 import { pulse } from '../src/index.js';
-import type { PulseRuntime } from '../src/server/expose.js';
 import { createPulseRegistry } from '../src/server/pulse-registry.js';
+import type { PulseRuntime } from '../src/server/pulse-runtime.js';
 import { driverSchema, orders, statusSchema } from './fixtures.js';
 
 // ---------------------------------------------------------------------------

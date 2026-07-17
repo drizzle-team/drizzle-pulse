@@ -26,7 +26,7 @@ function assertIdentifierLength(identifier: string): void {
 
 // `_` -> `__` per component before joining the two with a single `_`. Keeps names readable,
 // but different source tables can still collide: ("a_","b") and ("a","_b") both derive
-// "a___b". Collisions are rejected at registration (see expose.ts).
+// "a___b". Collisions are rejected at registration (see pulse-runtime.ts).
 function escapeComponent(component: string): string {
   return component.replaceAll('_', '__');
 }

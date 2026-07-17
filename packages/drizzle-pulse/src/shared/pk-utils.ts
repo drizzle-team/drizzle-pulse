@@ -1,6 +1,6 @@
 /**
  * Shared PK comparison and validation utilities.
- * Used by both server (expose.ts) and client (react.ts) for consistent
+ * Used by both server (pulse-runtime.ts) and client (react.ts) for consistent
  * monotonic-invariant behavior.
  */
 

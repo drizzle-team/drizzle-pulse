@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { desc, type EmptyRelations, getColumns, getTableUniqueName, sql } from 'drizzle-orm';
+import { desc, type EmptyRelations, eq, getColumns, getTableUniqueName, sql } from 'drizzle-orm';
 import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/postgres';
 import {
@@ -25,7 +25,7 @@ type RuntimeLifecycleListener = () => void;
 // recovery) so they can read through it instead of racing the ordinary watermark path.
 type ReconnectListener = (pin: BaselinePin | null) => Promise<void> | void;
 
-export type ExposeWalConfig = {
+export type PulseRuntimeWalConfig = {
   publicationName?: string;
   slotName?: string;
 };
@@ -39,7 +39,7 @@ export enum LogLevel {
   Debug = 3,
 }
 
-export type ExposeConfig = {
+export type PulseRuntimeConfig = {
   databaseUrl: string;
   /**
    * The app's own drizzle connection; baseline and query reads run on it to keep its session
@@ -64,7 +64,7 @@ export type ExposeConfig = {
          */
         eventLimit?: number;
       };
-  wal?: ExposeWalConfig;
+  wal?: PulseRuntimeWalConfig;
   logLevel?: LogLevel;
 };
 
@@ -267,7 +267,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
   constructor(
     readonly registry: PulseRegistry<TQueries>,
-    private readonly config: ExposeConfig,
+    private readonly config: PulseRuntimeConfig,
   ) {
     const wal = this.config.wal ?? {};
     this.publicationName = wal.publicationName ?? DEFAULT_PUBLICATION_NAME;
@@ -517,8 +517,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
    * without opening a replication stream: runs the same schema path as {@link start} —
    * create/recreate diverged events tables, sweep orphans, rotate epochs — over a short-lived
    * admin connection, then closes it. Call from a deploy/migration step to provision
-   * infrastructure ahead of booting the listener. Fail-closed: rejects (rolling back) on any
-   * unmet precondition.
+   * infrastructure ahead of booting the listener. On any unmet precondition it throws and rolls
+   * the whole transaction back instead of provisioning partially.
    */
   async provision(): Promise<void> {
     this.store ??= new PulseStore(this.config.databaseUrl, this.eventsSchema);
@@ -531,8 +531,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     }
   }
 
-  // Fail-closed boot reconciliation, wrapped in one transaction under a schema-scoped advisory
-  // lock. wal_level is the only precondition the runtime can't fix, so it stays an assert;
+  // Boot reconciliation, wrapped in one transaction under a schema-scoped advisory lock.
+  // wal_level is the only precondition the runtime can't fix, so it stays an assert;
   // everything else pulse self-provisions: REPLICA IDENTITY FULL on each source, then the
   // publication (create it owning exactly the sources, or — unless it's FOR ALL TABLES — diff
   // its membership, adding registered sources and un-pulsing members that no longer are). Then
@@ -542,6 +542,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   // untouched. Runtime-owned events-table DDL: the app no longer migrates these tables.
   private async reconcile(): Promise<void> {
     const adminDb = this.getPulseStore().getDb();
+    const { pulseMeta } = this.getPulseStore();
     const eventsSchema = this.eventsSchema;
     const schema = sql.identifier(eventsSchema);
     const metaTable = sql`${schema}.${sql.identifier('pulse_meta')}`;
@@ -573,7 +574,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       };
 
       // wal_level=logical is server-wide (postgresql.conf + restart); the runtime can't fix it,
-      // so it stays a fail-closed assert.
+      // so boot rejects here rather than trying to proceed without it.
       const {
         rows: [{ wal_level: walLevel } = {}],
       } = await tx.execute<{ wal_level?: string }>(
@@ -602,10 +603,12 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       // be an unwanted durable mutation (and the ACCESS EXCLUSIVE lock that comes with it).
       if (this.pullEnabled) {
         for (const source of registeredSources) {
-          const replicaIdentityResult = await tx.execute<{ relreplident: string }>(
+          const {
+            rows: [{ relreplident } = {}],
+          } = await tx.execute<{ relreplident: string }>(
             sql`SELECT c.relreplident FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ${source.schemaName} AND c.relname = ${source.tableName}`,
           );
-          if (replicaIdentityResult.rows[0]?.relreplident !== 'f') {
+          if (relreplident !== 'f') {
             await execDdl(
               `ALTER TABLE ${source.quoted} REPLICA IDENTITY FULL`,
               `ownership of ${source.name}`,
@@ -616,10 +619,12 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         // pull:false decodes deletes/pk-change straight off the WAL 'key' tuple instead of
         // forcing FULL — that only carries real pk data under DEFAULT/FULL, or USING INDEX on
         // the pk's own index. Anything else silently drops every delete (non-pk USING INDEX) or
-        // breaks the app's own writes once the table joins the publication (NOTHING) — fail
-        // closed here instead of at decode time with no visible signal.
+        // breaks the app's own writes once the table joins the publication (NOTHING) — reject
+        // here at boot instead of at decode time, where the failure would have no visible signal.
         for (const source of registeredSources) {
-          const identityResult = await tx.execute<{
+          const {
+            rows: [{ relreplident: ident, ident_is_pk: identIsPk } = {}],
+          } = await tx.execute<{
             relreplident: string;
             ident_is_pk: boolean;
           }>(
@@ -629,9 +634,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
                 LEFT JOIN pg_index i ON i.indrelid = c.oid AND i.indisreplident
                 WHERE n.nspname = ${source.schemaName} AND c.relname = ${source.tableName}`,
           );
-          const identityRow = identityResult.rows[0];
-          const ident = identityRow?.relreplident;
-          if (ident === 'n' || (ident === 'i' && !identityRow?.ident_is_pk)) {
+          if (ident === 'n' || (ident === 'i' && !identIsPk)) {
             const identLabel = ident === 'n' ? 'NOTHING' : 'USING INDEX (non-primary-key index)';
             throw new Error(
               `pulse(pull:false): ${source.name} has REPLICA IDENTITY ${identLabel}; deletes cannot be decoded — set REPLICA IDENTITY DEFAULT or FULL`,
@@ -643,10 +646,11 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       // Publication: create it owning exactly the sources, or (unless it's FOR ALL TABLES) diff
       // its membership against them.
       const pubIdent = quoteIdent(this.publicationName);
-      const publicationResult = await tx.execute<{ puballtables: boolean }>(
+      const {
+        rows: [publicationRow],
+      } = await tx.execute<{ puballtables: boolean }>(
         sql`SELECT puballtables FROM pg_publication WHERE pubname = ${this.publicationName}`,
       );
-      const publicationRow = publicationResult.rows[0];
       if (!publicationRow) {
         const forTables =
           registeredSources.length > 0
@@ -657,10 +661,13 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
           'the database CREATE privilege and ownership of the published tables',
         );
       } else if (!publicationRow.puballtables) {
-        const membershipResult = await tx.execute<{ schemaname: string; tablename: string }>(
+        const { rows: membershipRows } = await tx.execute<{
+          schemaname: string;
+          tablename: string;
+        }>(
           sql`SELECT schemaname, tablename FROM pg_publication_tables WHERE pubname = ${this.publicationName}`,
         );
-        const members = membershipResult.rows.map((row) => ({
+        const members = membershipRows.map((row) => ({
           name: `${row.schemaname}.${row.tablename}`,
           quoted: `${quoteIdent(row.schemaname)}.${quoteIdent(row.tablename)}`,
         }));
@@ -712,17 +719,16 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
           sql`CREATE TABLE IF NOT EXISTS ${streamTable} (slot_name text PRIMARY KEY, last_lsn text NOT NULL)`,
         );
 
-        const metaResult = await tx.execute<{
-          table_name: string;
-          ddl_hash: string;
-          epoch: string;
-        }>(sql`SELECT table_name, ddl_hash, epoch FROM ${metaTable}`);
-        const metaByName = new Map(metaResult.rows.map((row) => [row.table_name, row] as const));
+        // What pulse_meta's bookkeeping claims exists, keyed by events-table name.
+        const metaRows = await tx.select().from(pulseMeta);
+        const metaByName = new Map(metaRows.map((row) => [row.tableName, row] as const));
 
-        const physicalResult = await tx.execute<{ relname: string }>(
+        // What actually exists in the events schema right now (pg_class), which pulse_meta can
+        // disagree with — a table dropped out from under us, or a stale meta row.
+        const { rows: schemaRelations } = await tx.execute<{ relname: string }>(
           sql`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ${eventsSchema} AND c.relkind IN ('r', 'p')`,
         );
-        const physical = new Set(physicalResult.rows.map((row) => row.relname));
+        const existingTableNames = new Set(schemaRelations.map((row) => row.relname));
 
         const desired = new Set<string>();
 
@@ -733,34 +739,49 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
           const statements = emitEventsTableDdl(meta.sourceTable, { eventsSchema });
           const ddlHash = createHash('sha256').update(statements.join('\n')).digest('hex');
 
-          const existing = metaByName.get(eventsName);
-          if (existing && existing.ddl_hash === ddlHash && physical.has(eventsName)) {
-            epochByName.set(eventsName, existing.epoch);
+          // The DDL hash is the whole recreate decision: a matching hash on a table that still
+          // physically exists means the events table already matches this source's shape, so
+          // reuse its epoch and skip. Any divergence (hash drift from a source schema change, or
+          // the table missing) falls through to recreate.
+          const existingMeta = metaByName.get(eventsName);
+          if (
+            existingMeta &&
+            existingMeta.ddlHash === ddlHash &&
+            existingTableNames.has(eventsName)
+          ) {
+            epochByName.set(eventsName, existingMeta.epoch);
             continue;
           }
 
           for (const statement of statements) {
             await tx.execute(sql.raw(statement));
           }
-          const upsert = await tx.execute<{ epoch: string }>(
-            sql`INSERT INTO ${metaTable} (table_name, ddl_hash, epoch) VALUES (${eventsName}, ${ddlHash}, gen_random_uuid()) ON CONFLICT (table_name) DO UPDATE SET ddl_hash = excluded.ddl_hash, epoch = gen_random_uuid() RETURNING epoch`,
-          );
-          const epoch = upsert.rows[0]?.epoch;
-          if (!epoch) {
+          // Recreate rotates the epoch exactly here: the table's rows were just dropped/rebuilt,
+          // so every cursor token minted against the old table must stop validating — a fresh
+          // epoch is what makes those stale tokens detectable.
+          const [inserted] = await tx
+            .insert(pulseMeta)
+            .values({ tableName: eventsName, ddlHash, epoch: sql`gen_random_uuid()` })
+            .onConflictDoUpdate({
+              target: pulseMeta.tableName,
+              set: { ddlHash, epoch: sql`gen_random_uuid()` },
+            })
+            .returning({ epoch: pulseMeta.epoch });
+          if (!inserted?.epoch) {
             throw new Error(`pulse_meta upsert for "${eventsName}" returned no epoch`);
           }
-          epochByName.set(eventsName, epoch);
+          epochByName.set(eventsName, inserted.epoch);
         }
 
         // Orphans: a meta row with no registered source drops its table + row; a physical table
         // with neither a meta row nor a registered source is left alone (warn only — it may be
         // an unrelated table hand-created in the events schema).
         for (const row of metaByName.values()) {
-          if (desired.has(row.table_name)) continue;
-          await tx.execute(sql`DROP TABLE IF EXISTS ${schema}.${sql.identifier(row.table_name)}`);
-          await tx.execute(sql`DELETE FROM ${metaTable} WHERE table_name = ${row.table_name}`);
+          if (desired.has(row.tableName)) continue;
+          await tx.execute(sql`DROP TABLE IF EXISTS ${schema}.${sql.identifier(row.tableName)}`);
+          await tx.delete(pulseMeta).where(eq(pulseMeta.tableName, row.tableName));
         }
-        for (const relname of physical) {
+        for (const relname of existingTableNames) {
           if (
             relname === 'pulse_meta' ||
             relname === 'pulse_stream' ||
@@ -872,7 +893,9 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   // guards against below and as documentation of intent. Tests reach it via seeded watermarks.
   private async resolveSlot(rep: ReplicationConnection): Promise<{ slot: string; from?: string }> {
     const adminDb = this.getPulseStore().getDb();
-    const result = await adminDb.execute<{
+    const {
+      rows: [slot],
+    } = await adminDb.execute<{
       slot_name: string;
       active: boolean;
       active_pid: number | null;
@@ -881,7 +904,6 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     }>(
       sql`SELECT slot_name, active, active_pid, wal_status, confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name = ${this.slotName}`,
     );
-    const slot = result.rows[0];
 
     if (!slot || slot.wal_status === 'lost') {
       return { slot: this.slotName, from: await this.recoverSlot(rep) };
@@ -1013,19 +1035,22 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     const pollIntervalMs = opts.pollIntervalMs ?? 100;
     const deadline = Date.now() + timeoutMs;
 
-    const existing = await adminDb.execute<{ active_pid: number | null }>(
+    const {
+      rows: [{ active_pid: activePid } = {}],
+    } = await adminDb.execute<{ active_pid: number | null }>(
       sql`SELECT active_pid FROM pg_replication_slots WHERE slot_name = ${slotName}`,
     );
-    const activePid = existing.rows[0]?.active_pid;
     if (!activePid) return;
 
     await adminDb.execute(sql`SELECT pg_terminate_backend(${activePid})`);
 
     for (;;) {
-      const poll = await adminDb.execute<{ active: boolean | null }>(
+      const {
+        rows: [{ active } = {}],
+      } = await adminDb.execute<{ active: boolean | null }>(
         sql`SELECT active FROM pg_replication_slots WHERE slot_name = ${slotName}`,
       );
-      if (!poll.rows[0]?.active) return;
+      if (!active) return;
       if (Date.now() >= deadline) return;
       await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     }
@@ -1037,8 +1062,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   private async rotateAndSeedEvents(snapshotName: string, consistentPoint: string): Promise<void> {
     assertSnapshotName(snapshotName);
     const adminDb = this.getPulseStore().getDb();
-    const metaTable = sql`${sql.identifier(this.eventsSchema)}.${sql.identifier('pulse_meta')}`;
-    const streamTable = sql`${sql.identifier(this.eventsSchema)}.${sql.identifier('pulse_stream')}`;
+    const { pulseMeta, pulseStream } = this.getPulseStore();
 
     const epochByName = await adminDb.transaction(
       async (tx) => {
@@ -1058,16 +1082,17 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
           const eventsIdentifier = sql`${sql.identifier(eventsTableConfig.schema ?? this.eventsSchema)}.${sql.identifier(eventsTableConfig.name)}`;
 
-          const rotated = await tx.execute<{ epoch: string }>(
-            sql`UPDATE ${metaTable} SET epoch = gen_random_uuid() WHERE table_name = ${eventsTableConfig.name} RETURNING epoch`,
-          );
-          const epoch = rotated.rows[0]?.epoch;
-          if (!epoch) {
+          const [rotated] = await tx
+            .update(pulseMeta)
+            .set({ epoch: sql`gen_random_uuid()` })
+            .where(eq(pulseMeta.tableName, eventsTableConfig.name))
+            .returning({ epoch: pulseMeta.epoch });
+          if (!rotated?.epoch) {
             throw new Error(
               `pulse_meta rotation found no row for "${eventsTableConfig.name}" — reconcile() should have created it`,
             );
           }
-          epochs.set(eventsTableConfig.name, epoch);
+          epochs.set(eventsTableConfig.name, rotated.epoch);
 
           await tx.execute(sql`TRUNCATE TABLE ${eventsIdentifier}`);
 
@@ -1085,11 +1110,13 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
           );
         }
 
-        await tx.execute(sql`
-          insert into ${streamTable} (slot_name, last_lsn)
-          values (${this.slotName}, ${consistentPoint})
-          on conflict (slot_name) do update set last_lsn = excluded.last_lsn
-        `);
+        await tx
+          .insert(pulseStream)
+          .values({ slotName: this.slotName, lastLsn: consistentPoint })
+          .onConflictDoUpdate({
+            target: pulseStream.slotName,
+            set: { lastLsn: consistentPoint },
+          });
 
         return epochs;
       },
@@ -1184,19 +1211,25 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       const t = tx;
       tx = null;
 
+      // Skip persist AND the tap emits when no begin was observed, or this commit was already
+      // durably persisted. minipg replication is at-least-once: a reconnect replays the tail, so
+      // a commit at or below the watermark is a replay — re-persisting or re-emitting it would
+      // make clients double-apply. The ack still advances so the server stops resending.
       if (
         !t ||
         (this.lastPersistedCommitLsn !== null &&
           lsnFromString(t.commitLsn) <= lsnFromString(this.lastPersistedCommitLsn))
       ) {
-        // No begin was observed, or this is a replayed transaction (at-least-once reconnect)
-        // already durably persisted — skip persist AND the tap emits.
         rep.ack(ev.endLsn);
         continue;
       }
 
       if (this.pullEnabled) {
-        await this.getPulseStore().persistCommit(t.events, this.slotName, t.commitLsn);
+        await this.getPulseStore().persistCommitAndAdvanceWatermark(
+          t.events,
+          this.slotName,
+          t.commitLsn,
+        );
         this.lastPersistedCommitLsn = t.commitLsn;
       }
 
@@ -1253,8 +1286,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     let row: Record<string, unknown>;
     let oldRow: Record<string, unknown> | null;
 
-    // Reading the pk off a 'key' old tuple is safe: reconcile() (pull:false branch) fails closed
-    // on any identity where the 'key' tuple wouldn't carry real pk columns (NOTHING, or a
+    // Reading the pk off a 'key' old tuple is safe: reconcile() (pull:false branch) rejects at
+    // boot on any identity where the 'key' tuple wouldn't carry real pk columns (NOTHING, or a
     // non-pk USING INDEX), so every identity reaching here is DEFAULT/FULL/pk-index. Reading any
     // OTHER column off a 'key' tuple is still not safe: minipg null-renders them, indistinguishable
     // from a real SQL null. `rawOld` may therefore only be used in full for oldKind === 'full';
@@ -1289,7 +1322,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         }
       }
       // A partially-null-rendered old row (non-key columns null from a 'key' tuple) must never
-      // reach persistCommit or the tap — only a genuinely full old tuple is emitted.
+      // reach persistCommitAndAdvanceWatermark or the tap — only a genuinely full old tuple is emitted.
       oldRow = ev.oldKind === 'full' ? rawOld : null;
     } else {
       // Deliberately empty: the tap's dedupe-by-absence contract for deletes. The persisted
@@ -1379,7 +1412,9 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       unchanged.map((name) => sql`${sql.identifier(name)}`),
       sql`, `,
     );
-    const result = await this.getPulseStore()
+    const {
+      rows: [row],
+    } = await this.getPulseStore()
       .getDb()
       .execute<Record<string, unknown>>(sql`
       select ${columnsIdentifier}
@@ -1387,7 +1422,6 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       where ${sql.identifier(metadata.pkSqlName)} = ${pkValue}
       limit 1
     `);
-    const row = result.rows[0];
     return row ? metadata.normalizeRow(row) : null;
   }
 

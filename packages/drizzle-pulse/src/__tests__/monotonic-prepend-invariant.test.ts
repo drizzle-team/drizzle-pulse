@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { isInsertPrepend } from '../shared/pk-utils.js';
 
-describe('expose monotonic boundary invariant', () => {
+describe('monotonic prepend boundary invariant', () => {
   test('desc: stale range end still admits monotonic prepend insert', () => {
     expect(isInsertPrepend('desc', 128, 123, 127)).toBe(true);
   });

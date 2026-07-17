@@ -1,6 +1,6 @@
 import { getTableUniqueName } from 'drizzle-orm';
-import type { PulseRuntime } from '../../server/expose.js';
 import type { AnyPulseBuilders } from '../../server/pulse-registry.js';
+import type { PulseRuntime } from '../../server/pulse-runtime.js';
 import type { PulseClientContract } from '../../server/pulse-types.js';
 import type { PulseEvent } from '../../shared/pulse-events.js';
 import type { PulseAuthContext, QueryDescriptor } from '../../types.js';

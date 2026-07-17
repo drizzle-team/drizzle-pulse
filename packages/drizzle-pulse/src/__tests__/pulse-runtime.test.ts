@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { PulseRuntime } from '../server/expose.js';
 import { createPulseRegistry } from '../server/pulse-registry.js';
+import { PulseRuntime } from '../server/pulse-runtime.js';
 import type { PulseSourceDb } from '../server/pulse-sql.js';
 import { makePulseRuntime } from './mock-runtime.js';
 

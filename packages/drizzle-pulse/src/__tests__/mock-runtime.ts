@@ -1,7 +1,7 @@
 import { getColumns } from 'drizzle-orm';
 import { integer, pgTable, serial, text } from 'drizzle-orm/pg-core';
-import { PulseRuntime } from '../server/expose.js';
 import { createPulseRegistry } from '../server/pulse-registry.js';
+import { PulseRuntime } from '../server/pulse-runtime.js';
 import type { PulseSourceDb } from '../server/pulse-sql.js';
 import { WalEventEmitter } from '../server/wal-event-emitter.js';
 import type { PulseRegistryQuery, ResolvedPulseQuery } from '../types.js';

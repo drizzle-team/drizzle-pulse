@@ -102,7 +102,7 @@ describe('zero-progress connections never reset attempts', () => {
 
     await withFastTimers(() => runtime.supervise(run, makeFirst()));
 
-    // RECONNECT_MAX_RETRIES is a hardcoded module constant in expose.ts (no reconnect
+    // RECONNECT_MAX_RETRIES is a hardcoded module constant in pulse-runtime.ts (no reconnect
     // knobs), not a per-runtime config surface — mirror its value (10) directly.
     expect(run.attempts).toBe(10);
     expect(terminalError).toBeInstanceOf(Error);

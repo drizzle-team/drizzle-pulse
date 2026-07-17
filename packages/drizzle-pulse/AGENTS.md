@@ -51,7 +51,7 @@ platform-imports purity test).
 | `src/server/pulse-sql.ts` | query compilation / row predicate evaluation |
 | `src/server/sdk.ts` | `PulseRequestHandler` — the transport-agnostic SDK core: subscribe/pull/loadMore, cursor-token mint/validate, `DEFAULT_PULL_EVENT_LIMIT` overflow→reset. Stateless: auth re-resolved per pull, no subscription registry |
 | `src/server/hono.ts` | `createPulseHonoRouter` — optional Hono wrapper over the SDK's three routes (`/subscribe`, `/pull`, `/load-more`); superjson-encoded responses; `./server/hono` subpath |
-| `src/server/expose.ts` | `PulseRuntime` assembly, `ExposeConfig` (publication/slot default `drizzle_pulse`, `eventsSchema`, `pullEventLimit`, `logLevel`), `reconcile()` self-provisioning + `provision()`, WAL listener lifecycle |
+| `src/server/pulse-runtime.ts` | `PulseRuntime` assembly, `PulseRuntimeConfig` (publication/slot default `drizzle_pulse`, `eventsSchema`, `pullEventLimit`, `logLevel`), `reconcile()` self-provisioning + `provision()`, WAL listener lifecycle |
 | `src/server/pulse-store.ts` | `PulseStore` — events-table reads/writes over the pulse-owned pool |
 | `src/__tests__/` | runtime/unit tests for SDK internals |
 
@@ -133,7 +133,7 @@ QueryDescriptor
 type ColumnOperators, WhereCondition
 
 // drizzle-pulse/server
-PulseRuntime, LogLevel, type ExposeConfig, type ExposeWalConfig
+PulseRuntime, LogLevel, type PulseRuntimeConfig, type PulseRuntimeWalConfig
 createPulseRegistry, PulseRegistry
 PulseBuilder, type AnyPulseBuilder, AnyQueries
 buildEventsTable, getEventsTableName, DEFAULT_EVENTS_SCHEMA

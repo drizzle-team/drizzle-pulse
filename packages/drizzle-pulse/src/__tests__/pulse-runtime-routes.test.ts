@@ -5,10 +5,10 @@ import SuperJSON from 'superjson';
 import { z } from 'zod';
 import { pulse } from '../pulse-table.js';
 import { buildEventsTable } from '../server/events-table-resolver.js';
-import { PulseRuntime } from '../server/expose.js';
 import { createPulseHonoRouter } from '../server/hono.js';
 import type { AnyPulseBuilders, PulseRegistry } from '../server/pulse-registry.js';
 import { createPulseRegistry } from '../server/pulse-registry.js';
+import { PulseRuntime } from '../server/pulse-runtime.js';
 import type { PulseStore } from '../server/pulse-store.js';
 import { PulseRequestHandler } from '../server/sdk.js';
 import type {
@@ -252,7 +252,7 @@ async function pull(
 // These tests cover request-shape validation and guard clauses that need no real DB.
 // Result-shaping behavior (row/event content produced by an actual query) is proven against
 // live PostgreSQL in packages/integration-tests rather than re-tested here against a mock.
-describe('expose routes request validation', () => {
+describe('pulse-runtime routes request validation', () => {
   test('subscribe returns HTTP 400 for invalid queryName', async () => {
     const { router } = createRouterHarness({
       sourceRows: [[{ id: 101, status: 'requested', price: 20 }]],

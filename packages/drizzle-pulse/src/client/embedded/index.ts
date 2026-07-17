@@ -1,6 +1,6 @@
 import { getTableUniqueName } from 'drizzle-orm';
-import type { BaselinePin, PulseRuntime } from '../../server/expose.js';
 import type { AnyPulseBuilders } from '../../server/pulse-registry.js';
+import type { BaselinePin, PulseRuntime } from '../../server/pulse-runtime.js';
 import type { PulseClientContract } from '../../server/pulse-types.js';
 import type { WalTapPayload } from '../../server/wal-event-emitter.js';
 import { compareLsn } from '../../shared/lsn.js';

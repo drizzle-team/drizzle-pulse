@@ -7,7 +7,7 @@
  *
  * A reconnect re-baseline whose collection baseline SELECT outlives the 5s
  * REBASELINE_PIN_WINDOW_MS still converges gaplessly — pins maybeReleaseSnapshotBaseline's
- * release-awaits-in-flight-read rule (expose.ts): the window timer firing while `inFlight > 0`
+ * release-awaits-in-flight-read rule (pulse-runtime.ts): the window timer firing while `inFlight > 0`
  * must defer the release rather than tear down the pin under the live read.
  *
  * Uses the same split URL configuration as copydone-reconnect.test.ts: the runtime's

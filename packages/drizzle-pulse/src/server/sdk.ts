@@ -30,7 +30,7 @@ import type { PulseStore } from './pulse-store.js';
 import { getQueryColumnKey } from './pulse-types.js';
 
 // Hard cap on events a single pull may replay; overflow falls back to a full reset instead
-// of streaming an unbounded batch. Overridable via ExposeConfig.pull.eventLimit.
+// of streaming an unbounded batch. Overridable via PulseRuntimeConfig.pull.eventLimit.
 export const DEFAULT_PULL_EVENT_LIMIT = 1000;
 
 export type SubscribeHandlerResponseBody =

@@ -123,7 +123,7 @@ async function streamLastLsn(
   return rows[0]?.last_lsn;
 }
 
-// DISCOVERY (verified empirically against unmodified expose.ts + minipg, not a test flake):
+// DISCOVERY (verified empirically against unmodified pulse-runtime.ts + minipg, not a test flake):
 // resolveSlotStartup's continuity gate compares the persisted `pulse_stream.last_lsn` watermark
 // against the slot's `confirmed_flush_lsn`. The watermark is written from a commit's OWN record
 // LSN (`begin.finalLsn`, protocol-identical to `commit.lsn`), while `rep.ack(commit.endLsn)`

@@ -5,8 +5,9 @@
  * Most preconditions the guard once only asserted are now self-provisioned inside reconcile():
  * a missing publication is created, a missing member is added, and (pull:true only) a
  * source without REPLICA IDENTITY FULL is altered. These scenarios prove start() heals a
- * bare/partial setup and then boots. wal_level stays the one fail-closed assert (the runtime
- * can't fix a server-wide setting), but it can't be toggled on the shared test server, so it has
+ * bare/partial setup and then boots. wal_level stays the one precondition boot rejects on rather
+ * than fixing (the runtime can't change a server-wide setting), but it can't be toggled on the
+ * shared test server, so it has
  * no live case here. Finer membership/RI coverage lives in reconcile-publication.test.ts
  * (provision() path, both pull modes). Each scenario gets its own randomly-named
  * database/publication/slot and tears itself down in a `finally` block.

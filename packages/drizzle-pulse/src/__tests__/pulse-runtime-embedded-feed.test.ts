@@ -94,7 +94,7 @@ describe('onTerminalError', () => {
     });
 
     // `isRunning` is now a getter over `run !== null` — install a run object directly.
-    // RECONNECT_MAX_RETRIES is a hardcoded module constant in expose.ts (no reconnect
+    // RECONNECT_MAX_RETRIES is a hardcoded module constant in pulse-runtime.ts (no reconnect
     // knobs), not a per-runtime config surface — mirror its value (10) directly.
     (runtime as any).run = { abort: new AbortController(), attempts: 10 };
 
@@ -117,7 +117,7 @@ describe('onTerminalError', () => {
       events.push('stop');
     });
 
-    // RECONNECT_MAX_RETRIES is a hardcoded module constant in expose.ts (no reconnect
+    // RECONNECT_MAX_RETRIES is a hardcoded module constant in pulse-runtime.ts (no reconnect
     // knobs), not a per-runtime config surface — mirror its value (10) directly.
     (runtime as any).run = { abort: new AbortController(), attempts: 10 };
 
