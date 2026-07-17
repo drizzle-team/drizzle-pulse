@@ -226,7 +226,11 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   private eventsEpochs = new Map<string, string>();
 
   private store: PulseStore | null = null;
+  // The in-flight replication lifecycle — supervise()'s abort handle + reconnect-attempt
+  // counter (see the Run type). Null exactly when the runtime is stopped.
   private run: Run | null = null;
+  // The currently held snapshot-anchored re-baseline pin (see BaselinePin), or null when no
+  // slot recreate is mid-handshake.
   private pin: BaselinePin | null = null;
   // In-memory mirror of the durable pulse_stream watermark — dedupes at-least-once replay after
   // a reconnect without a store round trip on every commit.
