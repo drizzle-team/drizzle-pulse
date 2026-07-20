@@ -1,14 +1,15 @@
 /**
  * A REAL dropped walsender socket — not the private onReplicationStart hook —
- * must still trigger the embedded collection's re-baseline handshake: one onChange with an
+ * must still trigger the embedded collection's rebaseline handshake: one onChange with an
  * empty event batch and a fresh watermark lsn, no row loss or duplication, and continued
  * delivery afterwards. Supersedes the deleted resilience.test.ts, which drove the same
  * assertions off a faked edge ((runtime as any).onReplicationStart()).
  *
- * A reconnect re-baseline whose collection baseline SELECT outlives the 5s
- * REBASELINE_PIN_WINDOW_MS still converges gaplessly — pins maybeReleaseSnapshotBaseline's
- * release-awaits-in-flight-read rule (pulse-runtime.ts): the window timer firing while `inFlight > 0`
- * must defer the release rather than tear down the pin under the live read.
+ * A reconnect rebaseline whose collection baseline SELECT outlives the 5s
+ * BASELINE_SNAPSHOT_WINDOW_MS still converges gaplessly — exercises closeSnapshotSession's rule
+ * that a close awaits the in-flight read (pulse-runtime.ts): the window timer firing while the
+ * reconnect round (which includes the live baseline SELECT) is still pending must defer the close
+ * rather than tear the snapshot session down under the live read.
  *
  * Uses the same split URL configuration as copydone-reconnect.test.ts: the runtime's
  * `databaseUrl` (walsender + admin pool) routes through the test-only TCP proxy, `sourceDb`
@@ -75,8 +76,8 @@ async function eventsTableEpoch(sql: ReturnType<typeof postgres>): Promise<strin
   return rows[0]?.epoch;
 }
 
-describe('Reconnect re-baseline', () => {
-  test('a real dropped socket triggers a re-baseline and the collection stays consistent', async () => {
+describe('Reconnect rebaseline', () => {
+  test('a real dropped socket triggers a rebaseline and the collection stays consistent', async () => {
     const base = new URL(baseDatabaseUrl());
     const proxy = startWalProxy(base.hostname, Number(base.port));
     const proxyPort = await proxy.listen();
@@ -154,7 +155,7 @@ describe('Reconnect re-baseline', () => {
     }
   });
 
-  test('a reconnect re-baseline whose SELECT outlives the 5s pin window still converges gaplessly', async () => {
+  test('a reconnect rebaseline whose SELECT outlives the 5s snapshot-session window still converges gaplessly', async () => {
     const base = new URL(baseDatabaseUrl());
     const proxy = startWalProxy(base.hostname, Number(base.port));
     const proxyPort = await proxy.listen();
@@ -213,7 +214,7 @@ describe('Reconnect re-baseline', () => {
 
       expect(new Set(collection.list().map((r) => r.driverId))).toEqual(new Set([1, 2]));
       // Convergence happened after the window closed underneath the held read — proves the
-      // SELECT actually outlived REBASELINE_PIN_WINDOW_MS rather than completing inside it.
+      // SELECT actually outlived BASELINE_SNAPSHOT_WINDOW_MS rather than completing inside it.
       expect(tConverged - tEdge).toBeGreaterThan(5000);
 
       const epochAfter = await eventsTableEpoch(scenario.sql);

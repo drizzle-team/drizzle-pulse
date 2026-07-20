@@ -92,7 +92,7 @@ export function startWalProxy(targetHost: string, targetPort: number) {
       // Arm on rep.start()'s FIRST walsender command, not literally START_REPLICATION. On PG14+
       // minipg precedes START_REPLICATION with a binary-negotiation catalog probe (a `Q` query
       // against pg_publication_tables); waiting for START_REPLICATION would arm one round-trip too
-      // late — past the moment the re-baseline pin's admin-pool SELECT already flew — so the stall
+      // late — past the moment the snapshot session's admin-pool SELECT already flew — so the stall
       // would miss the read it must hold. The probe query is the same choreography point
       // START_REPLICATION used to be (rep.start()'s opening frame); the earlier CREATE_REPLICATION_SLOT
       // that recoverSlot sends before seeding contains neither marker, so seeding is never stalled.

@@ -40,7 +40,7 @@ platform-imports purity test).
 | `src/client/superjson.ts` | response deserialization helper |
 | `src/client/react/use-pulse-query.ts` | `usePulseQuery` wrapper around `PulseQuery` |
 | `src/client/embedded/index.ts` | in-process embedded client: `createPulseClient(runtime)` → `PulseCollection` facade (`list`/`onChange`/`onError`/`dispose`) fed tap-direct — a full-set `PulseMergeCore` rebuilt from `runtime.readCollectionBaseline` and kept live by `runtime.walEventEmitter`, reconciled through an LSN watermark handshake (no events table, no wire protocol); re-exports `createPulseEvents` |
-| `src/client/embedded/tap-events.ts` | `buildTapEvent(payload, resolved)`: the single WAL-tap-payload → `PulseEvent` builder shared by collections and `createPulseEvents` (WHERE-filters inserts; updates/deletes are WHERE-filtered only when the old tuple is fully evaluable, else delivered with the row redacted to pk-only; value-imports only `shared/`) |
+| `src/client/embedded/tap-events.ts` | `buildTapEvent(payload, query)`: the single WAL-tap-payload → `PulseEvent` builder shared by collections and `createPulseEvents` (WHERE-filters inserts; updates/deletes are WHERE-filtered only when the old tuple is fully evaluable, else delivered with the row redacted to pk-only; value-imports only `shared/`) |
 | `src/client/embedded/events.ts` | `createPulseEvents(runtime)` → stateless per-event subscription: WHERE-filtered inserts, updates/deletes delivered by pk with `matchesNew` (redacted to pk-only when not evaluable), `(event, lsn)` callback, no baseline, no merge core, no per-subscription error surface |
 | `src/server/pulse-builder.ts` | immutable query builder (`.columns/.args/.order/.limit/.transform/.query`), seeded by `PulseTable.query(fn?)` |
 | `src/server/pulse-registry.ts` | registry finalization + `$client` phantom contract; queries must be `.query()` builder chains — a bare `PulseTable` is a compile-time type error via `AnyPulseBuilders`, not a runtime rejection; defensive composite-PK re-check |
@@ -60,7 +60,7 @@ platform-imports purity test).
 The runtime **self-provisions all its infrastructure** — the app no longer migrates events
 tables. `PulseRuntime.reconcile()` runs inside one transaction under a per-events-schema
 advisory lock and: asserts `wal_level=logical` (the one precondition it can't fix), creates/diffs
-the publication (mode-independent), creates the events schema + `pulse_meta` bookkeeping,
+the publication (independent of pull mode), creates the events schema + `pulse_meta` bookkeeping,
 creates/recreates each events table whose rendered-DDL sha256 diverges (rotating its epoch), and
 sweeps orphans. `pull: true` only: sets `REPLICA IDENTITY FULL` on each source and
 resets it to `DEFAULT` on un-pulse — `pull: false` never forces or resets identity in either
@@ -120,7 +120,7 @@ Embedded (in-process, tap-direct):
 
 - `PulseQuery` is the canonical merge engine used by tests and `usePulseQuery` (HTTP-only); the embedded client owns a full-set `PulseMergeCore` directly and never constructs a `PulseQuery` — the HTTP client is the only `PulseQuery` consumer
 - The server is **stateless**: no `SubscriptionManager`, no `unsubscribe`, no TTL/idle sweep; auth is re-resolved per pull
-- Cursor tokens are opaque `"<epoch>:<snapshot>"`; a pull echoes its token, the handler compares its epoch to the current one. A recreate rotates the epoch → stale tokens reset (re-baseline). A pull exceeding `pullEventLimit` (default 1000) also resets.
+- Cursor tokens are opaque `"<epoch>:<snapshot>"`; a pull echoes its token, the handler compares its epoch to the current one. A recreate rotates the epoch → stale tokens reset (rebaseline). A pull exceeding `pullEventLimit` (default 1000) also resets.
 - Every migration that changes a pulsed table's shape recreates its events table and thus resets that table's subscribers (accepted design)
 - range tracking uses PK boundaries (`rangeStart`, `rangeEnd`) plus a monotonic `snapshot`; SuperJSON crosses the server/client boundary
 

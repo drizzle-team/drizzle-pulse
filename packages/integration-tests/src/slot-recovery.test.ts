@@ -153,7 +153,7 @@ describe('Slot recovery: backfill/resume auto-heal', () => {
       );
 
       // A new slot row exists and the embedded collection converges to full source truth,
-      // including the downtime row — the snapshot-anchored re-baseline is gapless.
+      // including the downtime row — the rebaseline from the exported snapshot is gapless.
       await waitFor(async () => {
         const rows = await sql.unsafe(`SELECT 1 FROM pg_replication_slots WHERE slot_name = $1`, [
           slotName,

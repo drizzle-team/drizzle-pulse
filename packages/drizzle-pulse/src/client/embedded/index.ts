@@ -1,6 +1,6 @@
 import { getTableUniqueName } from 'drizzle-orm';
 import type { AnyPulseBuilders } from '../../server/pulse-registry.js';
-import type { BaselinePin, PendingWalEvent, PulseRuntime } from '../../server/pulse-runtime.js';
+import type { PendingWalEvent, PulseRuntime, SnapshotSession } from '../../server/pulse-runtime.js';
 import type { PulseClientContract } from '../../server/pulse-types.js';
 import { compareLsn } from '../../shared/lsn.js';
 import { applyProjectionPipeline } from '../../shared/projection.js';
@@ -85,7 +85,7 @@ export class PulseCollection<TRow extends { $pk: unknown }> {
 
   /** @internal fed by the tap-direct handshake whenever applying events mutates state. */
   fireOnChange(events: readonly PulseEvent<TRow>[], lsn: string): void {
-    // An in-flight re-baseline can resolve after dispose(); its per-payload drain must not
+    // An in-flight rebaseline can resolve after dispose(); its per-payload drain must not
     // escape into a disposed collection's listeners.
     if (this.disposed) return;
     const change: PulseCollectionChange<TRow> = {
@@ -102,7 +102,7 @@ export class PulseCollection<TRow extends { $pk: unknown }> {
     }
   }
 
-  /** @internal fed on re-baseline failure (post-reconnect) and on runtime terminal error. */
+  /** @internal fed on rebaseline failure (post-reconnect) and on runtime terminal error. */
   fireOnError(error: Error): void {
     if (this.disposed) return;
     for (const listener of this.onErrorListeners) {
@@ -159,10 +159,10 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
         const auth: PulseAuthContext = options?.auth ?? { userId: null };
         // resolve() validates args and yields the source table + auth-scoped WHERE — the
         // same gate must scope both the baseline read and every tapped event below.
-        const resolved = runtime.registry.resolve(prop, rawArgs, auth);
-        const tableKey = getTableUniqueName(resolved.table);
+        const query = runtime.registry.resolve(prop, rawArgs, auth);
+        const tableKey = getTableUniqueName(query.table);
 
-        const core = new PulseMergeCore<AnyRow>({ order: resolved.order });
+        const core = new PulseMergeCore<AnyRow>({ order: query.order });
 
         // Tap-direct handshake state: while `baselining` is up, tapped events are buffered
         // instead of applied so nothing committed during the baseline SELECT is lost or
@@ -172,7 +172,7 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
         let collection!: PulseCollection<AnyRow>;
 
         function applyEvent(walEvent: PendingWalEvent, lsn: string): void {
-          const event = buildTapEvent(walEvent, resolved);
+          const event = buildTapEvent(walEvent, query);
           if (!event) return;
           const mutated = core.applyEvents([event]);
           if (mutated) collection.fireOnChange([event], lsn);
@@ -186,7 +186,7 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
           applyEvent(walEvent, lsn);
         }
 
-        // Same handshake for the initial load AND every re-baseline (reconnect): subscribe
+        // Same handshake for the initial load AND every rebaseline (reconnect): subscribe
         // first (buffering), read the baseline + watermark, rebuild state, then drain the
         // buffer. A payload at-or-above the watermark is applied; below-watermark payloads
         // are guaranteed already present in the baseline. At-or-above (not strictly greater)
@@ -202,15 +202,17 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
         // handshake's state. Returns `null` when superseded — the caller must not treat that
         // as "no watermark", only as "a newer handshake owns the collection now".
         let handshakeGen = 0;
-        async function runHandshake(pin?: BaselinePin | null): Promise<string | null> {
+        async function runHandshake(
+          snapshotSession?: SnapshotSession | null,
+        ): Promise<string | null> {
           const gen = ++handshakeGen;
           baselining = true;
           buffer = [];
           let baseline: { rows: Record<string, unknown>[]; watermark: string };
           try {
-            baseline = await runtime.readCollectionBaseline(resolved, pin);
+            baseline = await runtime.readCollectionBaseline(query, snapshotSession);
           } catch (err) {
-            // A rejected re-baseline must not leave the collection permanently latched into
+            // A rejected rebaseline must not leave the collection permanently latched into
             // buffering: only reset when this handshake still owns the state (a newer
             // handshake that has since started owns the reset itself).
             if (gen === handshakeGen) {
@@ -220,7 +222,7 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
             throw err;
           }
           if (gen !== handshakeGen) return null;
-          core.rebuildFromRows(applyProjectionPipeline(baseline.rows, resolved) as AnyRow[]);
+          core.rebuildFromRows(applyProjectionPipeline(baseline.rows, query) as AnyRow[]);
           const pending = buffer;
           buffer = [];
           baselining = false;
@@ -238,12 +240,12 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
 
         unsubs.push(runtime.subscribeTap(tableKey, handleTapEvent));
         unsubs.push(
-          runtime.onReconnect((pin) => {
+          runtime.onReconnect((snapshotSession) => {
             // Returning this promise (rather than firing it and forgetting) lets the
-            // supervisor's reconnect round actually await every listener's handshake.
+            // replication loop's reconnect round actually await every listener's handshake.
             return (async () => {
               try {
-                const watermark = await runHandshake(pin);
+                const watermark = await runHandshake(snapshotSession);
                 if (watermark === null) return; // superseded by a newer reconnect handshake
                 if (collection.isDisposed) return;
                 collection.fireOnChange([], watermark);

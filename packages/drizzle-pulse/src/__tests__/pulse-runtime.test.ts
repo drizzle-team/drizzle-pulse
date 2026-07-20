@@ -34,8 +34,8 @@ describe('start() failure rolls back to a restartable state', () => {
       databaseUrl: 'postgresql://user:pass@localhost/test',
     }) as any;
 
-    // Baseline seeding moved inside the supervised connect (resolveSlot's resume branch) —
-    // a failure there now becomes a supervised retry, not a start()
+    // Baseline seeding moved inside the replication loop's connect (resolveSlot's resume branch) —
+    // a failure there now becomes a replication-loop retry, not a start()
     // rejection. reconcile() is the only await left in start()'s try block before the guard
     // resolves, so it's the seam that must throw to exercise the rollback path.
     let storeEnded = 0;
@@ -55,13 +55,13 @@ describe('start() failure rolls back to a restartable state', () => {
     expect(storeEnded).toBe(1);
 
     // A retry must not hit the "Already running" early return and silently no-op — it
-    // must re-attempt reconcile() and actually start supervision.
+    // must re-attempt reconcile() and actually start the replication loop.
     let secondAttemptRan = false;
     runtime.reconcile = async () => {
       secondAttemptRan = true;
     };
-    runtime.supervise = async (_run: unknown, first: { resolve: () => void }) => {
-      first.resolve();
+    runtime.runReplicationLoop = async (_run: unknown, startupSettled: { resolve: () => void }) => {
+      startupSettled.resolve();
     };
 
     await runtime.start();
@@ -71,7 +71,7 @@ describe('start() failure rolls back to a restartable state', () => {
   });
 });
 
-describe('openPin', () => {
+describe('openSnapshotSession', () => {
   test('a failing SET TRANSACTION SNAPSHOT rejects and releases the checked-out connection exactly once', async () => {
     const runtime = makePulseRuntime({
       databaseUrl: 'postgresql://user:pass@localhost/test',
@@ -96,9 +96,9 @@ describe('openPin', () => {
       }),
     });
 
-    await expect(runtime.openPin('00000000-0000-0000-0000-000000000000', '0/100')).rejects.toThrow(
-      'invalid snapshot identifier',
-    );
+    await expect(
+      runtime.openSnapshotSession('00000000-0000-0000-0000-000000000000', '0/100'),
+    ).rejects.toThrow('invalid snapshot identifier');
 
     // The connection-leak case the old transaction-callback mock couldn't express: release()
     // must fire even though setup failed, or the checked-out connection leaks.

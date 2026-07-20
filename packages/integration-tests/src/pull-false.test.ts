@@ -293,9 +293,9 @@ describe('pull: false — embedded-only runtime writes nothing to events tables'
         return rows.length > 0 && rows[0]?.slot_name !== killedSlotName;
       }, 10000);
 
-      // Gapless re-baseline: both orders present, including the downtime row — proving the
-      // re-baseline pin anchored at the fresh slot's exported snapshot, not just a resumed
-      // stream.
+      // Gapless rebaseline: both orders present, including the downtime row — proving the
+      // rebaseline read from the snapshot session at the fresh slot's exported snapshot, not just
+      // a resumed stream.
       await waitFor(() => collection.list().length === 2, 10000);
       expect(new Set(collection.list().map((row) => row.driverId))).toEqual(new Set([1, 2]));
 

@@ -8,7 +8,7 @@ import { makePulseRuntime } from './mock-runtime.js';
 // engine that used to live here is gone. The push pipeline itself is covered by
 // the embedded-collection integration tests.
 //
-// supervise() opens its connection via minipg's free `replication()` function, not a
+// runReplicationLoop() opens its connection via minipg's free `replication()` function, not a
 // method on the runtime — there's no instance seam to override for it, so the module
 // itself is mocked (live-binding update, per Bun's mock.module docs) with every other
 // minipg export passed through untouched. `resolveSlot`/`stream` ARE instance methods
@@ -38,9 +38,9 @@ function makeFakeRep() {
   };
 }
 
-// supervise()'s `first` parameter only needs to be resolve()-able — its promise isn't
-// consumed by these tests, which await supervise() itself.
-function makeFirst(): { promise: Promise<void>; resolve: () => void } {
+// runReplicationLoop()'s `startupSettled` parameter only needs to be resolve()-able — its promise
+// isn't consumed by these tests, which await runReplicationLoop() itself.
+function makeStartupSettled(): { promise: Promise<void>; resolve: () => void } {
   return { promise: Promise.resolve(), resolve: () => {} };
 }
 
@@ -76,7 +76,7 @@ describe('runtime reconnect edge', () => {
       if (streamCalls >= 2) run.abort.abort();
     };
 
-    await withFastTimers(() => runtime.supervise(run, makeFirst()));
+    await withFastTimers(() => runtime.runReplicationLoop(run, makeStartupSettled()));
 
     expect(streamCalls).toBe(2);
     expect(fired).toBe(1);
@@ -100,7 +100,7 @@ describe('zero-progress connections never reset attempts', () => {
 
     const run = { abort: new AbortController(), attempts: 0 };
 
-    await withFastTimers(() => runtime.supervise(run, makeFirst()));
+    await withFastTimers(() => runtime.runReplicationLoop(run, makeStartupSettled()));
 
     // RECONNECT_MAX_RETRIES is a hardcoded module constant in pulse-runtime.ts (no reconnect
     // knobs), not a per-runtime config surface — mirror its value (10) directly.

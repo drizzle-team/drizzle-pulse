@@ -21,9 +21,10 @@ import { DEFAULT_PULL_EVENT_LIMIT, PulseRequestHandler } from './sdk.js';
 import { buildTableShape, indexColumnsBySqlName, reKeyToJsProps } from './wal-shape-bridge.js';
 
 type RuntimeLifecycleListener = () => void;
-// Reconnect listeners receive the mid-round re-baseline pin (or null under pull:false / no
-// recovery) so they can read through it instead of racing the ordinary watermark path.
-type ReconnectListener = (pin: BaselinePin | null) => Promise<void> | void;
+// Reconnect listeners receive the open snapshot session (or null under pull:false / no
+// recovery) so they can read their baseline through it instead of racing the ordinary
+// watermark path.
+type ReconnectListener = (snapshotSession: SnapshotSession | null) => Promise<void> | void;
 
 export type PulseRuntimeWalConfig = {
   publicationName?: string;
@@ -43,9 +44,10 @@ export type PulseRuntimeConfig = {
   databaseUrl: string;
   /**
    * The app's own drizzle connection; baseline and query reads run on it to keep its session
-   * context (RLS, search_path) — except the post-reconnect re-baseline pin, which reads on the
-   * admin connection (see `readCollectionBaseline`'s pin-path note). Row scoping there relies on
-   * the resolve-time auth-scoped WHERE, not on sourceDb-session RLS.
+   * context (RLS, search_path) — except the post-reconnect rebaseline, which reads on the admin
+   * connection through the snapshot session (see `readCollectionBaseline`'s snapshot-session
+   * note). Row scoping there relies on the resolve-time auth-scoped WHERE, not on sourceDb-session
+   * RLS.
    */
   sourceDb: PulseSourceDb;
   /**
@@ -83,7 +85,7 @@ type SourceTableMetadata = {
 // A decoded WAL row event, buffered between a transaction's `begin` and `commit` so the whole
 // transaction persists atomically and acks together. `row`/`oldRow` arrive decoded by minipg's
 // per-table shapes and re-keyed to JS property keys — for delete, `row` is deliberately `{}` (the
-// tap's dedupe-by-absence contract); the persisted events-table row still carries the old row's
+// tap represents a delete by the absent new row); the persisted events-table row still carries the old row's
 // data (PulseStore's buildEventRow), so persistence and the tap emit stay correctly divergent
 // for deletes.
 export type PendingWalEvent = {
@@ -129,17 +131,19 @@ const WAL_LOG_PREFIX = '[WAL Listener] ';
 
 // Fixed window a live collection's reconnect-debounce round comfortably fits inside;
 // a collection materialized after it just takes the watermark handshake.
-const REBASELINE_PIN_WINDOW_MS = 5000;
+const BASELINE_SNAPSHOT_WINDOW_MS = 5000;
 
-// One connection lifecycle attempt: aborting closes the socket (the only way to stop a parked
-// minipg next() — see supervise()) and wakes an in-progress backoff sleep. `attempts` is the
-// terminal-path test seam.
+// One connection lifecycle attempt: aborting closes the socket (the only way to stop a pending
+// minipg next() that is blocked waiting for the next WAL message and returns only when the
+// socket closes — see runReplicationLoop()) and wakes an in-progress backoff sleep. `attempts`
+// is the terminal-path test seam.
 type Run = { abort: AbortController; attempts: number };
 
-// The snapshot-anchored embedded re-baseline pin: a checked-out admin connection holding the
-// recreate's exported snapshot via SET TRANSACTION SNAPSHOT, consumed by readCollectionBaseline
-// until the reconnect round settles or it's forced shut (stop()/the next recoverSlot()).
-export type BaselinePin = {
+// A checked-out admin connection that keeps the slot recreate's exported snapshot open (via SET
+// TRANSACTION SNAPSHOT), so live embedded collections read their rebaseline from the exact point
+// the new slot starts. Consumed by readCollectionBaseline until the reconnect round settles or
+// it's forced shut (stop()/the next recoverSlot()).
+export type SnapshotSession = {
   db: ReturnType<typeof drizzle<EmptyRelations, Connection>>;
   watermark: string;
   round: Promise<unknown>;
@@ -168,8 +172,8 @@ function assertSnapshotName(name: string): void {
   }
 }
 
-// A resolve() with idempotent settling — supervise() resolves `first` from several exits
-// (connected, retry scheduled, gave up) and only the first must count.
+// A resolve() with idempotent settling — runReplicationLoop() resolves `startupSettled` from
+// several exits (connected, retry scheduled, gave up) and only the first must count.
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolveFn!: (value: T) => void;
   const promise = new Promise<T>((res) => {
@@ -187,7 +191,7 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 }
 
 // minipg's `release()` is already idempotent; `once` makes the ROLLBACK-then-release around it
-// idempotent too, so releasePin()/the backstop timer/a forced stop() can never double-run it.
+// idempotent too, so closeSnapshotSession()/the backstop timer/a forced stop() can never double-run it.
 function once<T>(fn: () => Promise<T>): () => Promise<T> {
   let result: Promise<T> | undefined;
   return () => {
@@ -236,12 +240,11 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   private eventsEpochs = new Map<string, string>();
 
   private store: PulseStore | null = null;
-  // The in-flight replication lifecycle — supervise()'s abort handle + reconnect-attempt
-  // counter (see the Run type). Null exactly when the runtime is stopped.
+  // The in-flight replication lifecycle — runReplicationLoop()'s abort handle + reconnect-attempt
+  // counter. Null when the runtime is stopped.
   private run: Run | null = null;
-  // The currently held snapshot-anchored re-baseline pin (see BaselinePin), or null when no
-  // slot recreate is mid-handshake.
-  private pin: BaselinePin | null = null;
+  // The currently open snapshot session, or null when no slot recreate is mid-handshake.
+  private snapshotSession: SnapshotSession | null = null;
   // In-memory mirror of the durable pulse_stream watermark — dedupes at-least-once replay after
   // a reconnect without a store round trip on every commit.
   private lastPersistedCommitLsn: string | null = null;
@@ -417,7 +420,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
   // Shared per-table seeding step: skip-if-already-seeded is createBaselineSnapshot's own job;
   // this just carries a baseline row (or none, for an empty source) from whichever handle the
-  // caller reads on (sourceDb for the resume path, the snapshot-pinned admin tx for a recreate)
+  // caller reads on (sourceDb for the resume path, the exported-snapshot admin tx for a recreate)
   // to the write handle the caller writes on (undefined = the admin db; a tx during rotation).
   private async seedBaseline(
     fetchLatest: () => Promise<Record<string, unknown> | undefined>,
@@ -478,22 +481,23 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
    * closing it fully would require reading the watermark inside the same transaction/snapshot as
    * the baseline SELECT, which is not attempted here.
    *
-   * `pin` (passed by the reconnect edge, `client/embedded/index.ts`) reads through the recreate's
-   * exported-snapshot connection instead — same visibility class as the WAL stream itself, so the
-   * recreate boundary is gapless by construction and closes the residual race above. A collection
-   * materialized after the pin's window closes falls through to the ordinary path.
+   * `snapshotSession` (passed by the reconnect edge, `client/embedded/index.ts`) reads through the
+   * recreate's exported-snapshot connection instead — same visibility class as the WAL stream
+   * itself, so the recreate boundary is gapless by construction and closes the residual race above.
+   * A collection materialized after the snapshot-session window closes falls through to the
+   * ordinary path.
    *
-   * Note: the pin's connection is checked out of the admin pool (`databaseUrl`), not the app's
-   * `sourceDb` session — so this path does not carry sourceDb's session context (RLS, search_path).
-   * The resolve-time auth-scoped WHERE is what enforces row scoping here, not RLS.
+   * Note: the snapshot session's connection is checked out of the admin pool (`databaseUrl`), not
+   * the app's `sourceDb` session — so this path does not carry sourceDb's session context (RLS,
+   * search_path). The resolve-time auth-scoped WHERE is what enforces row scoping here, not RLS.
    */
   async readCollectionBaseline(
     resolved: ResolvedPulseQuery,
-    pin?: BaselinePin | null,
+    snapshotSession?: SnapshotSession | null,
   ): Promise<{ rows: Record<string, unknown>[]; watermark: string }> {
-    if (pin) {
-      const rows = await buildSelectQuery(pin.db, resolved.table, resolved);
-      return { rows, watermark: pin.watermark };
+    if (snapshotSession) {
+      const rows = await buildSelectQuery(snapshotSession.db, resolved.table, resolved);
+      return { rows, watermark: snapshotSession.watermark };
     }
 
     // 'objects' mode is the one execute() overload whose return type doesn't route through the
@@ -525,9 +529,9 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
       const run: Run = { abort: new AbortController(), attempts: 0 };
       this.run = run;
-      const first = deferred<void>();
-      void this.supervise(run, first);
-      await first.promise;
+      const startupSettled = deferred<void>();
+      void this.runReplicationLoop(run, startupSettled);
+      await startupSettled.promise;
     } catch (error) {
       // Mirrors stop()'s pool teardown so a failed guard doesn't leak connections — callers
       // await start() rejections and then discard the runtime.
@@ -550,9 +554,9 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
     const run = this.run;
     this.run = null;
-    run?.abort.abort(); // closes the socket via supervise()'s abort hook, wakes a backoff sleep
+    run?.abort.abort(); // closes the socket via the replication loop's abort hook, wakes a backoff sleep
 
-    await this.releasePin();
+    await this.closeSnapshotSession();
 
     const store = this.store;
     this.store = null;
@@ -732,8 +736,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
           }
         }
 
-        // Un-pulse members no longer registered: DROP from the publication (mode-independent —
-        // membership isn't identity), THEN reset REPLICA IDENTITY, pull:true only (a member row
+        // Un-pulse members no longer registered: DROP from the publication (independent of pull
+        // mode — membership isn't identity), THEN reset REPLICA IDENTITY, pull:true only (a member row
         // implies the table still exists — pg_publication_tables joins pg_class, so a dropped
         // table has already left membership on its own). Under pull:false the table was never
         // forced to FULL, so there's nothing to reset — and resetting would still take the
@@ -850,20 +854,26 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     this.eventsEpochs = epochs;
   }
 
-  // The linear supervisor loop: one connection attempt per iteration, `try/catch/finally` in
+  // The replication connection loop: one connection attempt per iteration, `try/catch/finally` in
   // statement order. `signal.aborted` is the only teardown signal — exactly one connection
   // exists per iteration, so nothing can be superseded.
-  private async supervise(run: Run, first: { promise: Promise<void>; resolve: () => void }) {
+  private async runReplicationLoop(
+    run: Run,
+    startupSettled: { promise: Promise<void>; resolve: () => void },
+  ) {
     const { signal } = run.abort;
-    // Per-run, not per-instance: a stopped-then-restarted runtime fires no reconnect edge on
-    // its first connect.
-    let everConnected = false;
+    // True once THIS run has established a replication connection at least once. The reconnect
+    // listeners (live embedded collections rebaselining to catch up) must fire only on
+    // RE-connections, so the first successful connect must not trigger a round. It is per-run
+    // because a stopped-then-restarted runtime starts a fresh run whose first connect is again
+    // not a reconnection.
+    let hasConnectedBefore = false;
 
     while (!signal.aborted) {
       let rep: ReplicationConnection | undefined;
-      // minipg's parked next() only stops when the socket closes — end() is the only thing
-      // that wakes a pending pull, so stop() must reach here via the abort signal, never by
-      // awaiting supervise() itself.
+      // A pending minipg next() is blocked waiting for the next WAL message and returns only
+      // when the socket closes — end() is the only thing that wakes it, so stop() must reach
+      // here via the abort signal, never by awaiting runReplicationLoop() itself.
       const kill = () => rep?.end();
       try {
         rep = await replication({ url: this.config.databaseUrl });
@@ -886,16 +896,16 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
           messages: false,
         });
 
-        const round = everConnected
+        const round = hasConnectedBefore
           ? Promise.allSettled(
-              [...this.reconnectListeners].map(async (listener) => listener(this.pin)),
+              [...this.reconnectListeners].map(async (listener) => listener(this.snapshotSession)),
             )
           : Promise.resolve([]);
-        if (this.pin) this.pin.round = round;
-        void round.then(() => this.releasePin());
+        if (this.snapshotSession) this.snapshotSession.round = round;
+        void round.then(() => this.closeSnapshotSession());
 
-        everConnected = true;
-        first.resolve();
+        hasConnectedBefore = true;
+        startupSettled.resolve();
         this.logInfo('Replication started');
 
         await this.stream(rep, iterator, run); // returns on clean end too — falls into retry below
@@ -910,13 +920,13 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       if (signal.aborted) return;
 
       if (run.attempts >= RECONNECT_MAX_RETRIES) {
-        first.resolve();
+        startupSettled.resolve();
         this.giveUp();
         return;
       }
 
       run.attempts += 1;
-      first.resolve(); // first-connect failure still resolves start() (today's behavior)
+      startupSettled.resolve(); // first-connect failure still resolves start() (today's behavior)
       this.logInfo(`Reconnecting (attempt ${run.attempts}/${RECONNECT_MAX_RETRIES})`);
       await abortableSleep(backoffDelay(run.attempts - 1), signal);
     }
@@ -987,10 +997,10 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
   // Full recovery machine (pull:true only now): drop any broken persistent slot, recreate with
   // an exported snapshot, rotate-and-seed the events tables from it, and open the embedded
-  // re-baseline pin from the SAME snapshot when live collections exist — all before the caller
+  // snapshot session from the SAME snapshot when live collections exist — all before the caller
   // issues rep.start(), because the export dies on this connection's next command.
   private async recoverSlot(rep: ReplicationConnection): Promise<string> {
-    await this.releasePin(); // two pins never coexist
+    await this.closeSnapshotSession(); // two snapshot sessions never coexist
 
     await this.evictWalsender(this.slotName);
     await this.dropSlotWithRetry(this.slotName);
@@ -1010,7 +1020,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     // Live collections only exist mid-run (the embedded factory requires a running runtime, so
     // there are none at boot).
     if (this.reconnectListeners.size > 0) {
-      await this.openPin(snapshot, consistentPoint);
+      await this.openSnapshotSession(snapshot, consistentPoint);
     }
 
     // Operators must see this: a recreate resets events/baselines. Name the slot, never
@@ -1029,7 +1039,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   private async createTempSlot(
     rep: ReplicationConnection,
   ): Promise<{ slot: string; from: string }> {
-    await this.releasePin();
+    await this.closeSnapshotSession();
 
     const slot = `${this.slotName}_${randomBytes(4).toString('hex')}`;
     const { consistentPoint, snapshot } = await rep.createSlot(slot, {
@@ -1042,7 +1052,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
           `createSlot('${slot}', { snapshot: 'export' }) returned no exported snapshot name`,
         );
       }
-      await this.openPin(snapshot, consistentPoint);
+      await this.openSnapshotSession(snapshot, consistentPoint);
     }
 
     this.logInfo(`Created temporary slot '${slot}'`);
@@ -1178,11 +1188,11 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     this.lastPersistedCommitLsn = consistentPoint;
   }
 
-  // Checked-out-connection pin: a dedicated admin connection running BEGIN READ ONLY + SET
+  // Opens the snapshot session: a dedicated admin connection running BEGIN READ ONLY + SET
   // TRANSACTION SNAPSHOT sequentially, so a setup failure is an ordinary rejection (release()
-  // then rethrow). Must be called BEFORE the
-  // caller issues rep.start() — the exported snapshot dies on this connection's next command.
-  private async openPin(snapshot: string, watermark: string): Promise<void> {
+  // then rethrow). Must be called BEFORE the caller issues rep.start() — the exported snapshot
+  // dies on this connection's next command.
+  private async openSnapshotSession(snapshot: string, watermark: string): Promise<void> {
     assertSnapshotName(snapshot);
     const { client, release } = await this.getPulseStore().checkout();
 
@@ -1204,34 +1214,34 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       }
     });
 
-    const pin: BaselinePin = {
+    const snapshotSession: SnapshotSession = {
       db: drizzle({ client }),
       watermark,
       round: Promise.resolve(),
       close,
     };
-    this.pin = pin;
+    this.snapshotSession = snapshotSession;
 
     // Backstop, armed at creation (covers rep.start() throwing before any reconnect round
-    // fires) — identity-guarded so a stale backstop from a superseded pin can never release a
+    // fires) — identity-guarded so a stale backstop from a superseded session can never close a
     // newer one.
     setTimeout(() => {
-      if (this.pin === pin) void this.releasePin();
-    }, REBASELINE_PIN_WINDOW_MS);
+      if (this.snapshotSession === snapshotSession) void this.closeSnapshotSession();
+    }, BASELINE_SNAPSHOT_WINDOW_MS);
   }
 
-  // One release path: linear, never rolls back under a still-in-flight read. stop(),
+  // One close path: linear, never rolls back under a still-in-flight read. stop(),
   // recoverSlot(), createTempSlot(), the round-settled hook, and the backstop all route here.
-  private async releasePin(): Promise<void> {
-    const pin = this.pin;
-    if (!pin) return;
-    this.pin = null;
-    await pin.round; // a baseline SELECT outliving the pin window still completes
-    await pin.close();
+  private async closeSnapshotSession(): Promise<void> {
+    const snapshotSession = this.snapshotSession;
+    if (!snapshotSession) return;
+    this.snapshotSession = null;
+    await snapshotSession.round; // a baseline SELECT outliving the snapshot-session window still completes
+    await snapshotSession.close();
   }
 
   // One `tx` local per connection, so a reconnect can never observe a stale half-buffered
-  // transaction. A clean iterator end simply returns; the supervisor's loop tail supplies the
+  // transaction. A clean iterator end simply returns; the replication loop's tail supplies the
   // reconnect.
   private async stream(
     rep: ReplicationConnection,
@@ -1366,7 +1376,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       // reach ingestCommit or the tap — only a genuinely full old tuple is emitted.
       oldRow = ev.oldKind === 'full' ? rawOld : null;
     } else {
-      // Deliberately empty: the tap's dedupe-by-absence contract for deletes. The persisted
+      // Deliberately empty: the tap represents a delete by the absent new row. The persisted
       // events-table row still carries the old row's data via PulseStore's buildEventRow.
       row = {};
       // Sanctioned pk-only delete degradation under a non-full identity — every other emitted

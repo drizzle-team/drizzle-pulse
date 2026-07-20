@@ -232,7 +232,7 @@ describe('embedded client — tap-direct handshake', () => {
     collection.dispose();
   });
 
-  test('re-baseline on reconnect refreshes state and fires onChange with the new watermark', async () => {
+  test('rebaseline on reconnect refreshes state and fires onChange with the new watermark', async () => {
     let reconnectListener: (() => void) | undefined;
     const runtime = makeMockRuntime({
       baselineRows: [{ id: 1, status: 'accepted', price: 10 }],
@@ -339,7 +339,7 @@ describe('embedded client — tap-direct handshake', () => {
     collection.dispose();
   });
 
-  test('a rejecting re-baseline fires onError instead of throwing', async () => {
+  test('a rejecting rebaseline fires onError instead of throwing', async () => {
     let reconnectListener: (() => void) | undefined;
     const runtime = makeMockRuntime();
     runtime.onReconnect = (listener: () => void) => {
@@ -366,14 +366,14 @@ describe('embedded client — tap-direct handshake', () => {
     expect(errors[0]!.message).toBe('reconnect baseline failed');
 
     // The collection must not be left permanently latched into buffering (CR-02): a live tap
-    // payload after the failed re-baseline should apply immediately, not queue forever.
+    // payload after the failed rebaseline should apply immediately, not queue forever.
     runtime.emitTap(tableKey, 'insert', { id: 2, status: 'accepted', price: 20 }, null, '0/999');
     expect(collection.list()).toHaveLength(1);
 
     collection.dispose();
   });
 
-  test('a buffered payload drained by a re-baseline after dispose() does not fire onChange', async () => {
+  test('a buffered payload drained by a rebaseline after dispose() does not fire onChange', async () => {
     let reconnectListener: (() => void) | undefined;
     const runtime = makeMockRuntime();
     runtime.onReconnect = (listener: () => void) => {
@@ -399,7 +399,7 @@ describe('embedded client — tap-direct handshake', () => {
     };
 
     reconnectListener?.();
-    // While the re-baseline is in flight, this payload is buffered (above the watermark, so
+    // While the rebaseline is in flight, this payload is buffered (above the watermark, so
     // it will be applied when the buffer drains).
     runtime.emitTap(tableKey, 'insert', { id: 9, status: 'accepted', price: 90 }, null, '0/200');
 

@@ -93,14 +93,14 @@ export function createPulseEvents<TQueries extends AnyPulseBuilders>(
         // inserts on it; updates/deletes are gated too when the old tuple is fully evaluable
         // (RID FULL, or pull:true), otherwise delivered with the row redacted to pk-only so
         // membership stays correct without leaking out-of-scope column data (see tap-events.ts).
-        const resolved = runtime.registry.resolve(prop, rawArgs, auth);
-        const tableKey = getTableUniqueName(resolved.table);
+        const query = runtime.registry.resolve(prop, rawArgs, auth);
+        const tableKey = getTableUniqueName(query.table);
 
         // The WAL listener processes pgoutput messages sequentially and the emitter dispatches
         // synchronously off that, so subscription-time delivery is already commit order — no
         // reordering buffer needed (unlike the collections' baseline/watermark handshake).
         const tapUnsub = runtime.subscribeTap(tableKey, (walEvent, lsn) => {
-          const event = buildTapEvent(walEvent, resolved);
+          const event = buildTapEvent(walEvent, query);
           if (!event) return;
           callback(event, lsn);
         });

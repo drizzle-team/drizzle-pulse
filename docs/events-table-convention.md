@@ -276,7 +276,7 @@ Each events table carries an `epoch` (a uuid) in `pulse_meta`, rotated on every 
 Cursor tokens clients hold are opaque `"<epoch>:<snapshot>"` strings
 ([`cursor.ts`](../packages/drizzle-pulse/src/server/cursor.ts)); a pull echoes its token back and
 the handler compares its epoch to the current one. A token minted before a recreate carries the
-old epoch, so it's detected as stale and the client is told to reset (re-baseline) rather than
+old epoch, so it's detected as stale and the client is told to reset (rebaseline) rather than
 resume against a since-dropped table — a bounded re-fetch. Consequence: any migration that
 changes a pulsed table's shape (hence recreates its events table) resets that table's
 subscribers. This is accepted by design.
