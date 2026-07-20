@@ -17,7 +17,6 @@ function walEvent(
   op: PendingWalEvent['op'],
   row: Record<string, unknown>,
   oldRow: Record<string, unknown> | null,
-  oldRowComplete = false,
 ): PendingWalEvent {
   return {
     eventsTable,
@@ -26,7 +25,6 @@ function walEvent(
     op,
     row,
     oldRow,
-    oldRowComplete,
     tableQualifiedName,
   };
 }
@@ -89,18 +87,6 @@ describe('PulseRuntime tap surface', () => {
     emit(runtime, walEvent(TABLE_A, 'insert', { id: 2 }, null), '0/2');
 
     expect(lsns).toEqual(['0/1']);
-  });
-
-  it('carries oldRowComplete through, defaulting to false when the event omits it', () => {
-    const runtime = makePulseRuntime();
-    const received: PendingWalEvent[] = [];
-    runtime.subscribeTap(TABLE_A, (event) => received.push(event));
-
-    emit(runtime, walEvent(TABLE_A, 'delete', {}, { id: 1 }), '0/1');
-    emit(runtime, walEvent(TABLE_A, 'delete', {}, { id: 2, name: 'full' }, true), '0/2');
-
-    expect(received[0]?.oldRowComplete).toBe(false);
-    expect(received[1]?.oldRowComplete).toBe(true);
   });
 
   it('isolates listener errors — a throwing listener neither drops others nor propagates out', () => {

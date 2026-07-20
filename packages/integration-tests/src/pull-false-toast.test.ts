@@ -1,15 +1,14 @@
 /**
- * Integration proof for the pull:false TOAST fill (fillUnchangedByPk): under
- * REPLICA IDENTITY DEFAULT, an UPDATE that never touches a TOASTed column omits it from
- * pgoutput's new tuple — the one parameterized by-pk SELECT on the admin pool must carry it
- * forward, a WHERE evaluated against that filled row must still work, and a same-commit
- * UPDATE+DELETE whose fill misses (row already gone by SELECT time) must be absorbed silently
- * by the trailing delete. Own scenario-local database + table (a TOASTable `note` column that
- * the shared minimal-orders fixture doesn't carry) — mirrors pull-false.test.ts's scenario
- * discipline (bare DDL, no publication/replica-identity setup, temp-slot teardown drain).
+ * Integration proof for pull:false TOAST carry-forward: an UPDATE that never touches a
+ * TOASTed column omits it from pgoutput's new tuple — the old-under-new spread over the
+ * REPLICA IDENTITY FULL old tuple must carry it forward, a WHERE evaluated against that
+ * spread row must still work, and a same-commit UPDATE+DELETE must converge. Own
+ * scenario-local database + table (a TOASTable `note` column that the shared minimal-orders
+ * fixture doesn't carry) — mirrors pull-false.test.ts's scenario discipline (bare DDL, no
+ * publication/replica-identity setup, temp-slot teardown drain).
  */
 
-import { describe, expect, spyOn, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 import { randomBytes } from 'node:crypto';
 import { decimal, pgTable, serial, text } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/postgres-js';
@@ -58,9 +57,8 @@ const LOCAL_ORDERS_DDL = `
 
 async function setupScenario(label: string) {
   const scenario = await createScenarioDb(`pulse_toastfalse_${label}`, { ddl: LOCAL_ORDERS_DDL });
-  // Deliberately absent: the publication — reconcile() self-provisions it under pull:false.
-  // REPLICA IDENTITY is left untouched: the tap decodes old-tuple data via
-  // oldKind/unchanged, and the TOAST fill runs a by-pk SELECT instead of relying on FULL.
+  // Deliberately absent: the publication — reconcile() self-provisions it under pull:false,
+  // along with REPLICA IDENTITY FULL (the source of every old tuple the tap decodes).
   const publicationName = `toastfalse_pub_${label}`;
   const slotName = `toastfalse_slot_${label}`;
   const sourceSql = postgres(withQuietPostgresUrl(scenario.databaseUrl));
@@ -105,17 +103,17 @@ function toastableValue(): string {
   return randomBytes(5000).toString('hex');
 }
 
-describe('pull: false — TOAST-omitted column fill by pk', () => {
+describe('pull: false — TOAST-omitted column carry-forward', () => {
   test('carry-forward: an unrelated-column update does not drop the TOAST-omitted column', async () => {
     const s = await setupScenario('carry');
     try {
       await s.runtime.start();
 
-      // Proves the fill path ran, not the FULL old-under-new spread — pull:false never forces FULL.
+      // The carry-forward below rides on the FULL old tuple — prove reconcile() forced it.
       const replicaIdentity = await s.sql.unsafe<{ relreplident: string }[]>(
         `SELECT relreplident FROM pg_class WHERE relname = 'orders'`,
       );
-      expect(replicaIdentity[0]?.relreplident).toBe('d');
+      expect(replicaIdentity[0]?.relreplident).toBe('f');
 
       const client = createPulseClient(s.runtime);
       const collection = await client.ordersByStatus({ status: 'accepted' });
@@ -161,9 +159,9 @@ describe('pull: false — TOAST-omitted column fill by pk', () => {
       await waitFor(() => collection.list().length === 1);
       const insertedId = collection.list()[0]?.id as number;
 
-      // Without the fill the omitted `note` evaluates as non-matching (filter-ast treats a
-      // missing column as non-matching) and the pk-stable update would evict the row via
-      // membership even though `note` never changed.
+      // Without the carry-forward the omitted `note` evaluates as non-matching (filter-ast
+      // treats a missing column as non-matching) and the pk-stable update would evict the row
+      // via membership even though `note` never changed.
       await s.sql.unsafe(`UPDATE "orders" SET price = 20 WHERE id = $1`, [insertedId]);
       await waitFor(() => {
         const row = collection.list()[0] as { price?: number } | undefined;
@@ -185,8 +183,8 @@ describe('pull: false — TOAST-omitted column fill by pk', () => {
     }
   });
 
-  test('fill-miss absorption: a same-commit UPDATE+DELETE converges with no fill-related error', async () => {
-    const s = await setupScenario('miss');
+  test('a same-commit UPDATE+DELETE of a TOAST-carrying row converges', async () => {
+    const s = await setupScenario('samecommit');
     try {
       await s.runtime.start();
 
@@ -200,27 +198,17 @@ describe('pull: false — TOAST-omitted column fill by pk', () => {
       await waitFor(() => collection.list().length === 1);
       const insertedId = collection.list()[0]?.id as number;
 
-      const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
-      try {
-        // By the time the fill SELECT runs (decoding the UPDATE), the row is already gone —
-        // the whole transaction, including the DELETE, has already committed in Postgres before
-        // the replication stream delivers either change. The trailing delete in the same commit
-        // batch must absorb the miss. sql.begin() reserves one connection for both statements,
-        // matching the pg raw-multi-statement string this replaces (postgres.js rejects a bare
-        // pooled BEGIN outside sql.begin()/sql.reserved()).
-        await s.sql.begin(async (tx) => {
-          await tx.unsafe(`UPDATE "orders" SET price = 30 WHERE id = $1`, [insertedId]);
-          await tx.unsafe(`DELETE FROM "orders" WHERE id = $1`, [insertedId]);
-        });
+      // Both changes arrive in one commit batch: the update's row and the delete's gate both
+      // decode from their own WAL old tuples — no source-table read happens, so the row being
+      // long gone in SQL by decode time cannot matter. sql.begin() reserves one connection for
+      // both statements (postgres.js rejects a bare pooled BEGIN outside
+      // sql.begin()/sql.reserved()).
+      await s.sql.begin(async (tx) => {
+        await tx.unsafe(`UPDATE "orders" SET price = 30 WHERE id = $1`, [insertedId]);
+        await tx.unsafe(`DELETE FROM "orders" WHERE id = $1`, [insertedId]);
+      });
 
-        await waitFor(() => collection.list().length === 0);
-
-        expect(
-          errorSpy.mock.calls.some((call: unknown[]) => String(call[0]).includes('fill miss')),
-        ).toBe(false);
-      } finally {
-        errorSpy.mockRestore();
-      }
+      await waitFor(() => collection.list().length === 0);
 
       expect(await eventsSchemaRelationCount(s.sql)).toBe(0);
 

@@ -13,13 +13,12 @@ export type TapRow = Record<string, unknown> & { $pk: unknown };
 
 /**
  * Builds a `PulseEvent` from a decoded WAL event, or `null` when the event should not be
- * delivered at all. Insert is gated on `query.where` as always. Update/delete are gated too,
- * but only when `event.oldRowComplete` makes that evaluable (a full old tuple — RID FULL, or
- * pull:true which always forces it): if the old tuple fully misses `where` and the new row (or
- * absence of one, for deletes) doesn't match either, the event is suppressed. When the old tuple
- * is absent or a key-only degradation (RID DEFAULT under pull:false), `where` can't be evaluated
- * against it, so the event is still delivered for membership correctness, but a non-matching new
- * row is redacted to pk-only rather than leaking out-of-scope column data to every subscriber.
+ * delivered at all. Insert is gated on `query.where` matching the new row. Update/delete carry
+ * a full old tuple (the runtime forces REPLICA IDENTITY FULL on every source), so `query.where`
+ * is evaluated against both sides: an event neither side matches was never visible to this
+ * subscriber and is suppressed. An update whose old row matched but new row doesn't is
+ * delivered pk-only — the subscriber needs the membership removal, not the out-of-scope column
+ * data.
  */
 export function buildTapEvent(
   event: PendingWalEvent,
@@ -31,8 +30,7 @@ export function buildTapEvent(
   const oldRow = event.oldRow ? extractRow(event.oldRow, query.columns) : null;
 
   const matchesNew = newRow ? evaluateCondition(query.where, newRow) : false;
-  const oldEvaluable = event.oldRowComplete && oldRow !== null;
-  const matchesOld = oldEvaluable && oldRow ? evaluateCondition(query.where, oldRow) : false;
+  const matchesOld = oldRow ? evaluateCondition(query.where, oldRow) : false;
 
   if (event.op === 'insert') {
     if (!matchesNew || !newRow) return null;
@@ -41,16 +39,11 @@ export function buildTapEvent(
   }
 
   if (event.op === 'update') {
+    if (!matchesNew && !matchesOld) return null;
     const projectedNew = newRow ? (applyProjectionPipeline([newRow], query)[0] as TapRow) : null;
     const projectedOld = oldRow ? (applyProjectionPipeline([oldRow], query)[0] as TapRow) : null;
     const fallback = projectedNew ?? projectedOld;
     if (!fallback) return null;
-    // Full old tuple and neither side matches: the row was never visible to this subscriber —
-    // suppress entirely (restores pre-phase behavior for the evaluable case).
-    if (!matchesNew && oldEvaluable && !matchesOld) return null;
-    // Otherwise deliver: matchesNew true is the normal in-scope update; matchesNew false with
-    // matchesOld true means the row left the filter (needed for membership removal); matchesNew false with
-    // old tuple non-evaluable can't be classified, so deliver defensively but redact the row.
     const row = matchesNew ? (projectedNew as TapRow) : ({ $pk: fallback.$pk } as TapRow);
     return {
       op: 'update',
@@ -62,11 +55,7 @@ export function buildTapEvent(
   }
 
   // delete
-  if (!oldRow) return null;
+  if (!oldRow || !matchesOld) return null;
   const projectedOld = applyProjectionPipeline([oldRow], query)[0] as TapRow;
-  // Full old tuple: restore the pre-phase matchesOld gate. Key-only/pk-only old tuple (non-full
-  // identity under pull:false): can't evaluate where, so deliver — projectedOld is already
-  // pk-only in that case since the raw old tuple never carried anything else.
-  if (oldEvaluable && !matchesOld) return null;
   return { op: 'delete', old_row: projectedOld, pk: projectedOld.$pk };
 }

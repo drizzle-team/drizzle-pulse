@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { desc, type EmptyRelations, eq, getColumns, getTableUniqueName, sql } from 'drizzle-orm';
-import { getTableConfig, type PgColumn, type PgTable } from 'drizzle-orm/pg-core';
+import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/postgres';
 import { buildShape } from 'drizzle-orm/postgres/shape';
 import {
@@ -74,11 +74,7 @@ type SourceTableMetadata = {
   sourceTable: PgTable;
   // The pk column's JS property key — indexes into the (JS-keyed) in-memory row objects.
   pkKey: string;
-  // The pk column itself — carries the SQL-name identity and drives the pk read-back's WHERE.
-  pkColumn: PgColumn;
   eventsTable: PgTable;
-  // JS property key -> column, for building the JS-keyed selection of a TOAST fill read-back.
-  columns: Record<string, PgColumn>;
 };
 
 // A decoded WAL row event, buffered between a transaction's `begin` and `commit` so the whole
@@ -93,23 +89,17 @@ export type PendingWalEvent = {
   pkValue: unknown;
   op: 'insert' | 'update' | 'delete';
   row: Record<string, unknown>;
+  // Always a full old tuple for update/delete (REPLICA IDENTITY FULL is forced on every
+  // source), null for insert — so a WHERE is always evaluable against it when present.
   oldRow: Record<string, unknown> | null;
-  // Whether `oldRow` is a full old tuple (safe to evaluate a WHERE against) or a null/pk-only
-  // degradation under a non-full identity; the tap uses it to decide if `oldRow` is evaluable.
-  oldRowComplete: boolean;
   tableQualifiedName: string;
 };
 
 // In-process (embedded) tap subscribers receive each decoded WAL event with its transaction's
 // commit LSN. There is no separate tap-payload shape: a PendingWalEvent already carries the
-// operation, new/old rows, and completeness flag a subscriber needs — the commit LSN is the only
-// per-transaction field it lacks, so it is passed alongside. `lsn` is shared by every event in
-// the commit.
+// operation and new/old rows a subscriber needs — the commit LSN is the only per-transaction
+// field it lacks, so it is passed alongside. `lsn` is shared by every event in the commit.
 export type TapListener = (event: PendingWalEvent, lsn: string) => void;
-
-// A TOAST fill-by-pk that returned zero rows — recorded transiently in decodeInto, resolved at
-// commit time in stream() against a trailing delete on the same pk.
-type FillMiss = { pkValue: unknown; tableQualifiedName: string };
 
 // `===` misses same-value Date/Buffer pks decoded from separate WAL events (distinct instances).
 function pkValuesEqual(a: unknown, b: unknown): boolean {
@@ -356,9 +346,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         pkKey:
           getQueryColumnKey(getColumns(sourceTable), pulseQuery.pkColumn) ??
           pulseQuery.pkColumn.name,
-        pkColumn: pulseQuery.pkColumn,
         eventsTable,
-        columns: getColumns(sourceTable) as Record<string, PgColumn>,
       });
     }
 
@@ -650,48 +638,20 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       });
 
       // REPLICA IDENTITY FULL on every source BEFORE any publication ADD below, so the first
-      // published change already carries complete old-row data. pull:true only — pull:false
-      // decodes old-tuple data via oldKind/unchanged instead, so forcing FULL here would just
-      // be an unwanted durable mutation (and the ACCESS EXCLUSIVE lock that comes with it).
-      if (this.pullEnabled) {
-        for (const source of registeredSources) {
-          const {
-            rows: [{ relreplident } = {}],
-          } = await tx.execute<{ relreplident: string }>(
-            sql`SELECT c.relreplident FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ${source.schemaName} AND c.relname = ${source.tableName}`,
+      // published change already carries complete old-row data: updates and deletes are decoded
+      // entirely from the WAL old tuple, and the runtime never reads old-row data back from the
+      // source tables.
+      for (const source of registeredSources) {
+        const {
+          rows: [{ relreplident } = {}],
+        } = await tx.execute<{ relreplident: string }>(
+          sql`SELECT c.relreplident FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ${source.schemaName} AND c.relname = ${source.tableName}`,
+        );
+        if (relreplident !== 'f') {
+          await execDdl(
+            `ALTER TABLE ${source.quoted} REPLICA IDENTITY FULL`,
+            `ownership of ${source.name}`,
           );
-          if (relreplident !== 'f') {
-            await execDdl(
-              `ALTER TABLE ${source.quoted} REPLICA IDENTITY FULL`,
-              `ownership of ${source.name}`,
-            );
-          }
-        }
-      } else {
-        // pull:false decodes deletes/pk-change straight off the WAL 'key' tuple instead of
-        // forcing FULL — that only carries real pk data under DEFAULT/FULL, or USING INDEX on
-        // the pk's own index. Anything else silently drops every delete (non-pk USING INDEX) or
-        // breaks the app's own writes once the table joins the publication (NOTHING) — reject
-        // here at boot instead of at decode time, where the failure would have no visible signal.
-        for (const source of registeredSources) {
-          const {
-            rows: [{ relreplident: ident, ident_is_pk: identIsPk } = {}],
-          } = await tx.execute<{
-            relreplident: string;
-            ident_is_pk: boolean;
-          }>(
-            sql`SELECT c.relreplident, COALESCE(i.indisprimary, false) AS ident_is_pk
-                FROM pg_class c
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                LEFT JOIN pg_index i ON i.indrelid = c.oid AND i.indisreplident
-                WHERE n.nspname = ${source.schemaName} AND c.relname = ${source.tableName}`,
-          );
-          if (ident === 'n' || (ident === 'i' && !identIsPk)) {
-            const identLabel = ident === 'n' ? 'NOTHING' : 'USING INDEX (non-primary-key index)';
-            throw new Error(
-              `pulse(pull:false): ${source.name} has REPLICA IDENTITY ${identLabel}; deletes cannot be decoded — set REPLICA IDENTITY DEFAULT or FULL`,
-            );
-          }
         }
       }
 
@@ -735,30 +695,25 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
           }
         }
 
-        // Un-pulse members no longer registered: DROP from the publication (independent of pull
-        // mode — membership isn't identity), THEN reset REPLICA IDENTITY, pull:true only (a member row
-        // implies the table still exists — pg_publication_tables joins pg_class, so a dropped
-        // table has already left membership on its own). Under pull:false the table was never
-        // forced to FULL, so there's nothing to reset — and resetting would still take the
-        // ACCESS EXCLUSIVE lock this phase removes.
+        // Un-pulse members no longer registered: DROP from the publication, THEN reset REPLICA
+        // IDENTITY (a member row implies the table still exists — pg_publication_tables joins
+        // pg_class, so a dropped table has already left membership on its own).
         for (const member of members) {
           if (registeredNames.has(member.name)) continue;
           await execDdl(
             `ALTER PUBLICATION ${pubIdent} DROP TABLE ${member.quoted}`,
             'ownership of the publication',
           );
-          if (this.pullEnabled) {
-            await execDdl(
-              `ALTER TABLE ${member.quoted} REPLICA IDENTITY DEFAULT`,
-              `ownership of ${member.name}`,
-            );
-          }
+          await execDdl(
+            `ALTER TABLE ${member.quoted} REPLICA IDENTITY DEFAULT`,
+            `ownership of ${member.name}`,
+          );
         }
       }
 
       // pull:false runs embedded-only: the events schema, pulse_meta/pulse_stream bookkeeping,
       // and events tables themselves are never provisioned or written — only the publication
-      // above is needed for the tap (REPLICA IDENTITY stays untouched under pull:false).
+      // and REPLICA IDENTITY provisioning above are needed for the tap.
       const epochByName = new Map<string, string>();
       if (this.pullEnabled) {
         await tx.execute(sql`CREATE SCHEMA IF NOT EXISTS ${schema}`);
@@ -1247,11 +1202,11 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     iterator: AsyncGenerator<ReplicationEvent>,
     run: Run,
   ): Promise<void> {
-    let tx: { commitLsn: string; events: PendingWalEvent[]; fillMisses: FillMiss[] } | null = null;
+    let tx: { commitLsn: string; events: PendingWalEvent[] } | null = null;
 
     for await (const ev of iterator) {
       if (ev.kind === 'begin') {
-        tx = { commitLsn: ev.finalLsn, events: [], fillMisses: [] };
+        tx = { commitLsn: ev.finalLsn, events: [] };
         continue;
       }
       if (ev.kind === 'insert' || ev.kind === 'update' || ev.kind === 'delete') {
@@ -1263,7 +1218,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
           );
           continue;
         }
-        await this.decodeInto(tx, ev);
+        this.decodeInto(tx, ev);
         continue;
       }
       if (ev.kind !== 'commit') continue; // relation/truncate/message: ignored
@@ -1294,24 +1249,6 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       // terminal path instead of reconnecting forever.
       run.attempts = 0;
 
-      // A fill-miss reads as "row deleted" in SQL (zero rows), which is indistinguishable from
-      // a real RLS/grant visibility failure — but a trailing delete on the same pk in this same
-      // commit batch proves the miss was legitimate (the row really was deleted, just not yet
-      // decoded when the fill ran). Only an unabsorbed miss is a real problem.
-      for (const miss of t.fillMisses) {
-        const absorbed = t.events.some(
-          (event) =>
-            event.op === 'delete' &&
-            event.tableQualifiedName === miss.tableQualifiedName &&
-            pkValuesEqual(event.pkValue, miss.pkValue),
-        );
-        if (!absorbed) {
-          this.logError(
-            `TOAST fill miss on ${miss.tableQualifiedName} pk=${String(miss.pkValue)}: zero rows on admin-pool SELECT with no trailing delete in this commit — check the admin role has SELECT (owner or BYPASSRLS under RLS), or the row was deleted in a commit that had not yet been decoded when this fill ran`,
-          );
-        }
-      }
-
       for (const event of t.events) {
         this.emitTap(event, t.commitLsn);
       }
@@ -1321,10 +1258,10 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     }
   }
 
-  private async decodeInto(
-    t: { events: PendingWalEvent[]; fillMisses: FillMiss[] },
+  private decodeInto(
+    t: { events: PendingWalEvent[] },
     ev: Extract<ReplicationEvent, { kind: 'insert' | 'update' | 'delete' }>,
-  ): Promise<void> {
+  ): void {
     const tableQualifiedName = `${ev.schema}.${ev.table}`;
 
     const metadata = this.sourceTableMetadata.get(tableQualifiedName);
@@ -1335,61 +1272,34 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     let row: Record<string, unknown>;
     let oldRow: Record<string, unknown> | null;
 
-    // Reading the pk off a 'key' old tuple is safe: reconcile() (pull:false branch) rejects at
-    // boot on any identity where the 'key' tuple wouldn't carry real pk columns (NOTHING, or a
-    // non-pk USING INDEX), so every identity reaching here is DEFAULT/FULL/pk-index. Reading any
-    // OTHER column off a 'key' tuple is still not safe: minipg null-renders them, indistinguishable
-    // from a real SQL null. `rawOld` may therefore only be used in full for oldKind === 'full';
-    // elsewhere only its pk column may be read.
-    const rawOld = ev.kind !== 'insert' && ev.old ? ev.old : null;
-
     if (ev.kind === 'insert') {
       row = ev.new;
       oldRow = null;
-    } else if (ev.kind === 'update') {
-      const base = ev.new;
-      row = base;
-      if (ev.oldKind === 'full' && rawOld) {
-        // pgoutput omits an UPDATE's unchanged TOASTed columns from the new tuple; the
-        // old-under-new spread carries them forward under REPLICA IDENTITY FULL.
-        row = { ...rawOld, ...base };
-      } else if (ev.unchanged.length > 0) {
-        // Under a non-full identity the omitted columns are absent from `new` too — a WHERE on
-        // one of them would silently drop matching events without this fill (filter-ast treats
-        // a missing column as non-matching), so this is required, not an optimization.
-        const pkValue = base[metadata.pkKey];
-        // A TOASTable pk that's itself unchanged (and thus omitted) renders undefined here — the
-        // pkValue==null skip below runs after this fill, so a query-time `where pk = undefined`
-        // must be avoided explicitly rather than relying on that later guard.
-        if (pkValue != null) {
-          const filled = await this.fillUnchangedByPk(metadata, pkValue, ev.unchanged);
-          if (filled) {
-            row = { ...base, ...filled };
-          } else {
-            t.fillMisses.push({ pkValue, tableQualifiedName });
-          }
-        }
-      }
-      // A partially-null-rendered old row (non-key columns null from a 'key' tuple) must never
-      // reach ingestCommit or the tap — only a genuinely full old tuple is emitted.
-      oldRow = ev.oldKind === 'full' ? rawOld : null;
     } else {
-      // Deliberately empty: the tap represents a delete by the absent new row. The persisted
-      // events-table row still carries the old row's data via PulseStore's buildEventRow.
-      row = {};
-      // Sanctioned pk-only delete degradation under a non-full identity — every other emitted
-      // row stays keyed the same way, so downstream membership/pk consumers are unaffected.
-      oldRow =
-        ev.oldKind === 'full'
-          ? rawOld
-          : rawOld
-            ? { [metadata.pkKey]: rawOld[metadata.pkKey] }
-            : null;
+      // reconcile() forces REPLICA IDENTITY FULL on every source before it joins the
+      // publication, so a full old tuple accompanies every update/delete. WAL written under an
+      // earlier identity can still replay (a FOR ALL TABLES publication retains changes from
+      // before a table's first registration); those events can't be decoded faithfully — minipg
+      // null-renders the non-key columns of a 'key' tuple, indistinguishable from real SQL
+      // nulls — so they're skipped loudly instead of emitted with fabricated nulls or silently
+      // missing TOAST-omitted columns.
+      if (ev.oldKind !== 'full' || !ev.old) {
+        this.logError(
+          `Skipping ${ev.kind} on ${tableQualifiedName}: old tuple is ${ev.oldKind ?? 'absent'}, not full — this WAL predates the REPLICA IDENTITY FULL applied at boot`,
+        );
+        return;
+      }
+      oldRow = ev.old;
+      if (ev.kind === 'update') {
+        // pgoutput omits an UPDATE's unchanged TOASTed columns from the new tuple; the
+        // old-under-new spread carries them forward (a full old tuple always has them).
+        row = { ...oldRow, ...ev.new };
+      } else {
+        // Deliberately empty: the tap represents a delete by the absent new row. The persisted
+        // events-table row still carries the old row's data via PulseStore's buildEventRow.
+        row = {};
+      }
     }
-
-    // Mirrors the oldKind checks above: true only when `oldRow` is a genuine full tuple, safe
-    // to evaluate a WHERE against (threaded to the tap via PendingWalEvent.oldRowComplete).
-    const oldRowComplete = ev.kind !== 'insert' && ev.oldKind === 'full';
 
     const pkSource = ev.kind === 'delete' ? oldRow : row;
     const pkValue = pkSource?.[metadata.pkKey];
@@ -1400,16 +1310,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       return;
     }
 
-    // Narrowed to deletes only: under REPLICA IDENTITY DEFAULT a pk-stable update legitimately
-    // arrives with no old tuple at all (ev.old === null) and MUST still proceed.
-    if (ev.kind === 'delete' && !oldRow) {
-      this.logDebug(
-        `Skipping delete on ${tableQualifiedName}: missing old row data for pk=${pkValue}`,
-      );
-      return;
-    }
-
-    const oldPk = rawOld?.[metadata.pkKey];
+    const oldPk = oldRow?.[metadata.pkKey];
     const pkChanged = !pkValuesEqual(oldPk, pkValue);
     if (ev.kind === 'update' && oldPk != null && pkChanged) {
       // pk-changing UPDATE: a single update entry keyed by the new pk leaves every
@@ -1421,16 +1322,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         pkKey: metadata.pkKey,
         tableQualifiedName,
       };
-      const oldRowForDelete = ev.oldKind === 'full' ? rawOld : { [metadata.pkKey]: oldPk };
-      t.events.push({
-        ...base,
-        op: 'delete',
-        pkValue: oldPk,
-        row: {},
-        oldRow: oldRowForDelete,
-        oldRowComplete,
-      });
-      t.events.push({ ...base, op: 'insert', pkValue, row, oldRow: null, oldRowComplete: false });
+      t.events.push({ ...base, op: 'delete', pkValue: oldPk, row: {}, oldRow });
+      t.events.push({ ...base, op: 'insert', pkValue, row, oldRow: null });
       return;
     }
 
@@ -1441,36 +1334,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       op: ev.kind,
       row,
       oldRow,
-      oldRowComplete,
       tableQualifiedName,
     });
-  }
-
-  // TOAST = Postgres's out-of-line storage for oversized column values; pgoutput omits an
-  // update's unchanged TOASTed columns from the new tuple, so they must be read back here.
-  // One pk-select of exactly the omitted TOASTed columns, on the admin pool — required for
-  // correctness under a non-full identity (see decodeInto), not an optimization. No cache, no
-  // batcher, no retries: read-your-latest is the accepted consistency model, same as the
-  // baseline MVCC race — any later change arrives explicitly in a later WAL event. The selection
-  // is keyed by JS property name, so the row comes back in the in-memory keyspace directly.
-  private async fillUnchangedByPk(
-    metadata: SourceTableMetadata,
-    pkValue: unknown,
-    unchanged: string[],
-  ): Promise<Record<string, unknown> | null> {
-    // `unchanged` arrives in the shape's keyspace — the same JS property keys the selection uses.
-    const selection: Record<string, PgColumn> = {};
-    for (const key of unchanged) {
-      const column = metadata.columns[key];
-      if (column) selection[key] = column;
-    }
-    const [row] = await this.getPulseStore()
-      .getDb()
-      .select(selection)
-      .from(metadata.sourceTable)
-      .where(eq(metadata.pkColumn, pkValue))
-      .limit(1);
-    return row ?? null;
   }
 
   private getPulseStore(): PulseStore {

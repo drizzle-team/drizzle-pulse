@@ -57,9 +57,8 @@ const runtime = new PulseRuntime(registry, {
   pull: true,
 });
 
-await runtime.start(); // self-provisions its infrastructure (publication, events tables) inside
-// one transaction on first boot; REPLICA IDENTITY FULL only if `pull: true` — see "Events
-// tables" below
+await runtime.start(); // self-provisions its infrastructure (publication, REPLICA IDENTITY
+// FULL, events tables) inside one transaction on first boot — see "Events tables" below
 
 // wire runtime.handlers.subscribe / .pull / .loadMore into your HTTP router, or mount the
 // optional first-party Hono router — see "drizzle-pulse/server/hono" below
@@ -120,15 +119,9 @@ await runtime.start();
 Every pulsed source table gets a matching **events table** — WAL changes are persisted there and replayed to clients. Events tables are runtime-owned infrastructure, resolved entirely by convention (no hand-declared Drizzle table, no `.$eventsTable()` linkage, no drizzle-kit migration):
 
 - **Location:** `<eventsSchema>.<sourceSchema>_<sourceTable>`, with each component's `_` doubled to `__` before joining — `eventsSchema` defaults to `'drizzle_pulse'` (override via `PulseRuntime`'s `eventsSchema` option)
-- **Self-provisioning:** `runtime.start()` reconciles everything itself inside one advisory-locked transaction — creates the events schema, the events tables and their `pulse_meta` bookkeeping, and the publication (plus membership diff). `REPLICA IDENTITY FULL` on each source is provisioned **only under `pull: true`**; under `pull: false` replica identity is never touched — reconcile self-provisions the publication alone, so the WAL tap comes up with zero durable mutation of your tables at boot and no `ACCESS EXCLUSIVE` lock. An events table is recreated when the sha256 of its rendered DDL diverges (a source-column change), which rotates a per-table epoch so stale client cursors reset. `wal_level = logical` is the one precondition the runtime can't fix — it stays a fail-fast assert.
+- **Self-provisioning:** `runtime.start()` reconciles everything itself inside one advisory-locked transaction — creates the events schema, the events tables and their `pulse_meta` bookkeeping, the publication (plus membership diff), and sets `REPLICA IDENTITY FULL` on each registered source (resetting it to `DEFAULT` on un-pulse). Full old tuples are what every update/delete decodes from, in both pull modes — the runtime never reads old-row data back from your tables. An events table is recreated when the sha256 of its rendered DDL diverges (a source-column change), which rotates a per-table epoch so stale client cursors reset. `wal_level = logical` is the one precondition the runtime can't fix — it stays a fail-fast assert.
 
-**Migrating an existing `pull: false` deployment:** the runtime decodes old-tuple data by inspecting each WAL event's own identity (`oldKind`/`unchanged`), never by mode, so upgrading is zero-step for `REPLICA IDENTITY DEFAULT` or `FULL` — a table an older version already forced to `FULL` keeps working exactly as before. This scoping matters: under `pull: false`, `reconcile()` rejects at boot if a source has `REPLICA IDENTITY NOTHING`, or `USING INDEX` on an index other than the primary key, since deletes can't be decoded off either. The runtime itself never resets `FULL` back to `DEFAULT` (that reset would take the same `ACCESS EXCLUSIVE` lock this phase removes, and could clobber an identity another logical consumer still needs). To actually reclaim the WAL savings, run the one-line manual ALTER yourself once you've confirmed nothing else depends on the full old-row image:
-
-```sql
-ALTER TABLE <source_table> REPLICA IDENTITY DEFAULT;
-```
-
-**Stateless-feed WHERE gating for updates/deletes:** `createPulseEvents` gates a delete or a non-matching-new-row update against the query's `WHERE` only when the old tuple is fully evaluable — `REPLICA IDENTITY FULL` (either mode) or `pull: true` (which always forces it). Under `pull: false` with `REPLICA IDENTITY DEFAULT`, a delete's `old_row` is pk-only, so it can't be evaluated against `WHERE`: the event is still delivered (and, for updates, the row is redacted to pk-only) so a subscriber's materialized collection can still remove the row via pk membership, without leaking out-of-scope column data.
+**Stateless-feed WHERE gating for updates/deletes:** `createPulseEvents` evaluates the query's `WHERE` against both the old and new row (the full old tuple makes that always possible). An event neither side matches is suppressed; an update whose old row matched but new row doesn't is delivered with the row redacted to pk-only, so a subscriber's materialized collection can remove the row via pk membership without leaking out-of-scope column data.
 
 See [`docs/events-table-convention.md`](../../docs/events-table-convention.md) for the full name-derivation, column-mapping, and reconcile contract.
 
@@ -149,8 +142,6 @@ export default defineConfig({
 By default the app's own role owns its tables and can `CREATE`, so `runtime.start()` self-provisions everything on first boot and no-ops on later boots. A failed self-provisioning statement throws with the exact statement and the grant it most likely needs (e.g. *ownership of `public.orders`*, *the database `CREATE` privilege*).
 
 For split-role deploys where the app role is deliberately unprivileged, call `runtime.provision()` once from a migration/deploy step under an elevated role — it runs the same reconciliation without opening the WAL stream, and the app's later `start()` then no-ops the DDL. The reconcile role needs ownership of each pulsed source table, the database `CREATE` privilege, and (once it exists) ownership of the publication; the WAL streaming connection additionally needs the `REPLICATION` attribute.
-
-**Admin-pool grant for the `pull: false` TOAST fill:** under `pull: false`, an UPDATE that omits a TOASTed column (unchanged since the last WAL event) triggers a single by-pk `SELECT` of that column from the source table, run on the runtime's own admin connection — not `sourceDb`. The admin role therefore needs `SELECT` on every pulsed source table, and under row-level security it must additionally be the table owner or hold `BYPASSRLS`; otherwise the fill silently under-reads (a zero-row result reads identically to "row deleted"). A fill that returns zero rows with no matching delete in the same WAL commit is logged at `error` — usually an admin-pool visibility failure to investigate, but it can also mean the row was deleted in a commit that hadn't been decoded yet when the fill ran (a benign update-then-delete race); the log line names both.
 
 ## `drizzle-pulse/server/hono`
 

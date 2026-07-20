@@ -107,70 +107,30 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
     expect(received[0]!.matchesNew).toBe(false);
   });
 
-  test('an update with matchesNew=false and a null old row is still delivered', () => {
-    const runtime = makeMockRuntime({ where: { status: { eq: 'accepted' } } });
-    const events = createPulseEvents(runtime as any);
-    const received: Array<{ matchesNew: boolean }> = [];
-    (events as any).orders((event: any) => received.push(event));
-
-    runtime.emitTap(tableKey, 'update', { id: 1, status: 'completed', price: 10 }, null, '0/301');
-
-    expect(received).toHaveLength(1);
-    expect(received[0]!.matchesNew).toBe(false);
-  });
-
-  test('a delete whose pk-only old row cannot be evaluated is still delivered (pull:false, non-full identity)', () => {
+  test('a delete whose old row does not match the where is suppressed (CR-01)', () => {
     const runtime = makeMockRuntime({ where: { status: { eq: 'accepted' } } });
     const events = createPulseEvents(runtime as any);
     const received: Array<{ op: string }> = [];
     (events as any).orders((event: any) => received.push(event));
 
-    // oldRowComplete omitted (defaults false): a pk-only old row can't be evaluated against
-    // where, so the event must still be delivered for membership correctness (CR-01).
-    runtime.emitTap(tableKey, 'delete', {}, { id: 1 }, '0/302');
-
-    expect(received).toHaveLength(1);
-    expect(received[0]!.op).toBe('delete');
-  });
-
-  test('a delete with a complete old row that does not match the where is suppressed (CR-01)', () => {
-    const runtime = makeMockRuntime({ where: { status: { eq: 'accepted' } } });
-    const events = createPulseEvents(runtime as any);
-    const received: Array<{ op: string }> = [];
-    (events as any).orders((event: any) => received.push(event));
-
-    runtime.emitTap(
-      tableKey,
-      'delete',
-      {},
-      { id: 1, status: 'completed', price: 10 },
-      '0/302',
-      true,
-    );
+    runtime.emitTap(tableKey, 'delete', {}, { id: 1, status: 'completed', price: 10 }, '0/302');
 
     expect(received).toHaveLength(0);
   });
 
-  test('a delete with a complete old row that matches the where is still delivered', () => {
+  test('a delete whose old row matches the where is delivered', () => {
     const runtime = makeMockRuntime({ where: { status: { eq: 'accepted' } } });
     const events = createPulseEvents(runtime as any);
     const received: Array<{ op: string }> = [];
     (events as any).orders((event: any) => received.push(event));
 
-    runtime.emitTap(
-      tableKey,
-      'delete',
-      {},
-      { id: 1, status: 'accepted', price: 10 },
-      '0/303',
-      true,
-    );
+    runtime.emitTap(tableKey, 'delete', {}, { id: 1, status: 'accepted', price: 10 }, '0/303');
 
     expect(received).toHaveLength(1);
     expect(received[0]!.op).toBe('delete');
   });
 
-  test('an update with a complete old row where neither side matches the where is suppressed (CR-01)', () => {
+  test('an update where neither side matches the where is suppressed (CR-01)', () => {
     const runtime = makeMockRuntime({ where: { status: { eq: 'accepted' } } });
     const events = createPulseEvents(runtime as any);
     const received: unknown[] = [];
@@ -182,13 +142,12 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
       { id: 1, status: 'requested', price: 10 },
       { id: 1, status: 'completed', price: 5 },
       '0/304',
-      true,
     );
 
     expect(received).toHaveLength(0);
   });
 
-  test('an update leaving the filter with a complete matching old row is delivered with the row redacted to pk-only (CR-01)', () => {
+  test('an update leaving the filter is delivered with the row redacted to pk-only (CR-01)', () => {
     const runtime = makeMockRuntime({ where: { status: { eq: 'accepted' } } });
     const events = createPulseEvents(runtime as any);
     const received: Array<{ row: unknown; matchesNew: boolean }> = [];
@@ -200,7 +159,6 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
       { id: 1, status: 'completed', price: 10 },
       { id: 1, status: 'accepted', price: 10 },
       '0/305',
-      true,
     );
 
     expect(received).toHaveLength(1);

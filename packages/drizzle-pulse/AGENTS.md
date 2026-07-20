@@ -40,8 +40,8 @@ platform-imports purity test).
 | `src/client/superjson.ts` | response deserialization helper |
 | `src/client/react/use-pulse-query.ts` | `usePulseQuery` wrapper around `PulseQuery` |
 | `src/client/embedded/index.ts` | in-process embedded client: `createPulseClient(runtime)` → `PulseCollection` facade (`list`/`onChange`/`onError`/`dispose`) fed tap-direct — a full-set `PulseMergeCore` rebuilt from `runtime.readCollectionBaseline` and kept live by `runtime.walEventEmitter`, reconciled through an LSN watermark handshake (no events table, no wire protocol); re-exports `createPulseEvents` |
-| `src/client/embedded/tap-events.ts` | `buildTapEvent(payload, query)`: the single WAL-tap-payload → `PulseEvent` builder shared by collections and `createPulseEvents` (WHERE-filters inserts; updates/deletes are WHERE-filtered only when the old tuple is fully evaluable, else delivered with the row redacted to pk-only; value-imports only `shared/`) |
-| `src/client/embedded/events.ts` | `createPulseEvents(runtime)` → stateless per-event subscription: WHERE-filtered inserts, updates/deletes delivered by pk with `matchesNew` (redacted to pk-only when not evaluable), `(event, lsn)` callback, no baseline, no merge core, no per-subscription error surface |
+| `src/client/embedded/tap-events.ts` | `buildTapEvent(payload, query)`: the single WAL-tap-payload → `PulseEvent` builder shared by collections and `createPulseEvents` (WHERE-filters every op against the full old/new rows; an update leaving the filter is delivered with the row redacted to pk-only; value-imports only `shared/`) |
+| `src/client/embedded/events.ts` | `createPulseEvents(runtime)` → stateless per-event subscription: WHERE-filtered events with `matchesNew` on updates, `(event, lsn)` callback, no baseline, no merge core, no per-subscription error surface |
 | `src/server/pulse-builder.ts` | immutable query builder (`.columns/.args/.order/.limit/.transform/.query`), seeded by `PulseTable.query(fn?)` |
 | `src/server/pulse-registry.ts` | registry finalization + `$client` phantom contract; queries must be `.query()` builder chains — a bare `PulseTable` is a compile-time type error via `AnyPulseBuilders`, not a runtime rejection; defensive composite-PK re-check |
 | `src/server/pulse-projection.ts` | projection/response-shaping helpers split out to preserve platform purity for the embedded client entrypoint |
@@ -62,10 +62,9 @@ tables. `PulseRuntime.reconcile()` runs inside one transaction under a per-event
 advisory lock and: asserts `wal_level=logical` (the one precondition it can't fix), creates/diffs
 the publication (independent of pull mode), creates the events schema + `pulse_meta` bookkeeping,
 creates/recreates each events table whose rendered-DDL sha256 diverges (rotating its epoch), and
-sweeps orphans. `pull: true` only: sets `REPLICA IDENTITY FULL` on each source and
-resets it to `DEFAULT` on un-pulse — `pull: false` never forces or resets identity in either
-direction (old-tuple data comes from `oldKind`/`unchanged` instead, gated per-event not per-mode,
-so upgrading a `pull: false` deployment is zero-step). `start()` runs it then opens WAL;
+sweeps orphans. In both pull modes it sets `REPLICA IDENTITY FULL` on each source and resets it
+to `DEFAULT` on un-pulse — every update/delete decodes from its full WAL old tuple, and the
+runtime never reads old-row data back from the source tables. `start()` runs it then opens WAL;
 `provision()` runs it and returns (split-role deploys). Failed DDL throws naming the exact
 statement and the grant it most likely needs. See
 [`../../docs/events-table-convention.md`](../../docs/events-table-convention.md) sections 5–8.

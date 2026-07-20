@@ -127,7 +127,6 @@ export function makeMockRuntime(opts: MockRuntimeOptions = {}) {
     row: Record<string, unknown>,
     oldRow: Record<string, unknown> | null,
     lsn: string,
-    oldRowComplete = false,
   ): void => {
     const event: PendingWalEvent = {
       eventsTable: ordersTable,
@@ -136,7 +135,6 @@ export function makeMockRuntime(opts: MockRuntimeOptions = {}) {
       op,
       row,
       oldRow,
-      oldRowComplete,
       tableQualifiedName,
     };
     for (const listener of tapListeners.get(tableQualifiedName) ?? []) listener(event, lsn);

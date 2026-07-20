@@ -3,10 +3,10 @@
  * infrastructure while embedded collections and stateless events subscriptions stay fully
  * live over the WAL tap — and their replication slot is temporary with a
  * randomized suffix so a crashed process can never leak WAL-retaining slot state.
- * REPLICA IDENTITY is never forced under pull:false — only the publication is
- * self-provisioned. Each scenario builds its own standalone database (bare — no pre-existing
- * publication) so reconcile()'s self-provisioning of the WAL prerequisites is exercised, and
- * tears itself down in a `finally` block.
+ * REPLICA IDENTITY FULL and the publication are both self-provisioned, same as pull:true.
+ * Each scenario builds its own standalone database (bare — no pre-existing publication) so
+ * reconcile()'s self-provisioning of the WAL prerequisites is exercised, and tears itself
+ * down in a `finally` block.
  */
 
 import { describe, expect, test } from 'bun:test';
@@ -31,8 +31,7 @@ function buildRegistry() {
 async function setupPullFalseScenario(label: string) {
   const scenario = await createScenarioDb(`pulse_pullfalse_${label}`);
   // Deliberately absent: the publication — reconcile() still self-provisions it under
-  // pull:false (embedded needs WAL). REPLICA IDENTITY is left untouched under
-  // pull:false: the tap decodes old-tuple data via oldKind/unchanged instead.
+  // pull:false (embedded needs WAL), along with REPLICA IDENTITY FULL on each source.
   const publicationName = `pullfalse_pub_${label}`;
   const slotName = `pullfalse_slot_${label}`;
   const sourceSql = postgres(withQuietPostgresUrl(scenario.databaseUrl));
@@ -78,7 +77,7 @@ async function eventsSchemaRelationCount(sql: PullFalseScenario['sql']): Promise
 }
 
 describe('pull: false — embedded-only runtime writes nothing to events tables', () => {
-  test('provisioning: zero events-schema relations; publication self-provisioned, REPLICA IDENTITY left at DEFAULT', async () => {
+  test('provisioning: zero events-schema relations; publication self-provisioned, REPLICA IDENTITY forced to FULL', async () => {
     const s = await setupPullFalseScenario('provision');
     try {
       await s.runtime.start();
@@ -92,12 +91,10 @@ describe('pull: false — embedded-only runtime writes nothing to events tables'
       );
       expect(members.map((row) => row.tablename)).toEqual(['orders']);
 
-      // pull:false never forces REPLICA IDENTITY FULL — zero durable mutation of user
-      // tables at boot, no ACCESS EXCLUSIVE lock.
       const replicaIdentity = await s.sql.unsafe<{ relreplident: string }[]>(
         `SELECT relreplident FROM pg_class WHERE relname = 'orders'`,
       );
-      expect(replicaIdentity[0]?.relreplident).toBe('d');
+      expect(replicaIdentity[0]?.relreplident).toBe('f');
     } finally {
       await teardownScenario(s);
     }
@@ -145,15 +142,12 @@ describe('pull: false — embedded-only runtime writes nothing to events tables'
     try {
       await s.runtime.start();
 
-      // Sequencing canary: relreplident stays 'd' — the delete below runs
-      // against a key-only old tuple, filtered by the collection's WHERE on `status` (a non-key
-      // column). This is the exact case that breaks if key-only old-tuple decoding had landed
-      // before pk-membership delete detection: a where-evaluation against a tuple
-      // missing `status` would silently keep the row.
+      // The delete below is gated on the collection's WHERE evaluated against the full old
+      // tuple — reconcile() must have forced FULL for that evaluation to see `status`.
       const replicaIdentity = await s.sql.unsafe<{ relreplident: string }[]>(
         `SELECT relreplident FROM pg_class WHERE relname = 'orders'`,
       );
-      expect(replicaIdentity[0]?.relreplident).toBe('d');
+      expect(replicaIdentity[0]?.relreplident).toBe('f');
 
       const client = createPulseClient(s.runtime);
       const events = createPulseEvents(s.runtime);
@@ -201,7 +195,7 @@ describe('pull: false — embedded-only runtime writes nothing to events tables'
     }
   });
 
-  test('wire-shape pin: the pull:false delete event is exactly { op, old_row, pk } with a pk-only old_row, and updates carry matchesNew with no old-match flag', async () => {
+  test('wire-shape pin: the pull:false delete event is exactly { op, old_row, pk } with a full old_row, and updates carry matchesNew with no old-match flag', async () => {
     const s = await setupPullFalseScenario('wireshape');
     try {
       await s.runtime.start();
@@ -226,18 +220,27 @@ describe('pull: false — embedded-only runtime writes nothing to events tables'
       expect(updateEvent).toHaveProperty('matchesNew');
       expect(updateEvent).not.toHaveProperty('matchesOld');
 
-      // The sanctioned wire break: a pull:false delete's old_row is pk-only —
-      // no non-key data columns, regardless of the subscriber's WHERE. Any future field
-      // addition/removal on this shape must consciously edit this pin.
+      // REPLICA IDENTITY FULL means the delete's old_row carries the query's full projected
+      // row, same as under pull:true. Any future field addition/removal on this shape must
+      // consciously edit this pin.
       await s.sql.unsafe(`DELETE FROM "orders" WHERE id = $1`, [insertedId]);
       await waitFor(() => captured.length === 3);
       const deleteEvent = captured[2] as Record<string, unknown>;
       expect(Object.keys(deleteEvent).sort()).toEqual(['old_row', 'op', 'pk']);
       expect(deleteEvent.pk).toBe(insertedId);
       const oldRow = deleteEvent.old_row as Record<string, unknown>;
-      expect(Object.keys(oldRow).sort()).toEqual(['$pk', 'id']);
+      expect(Object.keys(oldRow).sort()).toEqual([
+        '$pk',
+        'createdAt',
+        'driverId',
+        'id',
+        'price',
+        'status',
+      ]);
       expect(oldRow.id).toBe(insertedId);
       expect(oldRow.$pk).toBe(insertedId);
+      expect(oldRow.status).toBe('accepted');
+      expect(oldRow.price).toBe(20);
 
       unsub();
     } finally {

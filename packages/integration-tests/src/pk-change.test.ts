@@ -1,14 +1,13 @@
 /**
  * Integration proof: a pk-changing UPDATE (`UPDATE orders SET id = id + N`) must
- * synthesize delete(oldPk) + insert(newPk) so no consumer retains a ghost old-pk row. Proven in
- * both pull modes: pull:true forces REPLICA IDENTITY FULL (the old tuple is always full);
- * pull:false runs REPLICA IDENTITY DEFAULT (the old tuple is key-only), and synthesis reads only
- * the old pk, which a key tuple always carries as a real value.
+ * synthesize delete(oldPk) + insert(newPk) so no consumer retains a ghost old-pk row. Proven
+ * in both pull modes — REPLICA IDENTITY FULL is forced in both, so the synthesized delete
+ * always carries the full old tuple.
  *
  * Each scenario builds its own standalone ephemeral database (bare `orders` table only —
- * reconcile() self-provisions the publication, plus REPLICA IDENTITY FULL under pull:true only,
- * exactly as it does under normal boot) so it cannot collide with other suites, and tears itself
- * down in a `finally` block.
+ * reconcile() self-provisions the publication and REPLICA IDENTITY FULL, exactly as it does
+ * under normal boot) so it cannot collide with other suites, and tears itself down in a
+ * `finally` block.
  */
 
 import { describe, expect, test } from 'bun:test';

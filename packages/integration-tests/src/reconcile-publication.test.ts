@@ -2,11 +2,10 @@
  * Integration proof: reconcile() self-provisions the publication for both pull modes.
  * PulseRuntime.provision() (the same reconcile path start() runs, minus the replication stream)
  * creates the publication owning exactly the registered sources and keeps its membership in
- * sync (adding new sources, un-pulsing removed ones). REPLICA IDENTITY handling is pull:true
- * only: forces FULL, restores it after drift, and resets to DEFAULT on un-pulse. Under
- * pull:false identity is never touched in either direction — see the dedicated
- * pull:false test. Each scenario builds its own standalone database and drops it in a finally
- * block, so the publication/schema it creates go with the database.
+ * sync (adding new sources, un-pulsing removed ones). REPLICA IDENTITY handling is mode-
+ * independent: FULL is forced on every registered source, restored after drift, and reset to
+ * DEFAULT on un-pulse. Each scenario builds its own standalone database and drops it in a
+ * finally block, so the publication/schema it creates go with the database.
  */
 
 import { describe, expect, test } from 'bun:test';
@@ -198,7 +197,7 @@ describe('reconcile publication + replica identity self-provisioning', () => {
     }
   });
 
-  test('pull:true RI drift: manually resetting to DEFAULT is restored to FULL on next provision()', async () => {
+  test('RI drift: manually resetting to DEFAULT is restored to FULL on next provision()', async () => {
     const s = await setupBareScenario('drift');
     try {
       const runtime = makeRuntime(s, 'drift', 'orders');
@@ -215,18 +214,14 @@ describe('reconcile publication + replica identity self-provisioning', () => {
     }
   });
 
-  test('pull:false: provision() never forces FULL, and never restores drift to FULL either', async () => {
+  test('pull:false: provision() forces FULL and restores drift, same as pull:true', async () => {
     const s = await setupBareScenario('falsedrift');
     try {
       const runtime = makeRuntime(s, 'falsedrift', 'orders', false);
       await runtime.provision();
-      expect(await replicaIdentity(s.sql, 'orders')).toBe('d');
-
-      // A table another logical consumer (or a prior pull:true boot) already forced to FULL
-      // must stay FULL — pull:false never resets identity in either direction.
-      await s.sql.unsafe('ALTER TABLE "orders" REPLICA IDENTITY FULL');
       expect(await replicaIdentity(s.sql, 'orders')).toBe('f');
 
+      await s.sql.unsafe('ALTER TABLE "orders" REPLICA IDENTITY DEFAULT');
       await runtime.provision();
       expect(await replicaIdentity(s.sql, 'orders')).toBe('f');
     } finally {
@@ -234,23 +229,17 @@ describe('reconcile publication + replica identity self-provisioning', () => {
     }
   });
 
-  test('pull:false: provision() rejects REPLICA IDENTITY NOTHING and non-pk USING INDEX', async () => {
-    const s = await setupBareScenario('identguard');
+  test('provision() converts REPLICA IDENTITY NOTHING and USING INDEX to FULL', async () => {
+    const s = await setupBareScenario('identconv');
     try {
       await s.sql.unsafe('ALTER TABLE "orders" REPLICA IDENTITY NOTHING');
-      await expect(makeRuntime(s, 'identguard', 'orders', false).provision()).rejects.toThrow(
-        /REPLICA IDENTITY NOTHING/,
-      );
+      await makeRuntime(s, 'identconv', 'orders', false).provision();
+      expect(await replicaIdentity(s.sql, 'orders')).toBe('f');
 
       await s.sql.unsafe('CREATE UNIQUE INDEX "orders_status_uq" ON "orders" ("status")');
       await s.sql.unsafe('ALTER TABLE "orders" REPLICA IDENTITY USING INDEX "orders_status_uq"');
-      await expect(makeRuntime(s, 'identguard2', 'orders', false).provision()).rejects.toThrow(
-        /USING INDEX/,
-      );
-
-      await s.sql.unsafe('ALTER TABLE "orders" REPLICA IDENTITY USING INDEX "orders_pkey"');
-      // pk index: allowed, no throw.
-      await makeRuntime(s, 'identguard3', 'orders', false).provision();
+      await makeRuntime(s, 'identconv2', 'orders', false).provision();
+      expect(await replicaIdentity(s.sql, 'orders')).toBe('f');
     } finally {
       await teardown(s);
     }
