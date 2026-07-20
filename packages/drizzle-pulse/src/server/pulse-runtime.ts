@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { desc, type EmptyRelations, eq, getColumns, getTableUniqueName, sql } from 'drizzle-orm';
 import { getTableConfig, type PgColumn, type PgTable } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/postgres';
+import { buildShape } from 'drizzle-orm/postgres/shape';
 import {
   type Connection,
   lsnFromString,
@@ -18,7 +19,6 @@ import { buildSelectQuery, type PulseSourceDb } from './pulse-sql.js';
 import { PulseStore } from './pulse-store.js';
 import { getQueryColumnKey } from './pulse-types.js';
 import { DEFAULT_PULL_EVENT_LIMIT, PulseRequestHandler } from './sdk.js';
-import { buildTableShape } from './wal-shape-bridge.js';
 
 type RuntimeLifecycleListener = () => void;
 // Reconnect listeners receive the open snapshot session (or null under pull:false / no
@@ -365,7 +365,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     // Handed to every rep.start() so minipg decodes each declared column exactly as its query()
     // spec would — new and old tuples alike — instead of at the OID's default JS target.
     this.tableShapes = [...this.sourceTableMetadata.values()].map((meta) =>
-      buildTableShape(meta.sourceTable),
+      buildShape.fromTableOrView(meta.sourceTable),
     );
 
     this.logLevel = this.config.logLevel ?? LogLevel.Info;
