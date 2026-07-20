@@ -18,7 +18,7 @@ import { buildSelectQuery, type PulseSourceDb } from './pulse-sql.js';
 import { PulseStore } from './pulse-store.js';
 import { getQueryColumnKey } from './pulse-types.js';
 import { DEFAULT_PULL_EVENT_LIMIT, PulseRequestHandler } from './sdk.js';
-import { buildTableShape, indexColumnsBySqlName, reKeyToJsProps } from './wal-shape-bridge.js';
+import { buildTableShape } from './wal-shape-bridge.js';
 
 type RuntimeLifecycleListener = () => void;
 // Reconnect listeners receive the open snapshot session (or null under pull:false / no
@@ -77,14 +77,13 @@ type SourceTableMetadata = {
   // The pk column itself — carries the SQL-name identity and drives the pk read-back's WHERE.
   pkColumn: PgColumn;
   eventsTable: PgTable;
-  // SQL column name -> { JS property key, column }: re-keys decoded WAL rows and builds the
-  // JS-keyed selection for a TOAST fill read-back.
-  columnsBySqlName: Map<string, { jsKey: string; column: PgColumn }>;
+  // JS property key -> column, for building the JS-keyed selection of a TOAST fill read-back.
+  columns: Record<string, PgColumn>;
 };
 
 // A decoded WAL row event, buffered between a transaction's `begin` and `commit` so the whole
-// transaction persists atomically and acks together. `row`/`oldRow` arrive decoded by minipg's
-// per-table shapes and re-keyed to JS property keys — for delete, `row` is deliberately `{}` (the
+// transaction persists atomically and acks together. `row`/`oldRow` arrive from minipg's
+// per-table shapes already decoded and keyed by JS property names — for delete, `row` is deliberately `{}` (the
 // tap represents a delete by the absent new row); the persisted events-table row still carries the old row's
 // data (PulseStore's buildEventRow), so persistence and the tap emit stay correctly divergent
 // for deletes.
@@ -359,7 +358,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
           pulseQuery.pkColumn.name,
         pkColumn: pulseQuery.pkColumn,
         eventsTable,
-        columnsBySqlName: indexColumnsBySqlName(sourceTable),
+        columns: getColumns(sourceTable) as Record<string, PgColumn>,
       });
     }
 
@@ -1342,14 +1341,13 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     // OTHER column off a 'key' tuple is still not safe: minipg null-renders them, indistinguishable
     // from a real SQL null. `rawOld` may therefore only be used in full for oldKind === 'full';
     // elsewhere only its pk column may be read.
-    const rawOld =
-      ev.kind !== 'insert' && ev.old ? reKeyToJsProps(ev.old, metadata.columnsBySqlName) : null;
+    const rawOld = ev.kind !== 'insert' && ev.old ? ev.old : null;
 
     if (ev.kind === 'insert') {
-      row = reKeyToJsProps(ev.new, metadata.columnsBySqlName);
+      row = ev.new;
       oldRow = null;
     } else if (ev.kind === 'update') {
-      const base = reKeyToJsProps(ev.new, metadata.columnsBySqlName);
+      const base = ev.new;
       row = base;
       if (ev.oldKind === 'full' && rawOld) {
         // pgoutput omits an UPDATE's unchanged TOASTed columns from the new tuple; the
@@ -1460,10 +1458,11 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     pkValue: unknown,
     unchanged: string[],
   ): Promise<Record<string, unknown> | null> {
+    // `unchanged` arrives in the shape's keyspace — the same JS property keys the selection uses.
     const selection: Record<string, PgColumn> = {};
-    for (const sqlName of unchanged) {
-      const entry = metadata.columnsBySqlName.get(sqlName);
-      if (entry) selection[entry.jsKey] = entry.column;
+    for (const key of unchanged) {
+      const column = metadata.columns[key];
+      if (column) selection[key] = column;
     }
     const [row] = await this.getPulseStore()
       .getDb()
