@@ -84,7 +84,7 @@ describe('runtime reconnect edge', () => {
 });
 
 describe('zero-progress connections never reset attempts', () => {
-  test('connections that clean-end with zero commits exhaust attempts and reach the terminal path', async () => {
+  test('connections that end with zero commits exhaust attempts and reach the terminal path', async () => {
     const runtime = makePulseRuntime() as any;
     let terminalError: Error | null = null;
     runtime.onTerminalError((error: Error) => {
@@ -93,7 +93,7 @@ describe('zero-progress connections never reset attempts', () => {
 
     replicationImpl = async () => makeFakeRep();
     runtime.resolveSlot = async () => ({ slot: 'test_slot', from: undefined });
-    // Every connection clean-ends without processing a single commit — run.attempts is only
+    // Every connection ends without processing a single commit — run.attempts is only
     // reset inside stream()'s commit branch, so a runtime whose connections never land a
     // commit must still exhaust RECONNECT_MAX_RETRIES and reach giveUp().
     runtime.stream = async () => {};

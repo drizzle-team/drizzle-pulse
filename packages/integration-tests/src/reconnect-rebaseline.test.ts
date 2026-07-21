@@ -11,7 +11,7 @@
  * reconnect round (which includes the live baseline SELECT) is still pending must defer the close
  * rather than tear the snapshot session down under the live read.
  *
- * Uses the same split URL configuration as copydone-reconnect.test.ts: the runtime's
+ * Uses a split URL configuration: the runtime's
  * `databaseUrl` (walsender + admin pool) routes through the test-only TCP proxy, `sourceDb`
  * stays on the direct connection.
  */

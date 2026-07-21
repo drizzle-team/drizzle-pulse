@@ -10,7 +10,7 @@ interface AdminForwardState {
  * Test-only loopback TCP proxy in front of Postgres, scoped to one runtime's walsender
  * connection. Classifies the active WAL connection by sniffing the StartupMessage for the
  * `replication` parameter (present only on the walsender, not the admin pool) so
- * injectCopyDone()/dropClient() always target the right socket even across reconnects.
+ * dropClient() always targets the right socket even across reconnects.
  */
 export function startWalProxy(targetHost: string, targetPort: number) {
   let activeClient: net.Socket | null = null;
@@ -140,9 +140,6 @@ export function startWalProxy(targetHost: string, targetPort: number) {
           resolve((server.address() as net.AddressInfo).port);
         });
       }),
-    injectCopyDone: (): void => {
-      activeClient?.write(Buffer.from([0x63, 0, 0, 0, 4]));
-    },
     dropClient: (): void => {
       activeClient?.destroy();
     },

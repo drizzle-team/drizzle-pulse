@@ -122,11 +122,10 @@ const WAL_LOG_PREFIX = '[WAL Listener] ';
 // a collection materialized after it just takes the watermark handshake.
 const BASELINE_SNAPSHOT_WINDOW_MS = 5000;
 
-// One connection lifecycle attempt: aborting closes the socket (the only way to stop a pending
-// minipg next() that is blocked waiting for the next WAL message and returns only when the
-// socket closes — see runReplicationLoop()) and wakes an in-progress backoff sleep. `attempts`
-// is the terminal-path test seam.
-type Run = { abort: AbortController; attempts: number };
+// One connection lifecycle attempt: aborting finishes the active stream cleanly (rep.start()'s
+// AbortSignal) and wakes an in-progress backoff sleep; `done` settles when the loop exits, so
+// stop() can await full teardown. `attempts` is the terminal-path test seam.
+type Run = { abort: AbortController; attempts: number; done?: Promise<void> };
 
 // A checked-out admin connection that keeps the slot recreate's exported snapshot open (via SET
 // TRANSACTION SNAPSHOT), so live embedded collections read their rebaseline from the exact point
@@ -517,7 +516,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       const run: Run = { abort: new AbortController(), attempts: 0 };
       this.run = run;
       const startupSettled = deferred<void>();
-      void this.runReplicationLoop(run, startupSettled);
+      run.done = this.runReplicationLoop(run, startupSettled);
       await startupSettled.promise;
     } catch (error) {
       // Mirrors stop()'s pool teardown so a failed guard doesn't leak connections — callers
@@ -541,7 +540,9 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
     const run = this.run;
     this.run = null;
-    run?.abort.abort(); // closes the socket via the replication loop's abort hook, wakes a backoff sleep
+    run?.abort.abort(); // finishes the active stream cleanly, wakes a backoff sleep
+    // No in-flight decode/persist survives past this line — the store below closes under no load.
+    await run?.done;
 
     await this.closeSnapshotSession();
 
@@ -825,13 +826,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
     while (!signal.aborted) {
       let rep: ReplicationConnection | undefined;
-      // A pending minipg next() is blocked waiting for the next WAL message and returns only
-      // when the socket closes — end() is the only thing that wakes it, so stop() must reach
-      // here via the abort signal, never by awaiting runReplicationLoop() itself.
-      const kill = () => rep?.end();
       try {
         rep = await replication({ url: this.config.databaseUrl });
-        signal.addEventListener('abort', kill);
 
         const { slot, from } = this.pullEnabled
           ? await this.resolveSlot(rep) // recovery lives INSIDE the try — never consumes a retry
@@ -848,6 +844,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
           statusIntervalMs: 1000,
           idleAck: true,
           messages: false,
+          // Abort = this run's own stop: the iterator finishes cleanly and the socket closes.
+          signal,
         });
 
         const round = hasConnectedBefore
@@ -862,12 +860,13 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         startupSettled.resolve();
         this.logInfo('Replication started');
 
-        await this.stream(rep, iterator, run); // returns on clean end too — falls into retry below
+        // A server-initiated end (CopyDone) throws ReplicationStreamEnded into the catch below;
+        // a clean return only follows this run's own abort.
+        await this.stream(rep, iterator, run);
       } catch (error) {
         if (signal.aborted) return;
         this.logError('Replication error:', error);
       } finally {
-        signal.removeEventListener('abort', kill);
         rep?.end();
       }
 
@@ -963,11 +962,6 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       temporary: false,
       snapshot: 'export',
     });
-    if (!snapshot) {
-      throw new Error(
-        `createSlot('${this.slotName}', { snapshot: 'export' }) returned no exported snapshot name`,
-      );
-    }
 
     await this.rotateAndSeedEvents(snapshot, consistentPoint);
 
@@ -1001,11 +995,6 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       snapshot: 'export',
     });
     if (this.reconnectListeners.size > 0) {
-      if (!snapshot) {
-        throw new Error(
-          `createSlot('${slot}', { snapshot: 'export' }) returned no exported snapshot name`,
-        );
-      }
       await this.openSnapshotSession(snapshot, consistentPoint);
     }
 
@@ -1195,8 +1184,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   }
 
   // One `tx` local per connection, so a reconnect can never observe a stale half-buffered
-  // transaction. A clean iterator end simply returns; the replication loop's tail supplies the
-  // reconnect.
+  // transaction. The iterator only ends cleanly on this run's own abort; every server-initiated
+  // end arrives as a throw and reconnects via the replication loop's tail.
   private async stream(
     rep: ReplicationConnection,
     iterator: AsyncGenerator<ReplicationEvent>,
@@ -1253,7 +1242,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         this.emitTap(pendingEvent, batch.commitLsn);
       }
 
-      // endLsn, never lsn — idleAck's gate tracks endLsn, and only after persist resolves.
+      // Only after persist resolves — acking earlier reopens the data-loss window this
+      // design closes. endLsn is the commit's ack target.
       rep.ack(event.endLsn);
     }
   }
@@ -1283,7 +1273,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       // null-renders the non-key columns of a 'key' tuple, indistinguishable from real SQL
       // nulls — so they're skipped loudly instead of emitted with fabricated nulls or silently
       // missing TOAST-omitted columns.
-      if (event.oldKind !== 'full' || !event.old) {
+      if (event.oldKind !== 'full') {
         this.logError(
           `Skipping ${event.kind} on ${tableQualifiedName}: old tuple is ${event.oldKind ?? 'absent'}, not full — this WAL predates the REPLICA IDENTITY FULL applied at boot`,
         );
