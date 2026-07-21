@@ -1,6 +1,6 @@
 /**
- * Integration proof: reconcile() self-provisions the publication for both pull modes.
- * PulseRuntime.provision() (the same reconcile path start() runs, minus the replication stream)
+ * Integration proof: bootstrap() self-provisions the publication for both pull modes.
+ * PulseRuntime.provision() (the same bootstrap path start() runs, minus the replication stream)
  * creates the publication owning exactly the registered sources and keeps its membership in
  * sync (adding new sources, un-pulsing removed ones). REPLICA IDENTITY handling is mode-
  * independent: FULL is forced on every registered source, restored after drift, and reset to
@@ -35,7 +35,7 @@ type Scenario = {
 };
 
 // Creates a fresh database with the orders + extras source tables but NO publication and NO
-// replica identity — reconcile() must self-provision both.
+// replica identity — bootstrap() must self-provision both.
 async function setupBareScenario(label: string): Promise<Scenario> {
   const scenario = await createScenarioDb(`pulse_pub_${label}`, {
     ddl: BARE_ORDERS_AND_EXTRAS_DDL,
@@ -85,7 +85,7 @@ async function replicaIdentity(sql: Scenario['sql'], table: string): Promise<str
   return rows[0]?.relreplident;
 }
 
-describe('reconcile publication + replica identity self-provisioning', () => {
+describe('bootstrap: publication + replica identity self-provisioning', () => {
   test('fresh provision() creates the publication with exact membership and RI FULL', async () => {
     const s = await setupBareScenario('fresh');
     const pubName = 'pulse_pub_fresh';

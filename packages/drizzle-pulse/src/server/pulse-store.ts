@@ -7,13 +7,13 @@ import type { PendingWalEvent } from './pulse-runtime.js';
 type DbHandle = ReturnType<typeof drizzle>;
 type TxHandle = Parameters<Parameters<DbHandle['transaction']>[0]>[0];
 
-// Drizzle objects for the two bookkeeping tables reconcile() creates in the events schema, so
+// Drizzle objects for the two bookkeeping tables bootstrap() creates in the events schema, so
 // their DML runs through the query builder. The raw CREATE TABLE IF NOT EXISTS statements in
-// reconcile() must keep producing the identical column definitions declared here.
+// bootstrap() must keep producing the identical column definitions declared here.
 function buildMetaTables(eventsSchema: string) {
   const schema = pgSchema(eventsSchema);
   return {
-    // One row per events table: the DDL hash reconcile() compares against, plus the epoch that
+    // One row per events table: the DDL hash bootstrap() compares against, plus the epoch that
     // rotates on every recreate.
     pulseMeta: schema.table('pulse_meta', {
       tableName: text('table_name').primaryKey(),

@@ -29,14 +29,14 @@ describe('wal config resolution', () => {
 });
 
 describe('start() failure rolls back to a restartable state', () => {
-  test('a throw from reconcile() resets isRunning and tears down the store instead of leaving a zombie', async () => {
+  test('a throw from bootstrap() resets isRunning and tears down the store instead of leaving a zombie', async () => {
     const runtime = makePulseRuntime({
       databaseUrl: 'postgresql://user:pass@localhost/test',
     }) as any;
 
     // Baseline seeding moved inside the replication loop's connect (resolveSlot's resume branch) —
     // a failure there now becomes a replication-loop retry, not a start()
-    // rejection. reconcile() is the only await left in start()'s try block before the guard
+    // rejection. bootstrap() is the only await left in start()'s try block before the guard
     // resolves, so it's the seam that must throw to exercise the rollback path.
     let storeEnded = 0;
     runtime.store = {
@@ -44,7 +44,7 @@ describe('start() failure rolls back to a restartable state', () => {
         storeEnded++;
       },
     };
-    runtime.reconcile = async () => {
+    runtime.bootstrap = async () => {
       throw new Error('sourceDb briefly unavailable');
     };
 
@@ -55,9 +55,9 @@ describe('start() failure rolls back to a restartable state', () => {
     expect(storeEnded).toBe(1);
 
     // A retry must not hit the "Already running" early return and silently no-op — it
-    // must re-attempt reconcile() and actually start the replication loop.
+    // must re-attempt bootstrap() and actually start the replication loop.
     let secondAttemptRan = false;
-    runtime.reconcile = async () => {
+    runtime.bootstrap = async () => {
       secondAttemptRan = true;
     };
     runtime.runReplicationLoop = async (_run: unknown, startupSettled: { resolve: () => void }) => {

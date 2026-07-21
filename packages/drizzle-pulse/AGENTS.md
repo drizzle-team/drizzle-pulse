@@ -5,7 +5,7 @@
 Type-safe Pulse SDK shared by server, client, React, and embedded layers.
 
 - root side: `pulse`, `PulseTable` — the collection entity, exported once per table from schema files
-- server side: `PulseBuilder` (seeded via `PulseTable.query(fn?)`), `createPulseRegistry`, `PulseRuntime`, the transport-agnostic request handler (SDK), and the events-table machinery (`buildEventsTable` resolver + internal DDL renderer + `reconcile`/`provision`)
+- server side: `PulseBuilder` (seeded via `PulseTable.query(fn?)`), `createPulseRegistry`, `PulseRuntime`, the transport-agnostic request handler (SDK), and the events-table machinery (`buildEventsTable` resolver + internal DDL renderer + `bootstrap`/`provision`)
 - server/hono side: `createPulseHonoRouter` — an optional Hono wrapper over the SDK on the `./server/hono` subpath
 - client side: `createPulseClient`, `PulseQuery` (over a pluggable transport)
 - React side: `usePulseQuery`
@@ -39,26 +39,26 @@ platform-imports purity test).
 | `src/client/pulse-query.ts` | framework-agnostic subscribe/poll/load-more state machine (`PulseQuery`); `destroy()` stops polling — the client holds no server-side state to release |
 | `src/client/superjson.ts` | response deserialization helper |
 | `src/client/react/use-pulse-query.ts` | `usePulseQuery` wrapper around `PulseQuery` |
-| `src/client/embedded/index.ts` | in-process embedded client: `createPulseClient(runtime)` → `PulseCollection` facade (`list`/`onChange`/`onError`/`dispose`) fed tap-direct — a full-set `PulseMergeCore` rebuilt from `runtime.readCollectionBaseline` and kept live by `runtime.walEventEmitter`, reconciled through an LSN watermark handshake (no events table, no wire protocol); re-exports `createPulseEvents` |
+| `src/client/embedded/index.ts` | in-process embedded client: `createPulseClient(runtime)` → `PulseCollection` facade (`list`/`onChange`/`onError`/`dispose`) fed tap-direct — a full-set `PulseMergeCore` rebuilt from `runtime.readCollectionBaseline` and kept live by the runtime tap (`subscribeTap`), converged through an LSN watermark handshake (no events table, no wire protocol); re-exports `createPulseEvents` |
 | `src/client/embedded/tap-events.ts` | `buildTapEvent(payload, query)`: the single WAL-tap-payload → `PulseEvent` builder shared by collections and `createPulseEvents` (WHERE-filters every op against the full old/new rows; an update leaving the filter is delivered with the row redacted to pk-only; value-imports only `shared/`) |
 | `src/client/embedded/events.ts` | `createPulseEvents(runtime)` → stateless per-event subscription: WHERE-filtered events with `matchesNew` on updates, `(event, lsn)` callback, no baseline, no merge core, no per-subscription error surface |
 | `src/server/pulse-builder.ts` | immutable query builder (`.columns/.args/.order/.limit/.transform/.query`), seeded by `PulseTable.query(fn?)` |
 | `src/server/pulse-registry.ts` | registry finalization + `$client` phantom contract; queries must be `.query()` builder chains — a bare `PulseTable` is a compile-time type error via `AnyPulseBuilders`, not a runtime rejection; defensive composite-PK re-check |
 | `src/server/pulse-projection.ts` | projection/response-shaping helpers split out to preserve platform purity for the embedded client entrypoint |
 | `src/server/events-table-resolver.ts` | convention resolver: synthesizes the events `PgTable` (`<schema>_<table>`, `_` escaped to `__`) from a source table by cloning each column via its public `toBuilder()` |
-| `src/server/events-table-ddl.ts` | internal `emitEventsTableDdl`: renders the recreate DDL (`CREATE SCHEMA`/`DROP TABLE`/`CREATE TABLE`) strictly from the resolver's output; `reconcile()` hashes its text to detect divergence (not a public export) |
+| `src/server/events-table-ddl.ts` | internal `emitEventsTableDdl`: renders the recreate DDL (`CREATE SCHEMA`/`DROP TABLE`/`CREATE TABLE`) strictly from the resolver's output; `bootstrap()` hashes its text to detect divergence (not a public export) |
 | `src/server/cursor.ts` | opaque cursor tokens `"<epoch>:<snapshot>"` — `formatCursor`/`parseCursor`; epoch rotates on events-table recreate so stale tokens are detectable |
 | `src/server/pulse-sql.ts` | query compilation / row predicate evaluation |
 | `src/server/sdk.ts` | `PulseRequestHandler` — the transport-agnostic SDK core: subscribe/pull/loadMore, cursor-token mint/validate, `DEFAULT_PULL_EVENT_LIMIT` overflow→reset. Stateless: auth re-resolved per pull, no subscription registry |
 | `src/server/hono.ts` | `createPulseHonoRouter` — optional Hono wrapper over the SDK's three routes (`/subscribe`, `/pull`, `/load-more`); superjson-encoded responses; `./server/hono` subpath |
-| `src/server/pulse-runtime.ts` | `PulseRuntime` assembly, `PulseRuntimeConfig` (publication/slot default `drizzle_pulse`, `eventsSchema`, `pullEventLimit`, `logLevel`), `reconcile()` self-provisioning + `provision()`, WAL listener lifecycle |
+| `src/server/pulse-runtime.ts` | `PulseRuntime` assembly, `PulseRuntimeConfig` (publication/slot default `drizzle_pulse`, `eventsSchema`, `pullEventLimit`, `logLevel`), `bootstrap()` self-provisioning + `provision()`, WAL listener lifecycle |
 | `src/server/pulse-store.ts` | `PulseStore` — events-table reads/writes over the pulse-owned pool |
 | `src/__tests__/` | runtime/unit tests for SDK internals |
 
-## Provisioning (reconcile / provision)
+## Provisioning (bootstrap / provision)
 
 The runtime **self-provisions all its infrastructure** — the app no longer migrates events
-tables. `PulseRuntime.reconcile()` runs inside one transaction under a per-events-schema
+tables. `PulseRuntime.bootstrap()` runs inside one transaction under a per-events-schema
 advisory lock and: asserts `wal_level=logical` (the one precondition it can't fix), creates/diffs
 the publication (independent of pull mode), creates the events schema + `pulse_meta` bookkeeping,
 creates/recreates each events table whose rendered-DDL sha256 diverges (rotating its epoch), and
@@ -87,8 +87,8 @@ Server (derive queries outside the schema file):
   new PulseRuntime(registry, config)
     → resolves each source table's events table via buildEventsTable (no hand-declared
       events tables)
-    → start() runs reconcile() (self-provision), then connects WAL
-    → provision() runs reconcile() only (no WAL) — for elevated-role deploy steps
+    → start() runs bootstrap() (self-provision), then connects WAL
+    → provision() runs bootstrap() only (no WAL) — for elevated-role deploy steps
 
   runtime.handlers → transport-agnostic SDK (subscribe/pull/loadMore)
   createPulseHonoRouter(runtime.handlers)  [optional Hono wrapper, ./server/hono]

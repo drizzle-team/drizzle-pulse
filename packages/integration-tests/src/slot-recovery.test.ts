@@ -5,7 +5,7 @@
  * seeding, and gaplessly re-baselining any live embedded collection anchored at the same snapshot.
  *
  * Each scenario builds its own standalone ephemeral database (bare `orders` table only —
- * reconcile() self-provisions the publication + REPLICA IDENTITY FULL + events schema exactly
+ * bootstrap() self-provisions the publication + REPLICA IDENTITY FULL + events schema exactly
  * as it does under normal boot) so parallel runs cannot collide, and tears itself down in a
  * `finally` block.
  */
@@ -208,7 +208,7 @@ describe('Slot recovery: backfill/resume auto-heal', () => {
     let epochBefore: string | undefined;
 
     try {
-      // reconcile() (which sets pulse_meta's initial epoch) completes inside start() before it
+      // bootstrap() (which sets pulse_meta's initial epoch) completes inside start() before it
       // resolves — the epoch is already readable here, no poll needed.
       await first.runtime.start();
       epochBefore = await eventsTableEpoch(sql);

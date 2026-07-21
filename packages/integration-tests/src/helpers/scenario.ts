@@ -12,7 +12,7 @@ export { waitFor };
 
 /**
  * Bare orders table shared by the standalone suites — no publication, no replica identity, no
- * events schema. startup-guard/reconcile/reconcile-publication/pull-false assert self-
+ * events schema. startup-guard/bootstrap/bootstrap-publication/pull-false assert self-
  * provisioning of those from exactly this precondition, so this DDL is a constant rather than
  * routed through the fixture migration runner (whose wal-setup migration provisions both up
  * front, defeating the self-provisioning preconditions).

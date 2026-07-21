@@ -1,14 +1,14 @@
 /**
- * Integration proof: PulseRuntime's boot reconciliation against real Postgres, through the full
+ * Integration proof: PulseRuntime's boot-time provisioning against real Postgres, through the full
  * start() path (WAL stream and all). All scenarios below run pull:true.
  *
- * Most preconditions the guard once only asserted are now self-provisioned inside reconcile():
+ * Most preconditions the guard once only asserted are now self-provisioned inside bootstrap():
  * a missing publication is created, a missing member is added, and (pull:true only) a
  * source without REPLICA IDENTITY FULL is altered. These scenarios prove start() heals a
  * bare/partial setup and then boots. wal_level stays the one precondition boot rejects on rather
  * than fixing (the runtime can't change a server-wide setting), but it can't be toggled on the
  * shared test server, so it has
- * no live case here. Finer membership/RI coverage lives in reconcile-publication.test.ts
+ * no live case here. Finer membership/RI coverage lives in bootstrap-publication.test.ts
  * (provision() path, both pull modes). Each scenario gets its own randomly-named
  * database/publication/slot and tears itself down in a `finally` block.
  */
@@ -29,7 +29,7 @@ type GuardScenarioContext = {
 };
 
 // The `orders` source table is provisioned by createScenarioDb's default DDL — deliberately
-// absent: the publication AND REPLICA IDENTITY FULL, which reconcile() self-provisions.
+// absent: the publication AND REPLICA IDENTITY FULL, which bootstrap() self-provisions.
 async function setupGuardScenario(scenario: string): Promise<GuardScenarioContext> {
   const s = await createScenarioDb(`pulse_guard_${scenario}`);
   return { databaseUrl: s.databaseUrl, sql: s.sql, drop: s.drop };
@@ -63,7 +63,7 @@ async function ordersReplicaIdentity(
   return rows[0]?.relreplident;
 }
 
-describe('Startup reconcile (self-provisioning)', () => {
+describe('Startup bootstrap (self-provisioning)', () => {
   test('(a) bare database: start() self-provisions the publication + REPLICA IDENTITY, then boots', async () => {
     const ctx = await setupGuardScenario('a');
     const publicationName = `guard_pub_a_${randomSuffix()}`;
@@ -99,7 +99,7 @@ describe('Startup reconcile (self-provisioning)', () => {
 
     try {
       // No wal config supplied — proves the default publication name (drizzle_pulse) flows all
-      // the way into the CREATE PUBLICATION reconcile() runs. provision() avoids slot setup.
+      // the way into the CREATE PUBLICATION bootstrap() runs. provision() avoids slot setup.
 
       const registry = createPulseRegistry({ orders: pulse(orders).query() });
       const runtime = new PulseRuntime(registry, {
@@ -168,7 +168,7 @@ describe('Startup reconcile (self-provisioning)', () => {
       await setReplicaIdentityFull(ctx.sql);
       await ctx.sql.unsafe('CREATE TABLE "users" ("id" serial PRIMARY KEY)');
       // A FOR TABLE publication missing the pulsed table but carrying an unregistered one.
-      // pulse owns the publication: reconcile() ADDs orders and un-pulses (DROPs) users.
+      // pulse owns the publication: bootstrap() ADDs orders and un-pulses (DROPs) users.
       await ctx.sql.unsafe(`CREATE PUBLICATION ${publicationName} FOR TABLE "users"`);
 
       const registry = createPulseRegistry({ orders: pulse(orders).query() });

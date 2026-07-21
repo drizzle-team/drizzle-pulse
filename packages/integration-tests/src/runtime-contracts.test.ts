@@ -203,7 +203,7 @@ describe('Runtime Contracts', () => {
   test('a token minted against a since-recreated events table resets on epoch mismatch', async () => {
     const stale = await subscribeClient(router, 'ordersByStatus', { status: 'requested' });
 
-    // Bounce the runtime: teardown drops the DB, setup reconciles a fresh events table and
+    // Bounce the runtime: teardown drops the DB, setup provisions a fresh events table and
     // rotates its epoch — so `stale.token`'s epoch no longer matches. `suite` is reassigned to
     // the new context before this test returns; if setup below throws, `suite` still points at
     // the already-torn-down context, and afterAll's teardown() call on it must be a no-op.

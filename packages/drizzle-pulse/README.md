@@ -97,7 +97,7 @@ Derive queries from collections outside the schema file, register them, and expo
 - `createPulseRegistry(queries)` — collects builders into a `PulseRegistry`; queries must be `.query()` builder chains — passing a bare `PulseTable` is a compile-time type error via the `AnyPulseBuilders` constraint, not a runtime rejection
 - `new PulseRuntime(registry, config)` — call `.start()` to self-provision infrastructure and connect WAL, `runtime.handlers.{subscribe,pull,loadMore}` to serve requests
 - `PulseRuntime` — WAL listener + request handlers; `.start()` / `.stop()`. The server is stateless: each pull re-resolves auth and validates its own opaque cursor token, so there's no per-subscription server state, no TTL, and no `unsubscribe` — a client simply stops pulling.
-- `PulseRuntime.provision()` — runs the same infrastructure reconciliation as `.start()` without opening the WAL stream, for split-role deploys (see "Provisioning & privileges" below)
+- `PulseRuntime.provision()` — runs the same infrastructure bootstrap as `.start()` without opening the WAL stream, for split-role deploys (see "Provisioning & privileges" below)
 
 ```ts
 import { pulse } from 'drizzle-pulse';
@@ -119,11 +119,11 @@ await runtime.start();
 Every pulsed source table gets a matching **events table** — WAL changes are persisted there and replayed to clients. Events tables are runtime-owned infrastructure, resolved entirely by convention (no hand-declared Drizzle table, no `.$eventsTable()` linkage, no drizzle-kit migration):
 
 - **Location:** `<eventsSchema>.<sourceSchema>_<sourceTable>`, with each component's `_` doubled to `__` before joining — `eventsSchema` defaults to `'drizzle_pulse'` (override via `PulseRuntime`'s `eventsSchema` option)
-- **Self-provisioning:** `runtime.start()` reconciles everything itself inside one advisory-locked transaction — creates the events schema, the events tables and their `pulse_meta` bookkeeping, the publication (plus membership diff), and sets `REPLICA IDENTITY FULL` on each registered source (resetting it to `DEFAULT` on un-pulse). Full old tuples are what every update/delete decodes from, in both pull modes — the runtime never reads old-row data back from your tables. An events table is recreated when the sha256 of its rendered DDL diverges (a source-column change), which rotates a per-table epoch so stale client cursors reset. `wal_level = logical` is the one precondition the runtime can't fix — it stays a fail-fast assert.
+- **Self-provisioning:** `runtime.start()` provisions everything itself inside one advisory-locked transaction — creates the events schema, the events tables and their `pulse_meta` bookkeeping, the publication (plus membership diff), and sets `REPLICA IDENTITY FULL` on each registered source (resetting it to `DEFAULT` on un-pulse). Full old tuples are what every update/delete decodes from, in both pull modes — the runtime never reads old-row data back from your tables. An events table is recreated when the sha256 of its rendered DDL diverges (a source-column change), which rotates a per-table epoch so stale client cursors reset. `wal_level = logical` is the one precondition the runtime can't fix — it stays a fail-fast assert.
 
 **Stateless-feed WHERE gating for updates/deletes:** `createPulseEvents` evaluates the query's `WHERE` against both the old and new row (the full old tuple makes that always possible). An event neither side matches is suppressed; an update whose old row matched but new row doesn't is delivered with the row redacted to pk-only, so a subscriber's materialized collection can remove the row via pk membership without leaking out-of-scope column data.
 
-See [`docs/events-table-convention.md`](../../docs/events-table-convention.md) for the full name-derivation, column-mapping, and reconcile contract.
+See [`docs/events-table-convention.md`](../../docs/events-table-convention.md) for the full name-derivation, column-mapping, and bootstrap contract.
 
 ### `drizzle.config` — exclude the pulse schema
 
@@ -141,7 +141,7 @@ export default defineConfig({
 
 By default the app's own role owns its tables and can `CREATE`, so `runtime.start()` self-provisions everything on first boot and no-ops on later boots. A failed self-provisioning statement throws with the exact statement and the grant it most likely needs (e.g. *ownership of `public.orders`*, *the database `CREATE` privilege*).
 
-For split-role deploys where the app role is deliberately unprivileged, call `runtime.provision()` once from a migration/deploy step under an elevated role — it runs the same reconciliation without opening the WAL stream, and the app's later `start()` then no-ops the DDL. The reconcile role needs ownership of each pulsed source table, the database `CREATE` privilege, and (once it exists) ownership of the publication; the WAL streaming connection additionally needs the `REPLICATION` attribute.
+For split-role deploys where the app role is deliberately unprivileged, call `runtime.provision()` once from a migration/deploy step under an elevated role — it runs the same bootstrap without opening the WAL stream, and the app's later `start()` then no-ops the DDL. The provisioning role needs ownership of each pulsed source table, the database `CREATE` privilege, and (once it exists) ownership of the publication; the WAL streaming connection additionally needs the `REPLICATION` attribute.
 
 ## `drizzle-pulse/server/hono`
 

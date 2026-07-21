@@ -1,6 +1,6 @@
 /**
  * Integration proof: runtime-owned events-table DDL. PulseRuntime.provision() (the same
- * reconcile path start() runs, minus the replication stream) creates/recreates events tables
+ * bootstrap path start() runs, minus the replication stream) creates/recreates events tables
  * and their pulse_meta bookkeeping against real Postgres, rotating an epoch on every recreate
  * and sweeping orphans. Each scenario builds its own healthy standalone database per the
  * test-isolation convention and tears itself down in a finally block.
@@ -16,9 +16,9 @@ import { createScenarioDb, waitFor } from './helpers/scenario.js';
 import { withQuietPostgresUrl } from './helpers/test-harness.js';
 
 async function setupHealthyScenario(label: string, logLevel: LogLevel = LogLevel.Error) {
-  const scenario = await createScenarioDb(`pulse_reconcile_${label}`);
+  const scenario = await createScenarioDb(`pulse_bootstrap_${label}`);
   await scenario.sql.unsafe('ALTER TABLE "orders" REPLICA IDENTITY FULL');
-  await scenario.sql.unsafe(`CREATE PUBLICATION reconcile_pub_${label} FOR ALL TABLES`);
+  await scenario.sql.unsafe(`CREATE PUBLICATION bootstrap_pub_${label} FOR ALL TABLES`);
 
   const sourceSql = postgres(withQuietPostgresUrl(scenario.databaseUrl));
   const registry = createPulseRegistry({ orders: pulse(orders).query() });
@@ -26,7 +26,7 @@ async function setupHealthyScenario(label: string, logLevel: LogLevel = LogLevel
     databaseUrl: scenario.databaseUrl,
     sourceDb: drizzle({ client: sourceSql }),
     pull: true,
-    wal: { publicationName: `reconcile_pub_${label}`, slotName: `reconcile_slot_${label}` },
+    wal: { publicationName: `bootstrap_pub_${label}`, slotName: `bootstrap_slot_${label}` },
     logLevel,
   });
 
@@ -56,7 +56,7 @@ async function metaEpoch(sql: HealthyScenario['sql']): Promise<string | undefine
 
 // Poll-retry a slot drop (cloned from slot-recovery.test.ts): the previous owning backend's
 // "active" flag can lag its actual termination by a beat, so a single attempt can spuriously
-// hit 55006 (object_in_use). Reconcile scenarios never created a persistent slot before (only
+// hit 55006 (object_in_use). Bootstrap scenarios never created a persistent slot before (only
 // provision() was exercised) — a full start() does, and the DDL-divergence scenario must drop it or leak against the
 // shared container's 4-slot budget.
 async function dropSlotWithRetry(sql: HealthyScenario['sql'], slotName: string): Promise<void> {
@@ -110,7 +110,7 @@ async function nonSnapshotEventCount(sql: HealthyScenario['sql']): Promise<numbe
 // confirmed_flush_lsn (the transaction's end LSN, always strictly greater after a normal ack) —
 // unreachable via ordinary stop/restart once any commit has landed. Seeding the watermark to the
 // observed confirmed_flush_lsn reproduces the precondition deterministically, isolating the
-// reconcile()-level DDL-divergence recreate this test targets from the separate (and here
+// bootstrap()-level DDL-divergence recreate this test targets from the separate (and here
 // irrelevant) question of whether the slot itself gets recreated. No production code changes.
 async function seedContinuousWatermark(
   sql: HealthyScenario['sql'],
@@ -145,13 +145,13 @@ function buildSecondRuntime(
     databaseUrl,
     sourceDb: drizzle({ client: sourceSql }),
     pull: true,
-    wal: { publicationName: `reconcile_pub_${label}`, slotName: `reconcile_slot_${label}` },
+    wal: { publicationName: `bootstrap_pub_${label}`, slotName: `bootstrap_slot_${label}` },
     logLevel,
   });
   return { runtime, sourceSql };
 }
 
-describe('runtime-owned events-table reconcile', () => {
+describe('runtime-owned events-table bootstrap', () => {
   test('fresh provision() creates the schema, events table, and a pulse_meta row', async () => {
     const s = await setupHealthyScenario('fresh');
     try {
@@ -259,14 +259,14 @@ describe('runtime-owned events-table reconcile', () => {
   test('DDL divergence at boot with an intact slot: start() recreates, reseeds via ensureBaselines, resumes the slot, and streams', async () => {
     const label = 'g6full';
     const s = await setupHealthyScenario(label);
-    const slotName = `reconcile_slot_${label}`;
+    const slotName = `bootstrap_slot_${label}`;
 
     let epoch1: string | undefined;
     let lsn1: string | undefined;
 
     try {
       try {
-        // Full boot: reconcile() provisions, then connectReplication() creates the persistent
+        // Full boot: bootstrap() provisions, then connectReplication() creates the persistent
         // slot (unlike the provision()-only tests above, which never open a replication stream).
         await s.runtime.start();
 
@@ -284,7 +284,7 @@ describe('runtime-owned events-table reconcile', () => {
         await s.runtime.stop();
       }
 
-      // Corrupt the stored hash exactly as the divergence test above does, forcing reconcile()
+      // Corrupt the stored hash exactly as the divergence test above does, forcing bootstrap()
       // to recreate the events table and rotate the epoch on the next boot.
       await s.sql.unsafe(
         `UPDATE drizzle_pulse.pulse_meta SET ddl_hash = 'stale' WHERE table_name = 'public_orders'`,
@@ -293,7 +293,7 @@ describe('runtime-owned events-table reconcile', () => {
       // See seedContinuousWatermark's DISCOVERY comment: closes the structural
       // watermark-vs-confirmed_flush gap so resolveSlotStartup's continuity precondition
       // actually holds — this test's "slot resumed, not recreated" assertion needs the real
-      // resume branch, isolated from the reconcile()-level recreate it targets.
+      // resume branch, isolated from the bootstrap()-level recreate it targets.
       lsn1 = await seedContinuousWatermark(s.sql, slotName);
 
       const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
@@ -301,14 +301,14 @@ describe('runtime-owned events-table reconcile', () => {
       try {
         await second.runtime.start();
 
-        // Epoch rotated exactly once by reconcile()'s DDL-divergence recreate.
+        // Epoch rotated exactly once by bootstrap()'s DDL-divergence recreate.
         const epoch2 = await metaEpoch(s.sql);
         expect(epoch2).toBeDefined();
         expect(epoch2).not.toBe(epoch1);
         expect(second.runtime.getEpochForQuery('orders')).toBe(epoch2);
 
         // The recreated table holds ensureBaselines' snapshot seed and none of the
-        // pre-divergence event rows (TRUNCATEd by reconcile()'s recreate).
+        // pre-divergence event rows (TRUNCATEd by bootstrap()'s recreate).
         expect(await snapshotRowCount(s.sql)).toBeGreaterThanOrEqual(1);
         expect(await nonSnapshotEventCount(s.sql)).toBe(0);
 

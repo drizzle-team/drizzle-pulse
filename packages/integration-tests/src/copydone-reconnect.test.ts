@@ -54,7 +54,7 @@ describe('CopyDone reconnect', () => {
     const proxy = startWalProxy(base.hostname, Number(base.port));
     const proxyPort = await proxy.listen();
 
-    // Deliberately absent: the publication AND REPLICA IDENTITY FULL — reconcile() self-
+    // Deliberately absent: the publication AND REPLICA IDENTITY FULL — bootstrap() self-
     // provisions both at boot, same as every other self-managed scenario in this suite.
     const scenario = await createScenarioDb('pulse_copydone_g3');
     const publicationName = `copydone_pub_${randomSuffix()}`;

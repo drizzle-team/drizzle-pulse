@@ -5,7 +5,7 @@
  * randomized suffix so a crashed process can never leak WAL-retaining slot state.
  * REPLICA IDENTITY FULL and the publication are both self-provisioned, same as pull:true.
  * Each scenario builds its own standalone database (bare — no pre-existing publication) so
- * reconcile()'s self-provisioning of the WAL prerequisites is exercised, and tears itself
+ * bootstrap()'s self-provisioning of the WAL prerequisites is exercised, and tears itself
  * down in a `finally` block.
  */
 
@@ -30,7 +30,7 @@ function buildRegistry() {
 
 async function setupPullFalseScenario(label: string) {
   const scenario = await createScenarioDb(`pulse_pullfalse_${label}`);
-  // Deliberately absent: the publication — reconcile() still self-provisions it under
+  // Deliberately absent: the publication — bootstrap() still self-provisions it under
   // pull:false (embedded needs WAL), along with REPLICA IDENTITY FULL on each source.
   const publicationName = `pullfalse_pub_${label}`;
   const slotName = `pullfalse_slot_${label}`;
@@ -143,7 +143,7 @@ describe('pull: false — embedded-only runtime writes nothing to events tables'
       await s.runtime.start();
 
       // The delete below is gated on the collection's WHERE evaluated against the full old
-      // tuple — reconcile() must have forced FULL for that evaluation to see `status`.
+      // tuple — bootstrap() must have forced FULL for that evaluation to see `status`.
       const replicaIdentity = await s.sql.unsafe<{ relreplident: string }[]>(
         `SELECT relreplident FROM pg_class WHERE relname = 'orders'`,
       );

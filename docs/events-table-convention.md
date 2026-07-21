@@ -6,7 +6,7 @@ This document pins the naming and column-derivation contract for the events tabl
 The events tables and all their bookkeeping are **runtime-owned**: the runtime provisions
 them itself at boot (or ahead of boot via `provision()`) — drizzle-kit is not involved and
 generates no migrations for them. Sections 1–4 fix the derived shape; sections 5–8 cover how
-the runtime reconciles that shape against the live database, the privileges it needs, and how
+the runtime brings that shape in line with the live database, the privileges it needs, and how
 to keep drizzle-kit from touching the pulse schema.
 
 The normative shape is produced by
@@ -211,13 +211,13 @@ three, so it can overflow even when the events table name itself fits.
 **This is a hard failure, not a warning.** There is no deterministic truncation or
 shortening scheme yet — an events table (or column) whose derived name overflows 63 bytes
 cannot be created at all until a shortening scheme ships. Both `buildEventsTable` and the
-DDL renderer that feeds `reconcile()` derive from these same identifiers, so the guard fires
+DDL renderer that feeds `bootstrap()` derive from these same identifiers, so the guard fires
 before any statement reaches Postgres.
 
-## 5. Runtime provisioning & reconcile
+## 5. Runtime provisioning & bootstrap
 
 Nothing outside the runtime creates or migrates these tables. On `PulseRuntime.start()`
-— and, identically, on `provision()` (section 5.5) — the runtime runs `reconcile()`
+— and, identically, on `provision()` (section 5.5) — the runtime runs `bootstrap()`
 ([`pulse-runtime.ts`](../packages/drizzle-pulse/src/server/pulse-runtime.ts)): one transaction, guarded by a
 `pg_advisory_xact_lock` keyed on the events schema so two booting runtimes can't race the same
 DDL. In that transaction it, in order:
@@ -257,7 +257,7 @@ the recreate check (5.2) and the orphan sweep (5.4) both read from it.
 The runtime renders each events table's DDL to a fixed string —
 `CREATE SCHEMA IF NOT EXISTS`, `DROP TABLE IF EXISTS`, `CREATE TABLE` — with
 `emitEventsTableDdl` ([`events-table-ddl.ts`](../packages/drizzle-pulse/src/server/events-table-ddl.ts)),
-derived strictly from `buildEventsTable`'s output, and hashes it with sha256. On reconcile:
+derived strictly from `buildEventsTable`'s output, and hashes it with sha256. On bootstrap:
 
 - if the `pulse_meta` row exists, its `ddl_hash` matches, and the physical table is present →
   no-op (the epoch is retained);
@@ -284,7 +284,7 @@ The same reset path covers the per-pull event cap: a pull that would replay more
 
 ### 5.4 Orphan policy
 
-After reconciling the desired set, the runtime sweeps the events schema:
+After provisioning the desired set, the runtime sweeps the events schema:
 
 - a `pulse_meta` row with no matching registered source → its table is dropped and its row
   deleted (a table pulse used to own but no longer does);
@@ -302,9 +302,9 @@ most likely needs (e.g. *ownership of `public.orders`*, *the database `CREATE` p
 
 For split-role deployments where the app role is deliberately unprivileged, call
 `PulseRuntime.provision()` once from a migration/deploy step under an elevated role: it runs
-the same `reconcile()` over a short-lived admin connection and returns without opening the WAL
+the same `bootstrap()` over a short-lived admin connection and returns without opening the WAL
 stream. The app's later `start()` then finds everything in place and no-ops the DDL. The
-reconcile role needs, across the statements it may run:
+provisioning role needs, across the statements it may run:
 
 - **ownership of each pulsed source table** — for `REPLICA IDENTITY FULL` / `DEFAULT`;
 - **the database `CREATE` privilege** — for `CREATE PUBLICATION` and `CREATE SCHEMA`;
@@ -338,7 +338,7 @@ live subscriber's snapshot is a straightforward future addition and needs no sch
   reconstruction (reusing each source column's own `mapToDriverValue`/`mapFromDriverValue`) is
   part of this contract, not an implementation detail.
 - [`events-table-ddl.ts`](../packages/drizzle-pulse/src/server/events-table-ddl.ts) renders the
-  recreate DDL strictly from `buildEventsTable`'s output; its joined text is the string `reconcile()`
+  recreate DDL strictly from `buildEventsTable`'s output; its joined text is the string `bootstrap()`
   hashes to detect divergence (section 5.2). It is internal to the package (not a public export).
 - Unit tests over the full edge-case type matrix live in
   [`events-table-resolver.test.ts`](../packages/drizzle-pulse/src/__tests__/events-table-resolver.test.ts),

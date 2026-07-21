@@ -5,7 +5,7 @@
  * always carries the full old tuple.
  *
  * Each scenario builds its own standalone ephemeral database (bare `orders` table only —
- * reconcile() self-provisions the publication and REPLICA IDENTITY FULL, exactly as it does
+ * bootstrap() self-provisions the publication and REPLICA IDENTITY FULL, exactly as it does
  * under normal boot) so it cannot collide with other suites, and tears itself down in a
  * `finally` block.
  */

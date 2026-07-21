@@ -312,7 +312,7 @@ export async function setupTestSuiteForFixture<
   const testPool = createQuietPostgresClient(databaseUrl);
 
   // Events tables (and their pulse_meta bookkeeping) are runtime-owned: the migrations set up
-  // the source table + publication + replica identity, and runtime.start() below reconciles
+  // the source table + publication + replica identity, and runtime.start() below provisions
   // the events tables at boot.
   await applyFixtureMigrations(databaseUrl, fixture.migrationsPath);
 

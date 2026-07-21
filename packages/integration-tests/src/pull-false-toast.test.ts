@@ -57,7 +57,7 @@ const LOCAL_ORDERS_DDL = `
 
 async function setupScenario(label: string) {
   const scenario = await createScenarioDb(`pulse_toastfalse_${label}`, { ddl: LOCAL_ORDERS_DDL });
-  // Deliberately absent: the publication — reconcile() self-provisions it under pull:false,
+  // Deliberately absent: the publication — bootstrap() self-provisions it under pull:false,
   // along with REPLICA IDENTITY FULL (the source of every old tuple the tap decodes).
   const publicationName = `toastfalse_pub_${label}`;
   const slotName = `toastfalse_slot_${label}`;
@@ -109,7 +109,7 @@ describe('pull: false — TOAST-omitted column carry-forward', () => {
     try {
       await s.runtime.start();
 
-      // The carry-forward below rides on the FULL old tuple — prove reconcile() forced it.
+      // The carry-forward below rides on the FULL old tuple — prove bootstrap() forced it.
       const replicaIdentity = await s.sql.unsafe<{ relreplident: string }[]>(
         `SELECT relreplident FROM pg_class WHERE relname = 'orders'`,
       );

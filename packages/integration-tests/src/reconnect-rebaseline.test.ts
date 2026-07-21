@@ -82,7 +82,7 @@ describe('Reconnect rebaseline', () => {
     const proxy = startWalProxy(base.hostname, Number(base.port));
     const proxyPort = await proxy.listen();
 
-    // Deliberately absent: the publication AND REPLICA IDENTITY FULL — reconcile() self-
+    // Deliberately absent: the publication AND REPLICA IDENTITY FULL — bootstrap() self-
     // provisions both at boot, same as every other self-managed scenario in this suite.
     const scenario = await createScenarioDb('pulse_reconnrb_g7');
     const publicationName = `reconnrb_g7_pub_${randomSuffix()}`;

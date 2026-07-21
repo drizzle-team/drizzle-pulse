@@ -224,7 +224,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   private readonly eventsSchema: string;
   // `pull: false` runs embedded-only: no events tables, no persistence, handlers unavailable.
   private readonly pullEnabled: boolean;
-  // Populated by reconcile(): events-table name -> current epoch (uuid, rotated on every DDL
+  // Populated by bootstrap(): events-table name -> current epoch (uuid, rotated on every DDL
   // recreate). Handlers read it via getEpochForQuery to mint/validate cursor tokens.
   private eventsEpochs = new Map<string, string>();
 
@@ -397,7 +397,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
   /**
    * Current epoch for a query's events table, or `undefined` before {@link start} /
-   * {@link provision} has reconciled it. The epoch rotates on every events-table recreate;
+   * {@link provision} has provisioned it. The epoch rotates on every events-table recreate;
    * cursor tokens embed it so a token minted against a since-dropped table is detectable.
    */
   getEpochForQuery(queryName: string): string | undefined {
@@ -512,7 +512,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     this.store ??= new PulseStore(this.config.databaseUrl, this.eventsSchema);
 
     try {
-      await this.reconcile();
+      await this.bootstrap();
 
       const run: Run = { abort: new AbortController(), attempts: 0 };
       this.run = run;
@@ -553,7 +553,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   }
 
   /**
-   * Reconciles this runtime's events tables and their bookkeeping against the live database
+   * Brings this runtime's events tables and their bookkeeping in line with the live database
    * without opening a replication stream: runs the same schema path as {@link start} —
    * create/recreate diverged events tables, sweep orphans, rotate epochs — over a short-lived
    * admin connection, then closes it. Call from a deploy/migration step to provision
@@ -563,7 +563,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   async provision(): Promise<void> {
     this.store ??= new PulseStore(this.config.databaseUrl, this.eventsSchema);
     try {
-      await this.reconcile();
+      await this.bootstrap();
     } finally {
       const store = this.store;
       this.store = null;
@@ -571,7 +571,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     }
   }
 
-  // Boot reconciliation, wrapped in one transaction under a schema-scoped advisory lock.
+  // Boot-time provisioning, wrapped in one transaction under a schema-scoped advisory lock.
   // wal_level is the only precondition the runtime can't fix, so it stays an assert;
   // everything else pulse self-provisions: REPLICA IDENTITY FULL on each source, then the
   // publication (create it owning exactly the sources, or — unless it's FOR ALL TABLES — diff
@@ -580,7 +580,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   // (create/recreate on DDL-hash divergence, drop orphans), rotating an epoch on every recreate.
   // Any throw rolls the whole transaction back, so a database it can't fully provision is left
   // untouched. Runtime-owned events-table DDL: the app no longer migrates these tables.
-  private async reconcile(): Promise<void> {
+  private async bootstrap(): Promise<void> {
     const adminDb = this.getPulseStore().getDb();
     const { pulseMeta } = this.getPulseStore();
     const eventsSchema = this.eventsSchema;
@@ -797,7 +797,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
           )
             continue;
           this.logWarn(
-            `[reconcile] table "${eventsSchema}.${relname}" shares the events schema but has no pulse_meta row; leaving it untouched`,
+            `[bootstrap] table "${eventsSchema}.${relname}" shares the events schema but has no pulse_meta row; leaving it untouched`,
           );
         }
       }
@@ -1073,7 +1073,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
   // One pinned repeatable-read admin transaction rotates every registered events table's
   // epoch, truncates it, and seeds it from the exported snapshot — the sole write path outside
-  // reconcile()/the WAL loop; sdk.ts pull handlers stay strictly read-only.
+  // bootstrap()/the WAL loop; sdk.ts pull handlers stay strictly read-only.
   private async rotateAndSeedEvents(snapshotName: string, consistentPoint: string): Promise<void> {
     assertSnapshotName(snapshotName);
     const adminDb = this.getPulseStore().getDb();
@@ -1104,7 +1104,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
             .returning({ epoch: pulseMeta.epoch });
           if (!rotated?.epoch) {
             throw new Error(
-              `pulse_meta rotation found no row for "${eventsTableConfig.name}" — reconcile() should have created it`,
+              `pulse_meta rotation found no row for "${eventsTableConfig.name}" — bootstrap() should have created it`,
             );
           }
           epochs.set(eventsTableConfig.name, rotated.epoch);
@@ -1204,26 +1204,26 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   ): Promise<void> {
     let tx: { commitLsn: string; events: PendingWalEvent[] } | null = null;
 
-    for await (const ev of iterator) {
-      if (ev.kind === 'begin') {
-        tx = { commitLsn: ev.finalLsn, events: [] };
+    for await (const event of iterator) {
+      if (event.kind === 'begin') {
+        tx = { commitLsn: event.finalLsn, events: [] };
         continue;
       }
-      if (ev.kind === 'insert' || ev.kind === 'update' || ev.kind === 'delete') {
+      if (event.kind === 'insert' || event.kind === 'update' || event.kind === 'delete') {
         if (!tx) {
           // pgoutput streams transactions whole (begin always precedes its row events), so this
           // is a protocol anomaly, not routine — there is no per-message LSN to fall back to.
           this.logError(
-            `Protocol anomaly: no tracked begin.finalLsn for ${ev.schema}.${ev.table}; skipping event`,
+            `Protocol anomaly: no tracked begin.finalLsn for ${event.schema}.${event.table}; skipping event`,
           );
           continue;
         }
-        this.decodeInto(tx, ev);
+        this.decodeInto(tx, event);
         continue;
       }
-      if (ev.kind !== 'commit') continue; // relation/truncate/message: ignored
+      if (event.kind !== 'commit') continue; // relation/truncate/message: ignored
 
-      const t = tx;
+      const batch = tx;
       tx = null;
 
       // Skip persist AND the tap emits when no begin was observed, or this commit was already
@@ -1231,17 +1231,17 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       // a commit at or below the watermark is a replay — re-persisting or re-emitting it would
       // make clients double-apply. The ack still advances so the server stops resending.
       if (
-        !t ||
+        !batch ||
         (this.lastPersistedCommitLsn !== null &&
-          lsnFromString(t.commitLsn) <= lsnFromString(this.lastPersistedCommitLsn))
+          lsnFromString(batch.commitLsn) <= lsnFromString(this.lastPersistedCommitLsn))
       ) {
-        rep.ack(ev.endLsn);
+        rep.ack(event.endLsn);
         continue;
       }
 
       if (this.pullEnabled) {
-        await this.getPulseStore().ingestCommit(t.events, this.slotName, t.commitLsn);
-        this.lastPersistedCommitLsn = t.commitLsn;
+        await this.getPulseStore().ingestCommit(batch.events, this.slotName, batch.commitLsn);
+        this.lastPersistedCommitLsn = batch.commitLsn;
       }
 
       // Reset only after real progress, not right after rep.start() — an instantly-clean-ending
@@ -1249,20 +1249,20 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       // terminal path instead of reconnecting forever.
       run.attempts = 0;
 
-      for (const event of t.events) {
-        this.emitTap(event, t.commitLsn);
+      for (const pendingEvent of batch.events) {
+        this.emitTap(pendingEvent, batch.commitLsn);
       }
 
       // endLsn, never lsn — idleAck's gate tracks endLsn, and only after persist resolves.
-      rep.ack(ev.endLsn);
+      rep.ack(event.endLsn);
     }
   }
 
   private decodeInto(
-    t: { events: PendingWalEvent[] },
-    ev: Extract<ReplicationEvent, { kind: 'insert' | 'update' | 'delete' }>,
+    tx: { events: PendingWalEvent[] },
+    event: Extract<ReplicationEvent, { kind: 'insert' | 'update' | 'delete' }>,
   ): void {
-    const tableQualifiedName = `${ev.schema}.${ev.table}`;
+    const tableQualifiedName = `${event.schema}.${event.table}`;
 
     const metadata = this.sourceTableMetadata.get(tableQualifiedName);
     if (!metadata) {
@@ -1272,28 +1272,28 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     let row: Record<string, unknown>;
     let oldRow: Record<string, unknown> | null;
 
-    if (ev.kind === 'insert') {
-      row = ev.new;
+    if (event.kind === 'insert') {
+      row = event.new;
       oldRow = null;
     } else {
-      // reconcile() forces REPLICA IDENTITY FULL on every source before it joins the
+      // bootstrap() forces REPLICA IDENTITY FULL on every source before it joins the
       // publication, so a full old tuple accompanies every update/delete. WAL written under an
       // earlier identity can still replay (a FOR ALL TABLES publication retains changes from
       // before a table's first registration); those events can't be decoded faithfully — minipg
       // null-renders the non-key columns of a 'key' tuple, indistinguishable from real SQL
       // nulls — so they're skipped loudly instead of emitted with fabricated nulls or silently
       // missing TOAST-omitted columns.
-      if (ev.oldKind !== 'full' || !ev.old) {
+      if (event.oldKind !== 'full' || !event.old) {
         this.logError(
-          `Skipping ${ev.kind} on ${tableQualifiedName}: old tuple is ${ev.oldKind ?? 'absent'}, not full — this WAL predates the REPLICA IDENTITY FULL applied at boot`,
+          `Skipping ${event.kind} on ${tableQualifiedName}: old tuple is ${event.oldKind ?? 'absent'}, not full — this WAL predates the REPLICA IDENTITY FULL applied at boot`,
         );
         return;
       }
-      oldRow = ev.old;
-      if (ev.kind === 'update') {
+      oldRow = event.old;
+      if (event.kind === 'update') {
         // pgoutput omits an UPDATE's unchanged TOASTed columns from the new tuple; the
         // old-under-new spread carries them forward (a full old tuple always has them).
-        row = { ...oldRow, ...ev.new };
+        row = { ...oldRow, ...event.new };
       } else {
         // Deliberately empty: the tap represents a delete by the absent new row. The persisted
         // events-table row still carries the old row's data via PulseStore's buildEventRow.
@@ -1301,18 +1301,18 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       }
     }
 
-    const pkSource = ev.kind === 'delete' ? oldRow : row;
+    const pkSource = event.kind === 'delete' ? oldRow : row;
     const pkValue = pkSource?.[metadata.pkKey];
     if (pkValue === undefined || pkValue === null) {
       this.logDebug(
-        `Skipping ${ev.kind} on ${tableQualifiedName}: missing pk (${String(pkValue)})`,
+        `Skipping ${event.kind} on ${tableQualifiedName}: missing pk (${String(pkValue)})`,
       );
       return;
     }
 
     const oldPk = oldRow?.[metadata.pkKey];
     const pkChanged = !pkValuesEqual(oldPk, pkValue);
-    if (ev.kind === 'update' && oldPk != null && pkChanged) {
+    if (event.kind === 'update' && oldPk != null && pkChanged) {
       // pk-changing UPDATE: a single update entry keyed by the new pk leaves every
       // consumer holding a ghost row under the old pk. Synthesize delete(oldPk) then
       // insert(newPk) — delete MUST precede insert since stream()'s commit case fans out
@@ -1322,16 +1322,16 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         pkKey: metadata.pkKey,
         tableQualifiedName,
       };
-      t.events.push({ ...base, op: 'delete', pkValue: oldPk, row: {}, oldRow });
-      t.events.push({ ...base, op: 'insert', pkValue, row, oldRow: null });
+      tx.events.push({ ...base, op: 'delete', pkValue: oldPk, row: {}, oldRow });
+      tx.events.push({ ...base, op: 'insert', pkValue, row, oldRow: null });
       return;
     }
 
-    t.events.push({
+    tx.events.push({
       eventsTable: metadata.eventsTable,
       pkKey: metadata.pkKey,
       pkValue,
-      op: ev.kind,
+      op: event.kind,
       row,
       oldRow,
       tableQualifiedName,

@@ -85,7 +85,7 @@ export function buildEventsTable(
   const tableName = getEventsTableName(sourceTable);
   const pkColumnName = getPulsePkColumn(sourceTable).name;
 
-  // The explicit sequence name keeps the rendered DDL deterministic for the reconcile
+  // The explicit sequence name keeps the rendered DDL deterministic for the bootstrap
   // hash. It can newly overflow 63 bytes even when tableName fit.
   const snapshotSequenceName = `${tableName}_snapshot_seq`;
   assertIdentifierLength(snapshotSequenceName);

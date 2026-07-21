@@ -371,8 +371,8 @@ export class PulseRequestHandler {
   private token(queryName: string, snapshot: number): string {
     const epoch = this.getEpoch(queryName);
     if (epoch === undefined) {
-      // Only reachable before reconcile() has populated epochs; a running runtime always has one.
-      throw new Error(`No epoch reconciled for query "${queryName}"`);
+      // Only reachable before bootstrap() has populated epochs; a running runtime always has one.
+      throw new Error(`No epoch provisioned for query "${queryName}"`);
     }
     return formatCursor(epoch, snapshot);
   }
