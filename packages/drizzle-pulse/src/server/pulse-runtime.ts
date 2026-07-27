@@ -21,10 +21,9 @@ import { getQueryColumnKey } from './pulse-types.js';
 import { DEFAULT_PULL_EVENT_LIMIT, PulseRequestHandler } from './sdk.js';
 
 type RuntimeLifecycleListener = () => void;
-// Reconnect listeners receive the open snapshot session (or null under pull:false / no
-// recovery) so they can read their baseline through it instead of racing the ordinary
-// watermark path.
-type ReconnectListener = (snapshotSession: SnapshotSession | null) => Promise<void> | void;
+// Reconnect listeners rebaseline from the new slot's exported snapshot, or from null when the
+// slot resumed intact (nothing was exported) — those fall back to the watermark handshake.
+type ReconnectListener = (snapshot: BaselineSnapshot | null) => Promise<void> | void;
 
 export type PulseRuntimeWalConfig = {
   publicationName?: string;
@@ -44,10 +43,9 @@ export type PulseRuntimeConfig = {
   databaseUrl: string;
   /**
    * The app's own drizzle connection; baseline and query reads run on it to keep its session
-   * context (RLS, search_path) — except the post-reconnect rebaseline, which reads on the admin
-   * connection through the snapshot session (see `readCollectionBaseline`'s snapshot-session
-   * note). Row scoping there relies on the resolve-time auth-scoped WHERE, not on sourceDb-session
-   * RLS.
+   * context (RLS, search_path) — except the post-reconnect rebaseline, which reads the exported
+   * snapshot on the admin connection (see `readCollectionBaseline`). Row scoping there relies on
+   * the resolve-time auth-scoped WHERE, not on sourceDb-session RLS.
    */
   sourceDb: PulseSourceDb;
   /**
@@ -113,29 +111,26 @@ const RECONNECT_MAX_RETRIES = 10;
 const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 30000;
 
+// Ceiling on one pre-stream rebaseline read (see rebaselineCollections) — generous enough for a
+// large collection's baseline SELECT, short enough that a stuck one can't hold WAL indefinitely.
+const REBASELINE_TIMEOUT_MS = 30_000;
+
 const DEFAULT_PUBLICATION_NAME = 'drizzle_pulse';
 const DEFAULT_SLOT_NAME = 'drizzle_pulse';
 
 const WAL_LOG_PREFIX = '[WAL Listener] ';
-
-// Fixed window a live collection's reconnect-debounce round comfortably fits inside;
-// a collection materialized after it just takes the watermark handshake.
-const BASELINE_SNAPSHOT_WINDOW_MS = 5000;
 
 // One connection lifecycle attempt: aborting finishes the active stream cleanly (rep.start()'s
 // AbortSignal) and wakes an in-progress backoff sleep; `done` settles when the loop exits, so
 // stop() can await full teardown. `attempts` is the terminal-path test seam.
 type Run = { abort: AbortController; attempts: number; done?: Promise<void> };
 
-// A checked-out admin connection that keeps the slot recreate's exported snapshot open (via SET
-// TRANSACTION SNAPSHOT), so live embedded collections read their rebaseline from the exact point
-// the new slot starts. Consumed by readCollectionBaseline until the reconnect round settles or
-// it's forced shut (stop()/the next recoverSlot()).
-export type SnapshotSession = {
+// A read handle on the slot recreate's exported snapshot, live only for the duration of
+// rebaselineCollections() — the collections read the exact state the stream is about to start
+// from. `watermark` is that start position (the slot's consistent point).
+export type BaselineSnapshot = {
   db: ReturnType<typeof drizzle<EmptyRelations, Connection>>;
   watermark: string;
-  round: Promise<unknown>;
-  close: () => Promise<void>;
 };
 
 // drizzle-orm's postgres executor wraps every driver error in a DrizzleQueryError, which does
@@ -175,16 +170,6 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
       settled = true;
       resolveFn(value);
     },
-  };
-}
-
-// minipg's `release()` is already idempotent; `once` makes the ROLLBACK-then-release around it
-// idempotent too, so closeSnapshotSession()/the backstop timer/a forced stop() can never double-run it.
-function once<T>(fn: () => Promise<T>): () => Promise<T> {
-  let result: Promise<T> | undefined;
-  return () => {
-    result ??= fn();
-    return result;
   };
 }
 
@@ -231,8 +216,6 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   // The in-flight replication lifecycle — runReplicationLoop()'s abort handle + reconnect-attempt
   // counter. Null when the runtime is stopped.
   private run: Run | null = null;
-  // The currently open snapshot session, or null when no slot recreate is mid-handshake.
-  private snapshotSession: SnapshotSession | null = null;
   // In-memory mirror of the durable pulse_stream watermark — dedupes at-least-once replay after
   // a reconnect without a store round trip on every commit.
   private lastPersistedCommitLsn: string | null = null;
@@ -467,23 +450,23 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
    * closing it fully would require reading the watermark inside the same transaction/snapshot as
    * the baseline SELECT, which is not attempted here.
    *
-   * `snapshotSession` (passed by the reconnect edge, `client/embedded/index.ts`) reads through the
-   * recreate's exported-snapshot connection instead — same visibility class as the WAL stream
-   * itself, so the recreate boundary is gapless by construction and closes the residual race above.
-   * A collection materialized after the snapshot-session window closes falls through to the
-   * ordinary path.
+   * `snapshot` (passed by the reconnect edge, `client/embedded/index.ts`) reads the recreate's
+   * exported snapshot instead — the state the stream is about to start from, read while the
+   * stream is still closed, so the recreate boundary is gapless by construction and neither the
+   * watermark read nor the race above applies. A collection materialized mid-run has no exported
+   * snapshot to read and takes the watermark path below.
    *
-   * Note: the snapshot session's connection is checked out of the admin pool (`databaseUrl`), not
+   * Note: the snapshot is read on a connection checked out of the admin pool (`databaseUrl`), not
    * the app's `sourceDb` session — so this path does not carry sourceDb's session context (RLS,
    * search_path). The resolve-time auth-scoped WHERE is what enforces row scoping here, not RLS.
    */
   async readCollectionBaseline(
     resolved: ResolvedPulseQuery,
-    snapshotSession?: SnapshotSession | null,
+    snapshot?: BaselineSnapshot | null,
   ): Promise<{ rows: Record<string, unknown>[]; watermark: string }> {
-    if (snapshotSession) {
-      const rows = await buildSelectQuery(snapshotSession.db, resolved.table, resolved);
-      return { rows, watermark: snapshotSession.watermark };
+    if (snapshot) {
+      const rows = await buildSelectQuery(snapshot.db, resolved.table, resolved);
+      return { rows, watermark: snapshot.watermark };
     }
 
     // 'objects' mode is the one execute() overload whose return type doesn't route through the
@@ -541,10 +524,9 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     const run = this.run;
     this.run = null;
     run?.abort.abort(); // finishes the active stream cleanly, wakes a backoff sleep
-    // No in-flight decode/persist survives past this line — the store below closes under no load.
+    // No in-flight decode/persist — nor an in-flight rebaseline, which the loop owns and always
+    // releases its connection — survives past this line, so the store below closes under no load.
     await run?.done;
-
-    await this.closeSnapshotSession();
 
     const store = this.store;
     this.store = null;
@@ -829,9 +811,17 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       try {
         rep = await replication({ url: this.config.databaseUrl });
 
-        const { slot, from } = this.pullEnabled
+        const { slot, from, snapshot } = this.pullEnabled
           ? await this.resolveSlot(rep) // recovery lives INSIDE the try — never consumes a retry
           : await this.createTempSlot(rep);
+
+        // Live collections rebaseline to completion BEFORE the stream opens, so a collection is
+        // never rebuilding while events for it are already arriving. Only re-connections: at boot
+        // no collection exists yet (the embedded factory requires a running runtime).
+        if (hasConnectedBefore) {
+          await this.rebaselineCollections(snapshot, from);
+          if (signal.aborted) return; // stop() landed while the collections were reading
+        }
 
         this.logInfo(`Subscribing to slot '${slot}'`);
         const iterator = rep.start({
@@ -847,14 +837,6 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
           // Abort = this run's own stop: the iterator finishes cleanly and the socket closes.
           signal,
         });
-
-        const round = hasConnectedBefore
-          ? Promise.allSettled(
-              [...this.reconnectListeners].map(async (listener) => listener(this.snapshotSession)),
-            )
-          : Promise.resolve([]);
-        if (this.snapshotSession) this.snapshotSession.round = round;
-        void round.then(() => this.closeSnapshotSession());
 
         hasConnectedBefore = true;
         startupSettled.resolve();
@@ -905,7 +887,9 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   // structurally dead in production (the persisted watermark is the commit record's own LSN,
   // and ack always advances confirmed_flush past it); it exists for the case Postgres itself
   // guards against below and as documentation of intent. Tests reach it via seeded watermarks.
-  private async resolveSlot(rep: ReplicationConnection): Promise<{ slot: string; from?: string }> {
+  private async resolveSlot(
+    rep: ReplicationConnection,
+  ): Promise<{ slot: string; from?: string; snapshot?: string }> {
     const adminDb = this.getPulseStore().getDb();
     const {
       rows: [slot],
@@ -920,7 +904,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     );
 
     if (!slot || slot.wal_status === 'lost') {
-      return { slot: this.slotName, from: await this.recoverSlot(rep) };
+      return { slot: this.slotName, ...(await this.recoverSlot(rep)) };
     }
 
     const watermark = await this.getPulseStore().getStreamWatermark(this.slotName);
@@ -931,7 +915,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       !slot.confirmed_flush_lsn ||
       lsnFromString(watermark) < lsnFromString(slot.confirmed_flush_lsn)
     ) {
-      return { slot: this.slotName, from: await this.recoverSlot(rep) };
+      return { slot: this.slotName, ...(await this.recoverSlot(rep)) };
     }
 
     if (slot.active && slot.active_pid) {
@@ -945,16 +929,18 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
     this.logInfo(`Replication slot '${this.slotName}' ready`);
     this.lastPersistedCommitLsn = watermark;
-    return { slot: this.slotName, from: undefined }; // server resumes from confirmed_flush
+    // Resumes from confirmed_flush; nothing was exported, so collections rebaseline through the
+    // watermark handshake instead.
+    return { slot: this.slotName, from: undefined, snapshot: undefined };
   }
 
-  // Full recovery machine (pull:true only now): drop any broken persistent slot, recreate with
-  // an exported snapshot, rotate-and-seed the events tables from it, and open the embedded
-  // snapshot session from the SAME snapshot when live collections exist — all before the caller
-  // issues rep.start(), because the export dies on this connection's next command.
-  private async recoverSlot(rep: ReplicationConnection): Promise<string> {
-    await this.closeSnapshotSession(); // two snapshot sessions never coexist
-
+  // Full recovery machine (pull:true only now): drop any broken persistent slot, recreate with an
+  // exported snapshot, and rotate-and-seed the events tables from it. The snapshot is returned so
+  // the caller can rebaseline live collections from it too — every read of it must happen before
+  // rep.start(), since the export dies on this connection's next command.
+  private async recoverSlot(
+    rep: ReplicationConnection,
+  ): Promise<{ from: string; snapshot: string }> {
     await this.evictWalsender(this.slotName);
     await this.dropSlotWithRetry(this.slotName);
 
@@ -965,19 +951,13 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
     await this.rotateAndSeedEvents(snapshot, consistentPoint);
 
-    // Live collections only exist mid-run (the embedded factory requires a running runtime, so
-    // there are none at boot).
-    if (this.reconnectListeners.size > 0) {
-      await this.openSnapshotSession(snapshot, consistentPoint);
-    }
-
     // Operators must see this: a recreate resets events/baselines. Name the slot, never
     // databaseUrl (info disclosure).
     this.logError(
       `Replication slot '${this.slotName}' was missing or invalidated and has been recreated`,
     );
 
-    return consistentPoint;
+    return { from: consistentPoint, snapshot };
   }
 
   // pull:false: a fresh session-scoped, randomized-suffix temporary slot on every
@@ -986,20 +966,15 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   // survives past its own connection).
   private async createTempSlot(
     rep: ReplicationConnection,
-  ): Promise<{ slot: string; from: string }> {
-    await this.closeSnapshotSession();
-
+  ): Promise<{ slot: string; from: string; snapshot: string }> {
     const slot = `${this.slotName}_${randomBytes(4).toString('hex')}`;
     const { consistentPoint, snapshot } = await rep.createSlot(slot, {
       temporary: true,
       snapshot: 'export',
     });
-    if (this.reconnectListeners.size > 0) {
-      await this.openSnapshotSession(snapshot, consistentPoint);
-    }
 
     this.logInfo(`Created temporary slot '${slot}'`);
-    return { slot, from: consistentPoint };
+    return { slot, from: consistentPoint, snapshot };
   }
 
   // Poll-retry a slot drop: the previous owning backend's "active" flag can lag its actual
@@ -1131,56 +1106,52 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     this.lastPersistedCommitLsn = consistentPoint;
   }
 
-  // Opens the snapshot session: a dedicated admin connection running BEGIN READ ONLY + SET
-  // TRANSACTION SNAPSHOT sequentially, so a setup failure is an ordinary rejection (release()
-  // then rethrow). Must be called BEFORE the caller issues rep.start() — the exported snapshot
-  // dies on this connection's next command.
-  private async openSnapshotSession(snapshot: string, watermark: string): Promise<void> {
+  // Rebaselines every live collection, to completion, while the replication stream is still
+  // closed: each reads the slot's exported snapshot — the exact state rep.start() will stream
+  // forward from — so the recreate boundary is gapless with no buffering and no watermark
+  // filtering. Runs before rep.start() because the export dies on the replication connection's
+  // next command.
+  //
+  // `snapshot` is absent when a resumed slot was intact (nothing exported): listeners take their
+  // own watermark handshake instead, and the stream replays from confirmed_flush — behind that
+  // watermark, so the collections drop the overlap against their own floor.
+  //
+  // Every listener reads the one checked-out connection inside the one snapshot transaction, so a
+  // listener whose SELECT errors poisons that transaction for the rest of the round; allSettled
+  // buys the stream's progress, not per-collection isolation. Each failure still surfaces on its
+  // own collection's onError (client/embedded/index.ts).
+  private async rebaselineCollections(
+    snapshot: string | undefined,
+    watermark: string | undefined,
+  ): Promise<void> {
+    const listeners = [...this.reconnectListeners];
+    if (listeners.length === 0) return;
+
+    if (!snapshot || !watermark) {
+      await Promise.allSettled(listeners.map(async (listener) => listener(null)));
+      return;
+    }
+
     assertSnapshotName(snapshot);
     const { client, release } = await this.getPulseStore().checkout();
-
     try {
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
       await client.query(`SET TRANSACTION SNAPSHOT '${snapshot}'`);
-    } catch (error) {
-      release();
-      throw error;
-    }
-
-    const close = once(async () => {
+      // Nothing else consumes WAL until these reads return, so an unbounded one (a baseline
+      // queued behind an ACCESS EXCLUSIVE lock, a black-holed route) would stall replication and
+      // grow the slot's retained WAL for as long as it hangs. Failing that read instead costs one
+      // collection its rebaseline — it reports onError and re-syncs on the next reconnect.
+      await client.query(`SET LOCAL statement_timeout = ${REBASELINE_TIMEOUT_MS}`);
+      const baseline: BaselineSnapshot = { db: drizzle({ client }), watermark };
+      await Promise.allSettled(listeners.map(async (listener) => listener(baseline)));
+    } finally {
       try {
         await client.query('ROLLBACK');
       } catch {
         // Connection may already be dead — release() below still runs.
-      } finally {
-        release();
       }
-    });
-
-    const snapshotSession: SnapshotSession = {
-      db: drizzle({ client }),
-      watermark,
-      round: Promise.resolve(),
-      close,
-    };
-    this.snapshotSession = snapshotSession;
-
-    // Backstop, armed at creation (covers rep.start() throwing before any reconnect round
-    // fires) — identity-guarded so a stale backstop from a superseded session can never close a
-    // newer one.
-    setTimeout(() => {
-      if (this.snapshotSession === snapshotSession) void this.closeSnapshotSession();
-    }, BASELINE_SNAPSHOT_WINDOW_MS);
-  }
-
-  // One close path: linear, never rolls back under a still-in-flight read. stop(),
-  // recoverSlot(), createTempSlot(), the round-settled hook, and the backstop all route here.
-  private async closeSnapshotSession(): Promise<void> {
-    const snapshotSession = this.snapshotSession;
-    if (!snapshotSession) return;
-    this.snapshotSession = null;
-    await snapshotSession.round; // a baseline SELECT outliving the snapshot-session window still completes
-    await snapshotSession.close();
+      release();
+    }
   }
 
   // One `tx` local per connection, so a reconnect can never observe a stale half-buffered

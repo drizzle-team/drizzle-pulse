@@ -297,8 +297,7 @@ describe('pull: false — embedded-only runtime writes nothing to events tables'
       }, 10000);
 
       // Gapless rebaseline: both orders present, including the downtime row — proving the
-      // rebaseline read from the snapshot session at the fresh slot's exported snapshot, not just
-      // a resumed stream.
+      // rebaseline read the fresh slot's exported snapshot, not just a resumed stream.
       await waitFor(() => collection.list().length === 2, 10000);
       expect(new Set(collection.list().map((row) => row.driverId))).toEqual(new Set([1, 2]));
 

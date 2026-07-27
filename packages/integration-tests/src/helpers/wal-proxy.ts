@@ -89,18 +89,10 @@ export function startWalProxy(targetHost: string, targetPort: number) {
           startupChunks = [];
         }
       }
-      // Arm on rep.start()'s FIRST walsender command, not literally START_REPLICATION. On PG14+
-      // minipg precedes START_REPLICATION with a binary-negotiation catalog probe (a `Q` query
-      // against pg_publication_tables); waiting for START_REPLICATION would arm one round-trip too
-      // late — past the moment the snapshot session's admin-pool SELECT already flew — so the stall
-      // would miss the read it must hold. The probe query is the same choreography point
-      // START_REPLICATION used to be (rep.start()'s opening frame); the earlier CREATE_REPLICATION_SLOT
-      // that recoverSlot sends before seeding contains neither marker, so seeding is never stalled.
-      if (
-        isReplication &&
-        stallArmed &&
-        (chunk.includes('pg_publication_tables') || chunk.includes('START_REPLICATION'))
-      ) {
+      // Arm on CREATE_REPLICATION_SLOT: the stall is one wall-clock window opening at this
+      // frame, so it holds whichever admin round-trips come next — in a recreate that is the
+      // events-table seeding transaction.
+      if (isReplication && stallArmed && chunk.includes('CREATE_REPLICATION_SLOT')) {
         stallArmed = false;
         beginStall(armedStallMs);
       }
@@ -143,11 +135,10 @@ export function startWalProxy(targetHost: string, targetPort: number) {
     dropClient: (): void => {
       activeClient?.destroy();
     },
-    // Arms a one-shot stall: the NEXT rep.start() on the replication connection (recognized by its
-    // opening frame — the binary-negotiation probe on PG14+, else START_REPLICATION) holds every
+    // Arms a one-shot stall: the NEXT slot creation on the replication connection holds every
     // non-replication (admin) connection's upstream->client bytes for `ms`, buffered and flushed
-    // FIFO when the stall ends.
-    stallAdminOnStartReplication: (ms: number): void => {
+    // FIFO when the stall ends — i.e. it slows the snapshot-scoped reads that follow it.
+    stallAdminOnSlotCreate: (ms: number): void => {
       armedStallMs = ms;
       stallArmed = true;
     },

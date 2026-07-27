@@ -1,6 +1,10 @@
 import { getTableUniqueName } from 'drizzle-orm';
 import type { AnyPulseBuilders } from '../../server/pulse-registry.js';
-import type { PendingWalEvent, PulseRuntime, SnapshotSession } from '../../server/pulse-runtime.js';
+import type {
+  BaselineSnapshot,
+  PendingWalEvent,
+  PulseRuntime,
+} from '../../server/pulse-runtime.js';
 import type { PulseClientContract } from '../../server/pulse-types.js';
 import { compareLsn } from '../../shared/lsn.js';
 import { applyProjectionPipeline } from '../../shared/projection.js';
@@ -170,6 +174,11 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
         let baselining = true;
         let buffer: Array<{ event: PendingWalEvent; lsn: string }> = [];
         let collection!: PulseCollection<AnyRow>;
+        // Last baseline's position: everything at-or-below it is already in the collection, so an
+        // event carrying an older lsn is a replay, not news. Load-bearing when a reconnect resumes
+        // an intact slot — the server restarts the stream at the slot's confirmed_flush, which is
+        // behind this position, and re-delivers every commit made while the socket was down.
+        let watermarkFloor: string | null = null;
 
         function applyEvent(walEvent: PendingWalEvent, lsn: string): void {
           const event = buildTapEvent(walEvent, query);
@@ -183,6 +192,7 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
             buffer.push({ event: walEvent, lsn });
             return;
           }
+          if (watermarkFloor !== null && compareLsn(lsn, watermarkFloor) < 0) return;
           applyEvent(walEvent, lsn);
         }
 
@@ -195,6 +205,10 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
         // dropping a commit landing exactly there. Any baseline/tap overlap this admits is
         // absorbed by the merge core's $pk dedup, making the handshake exactly-once.
         //
+        // A reconnect rebaseline runs while the stream is closed, so its buffer is empty and the
+        // watermark filter is inert — the snapshot IS the stream's start position. The buffering
+        // machinery below therefore only does real work on the initial mid-run load.
+        //
         // `baselining`/`buffer` are shared closure state, so overlapping invocations (a
         // reconnect racing the initial load, or reconnect flapping) must not both act on them:
         // the generation token lets a superseded handshake detect it lost the race and
@@ -202,15 +216,13 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
         // handshake's state. Returns `null` when superseded — the caller must not treat that
         // as "no watermark", only as "a newer handshake owns the collection now".
         let handshakeGen = 0;
-        async function runHandshake(
-          snapshotSession?: SnapshotSession | null,
-        ): Promise<string | null> {
+        async function runHandshake(snapshot?: BaselineSnapshot | null): Promise<string | null> {
           const gen = ++handshakeGen;
           baselining = true;
           buffer = [];
           let baseline: { rows: Record<string, unknown>[]; watermark: string };
           try {
-            baseline = await runtime.readCollectionBaseline(query, snapshotSession);
+            baseline = await runtime.readCollectionBaseline(query, snapshot);
           } catch (err) {
             // A rejected rebaseline must not leave the collection permanently latched into
             // buffering: only reset when this handshake still owns the state (a newer
@@ -226,6 +238,7 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
           const pending = buffer;
           buffer = [];
           baselining = false;
+          watermarkFloor = baseline.watermark;
           for (const { event, lsn } of pending) {
             if (compareLsn(lsn, baseline.watermark) < 0) continue;
             applyEvent(event, lsn);
@@ -240,12 +253,12 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
 
         unsubs.push(runtime.subscribeTap(tableKey, handleTapEvent));
         unsubs.push(
-          runtime.onReconnect((snapshotSession) => {
+          runtime.onReconnect((snapshot) => {
             // Returning this promise (rather than firing it and forgetting) lets the
             // replication loop's reconnect round actually await every listener's handshake.
             return (async () => {
               try {
-                const watermark = await runHandshake(snapshotSession);
+                const watermark = await runHandshake(snapshot);
                 if (watermark === null) return; // superseded by a newer reconnect handshake
                 if (collection.isDisposed) return;
                 collection.fireOnChange([], watermark);

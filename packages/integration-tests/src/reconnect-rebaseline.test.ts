@@ -5,11 +5,9 @@
  * delivery afterwards. Supersedes the deleted resilience.test.ts, which drove the same
  * assertions off a faked edge ((runtime as any).onReplicationStart()).
  *
- * A reconnect rebaseline whose collection baseline SELECT outlives the 5s
- * BASELINE_SNAPSHOT_WINDOW_MS still converges gaplessly — exercises closeSnapshotSession's rule
- * that a close awaits the in-flight read (pulse-runtime.ts): the window timer firing while the
- * reconnect round (which includes the live baseline SELECT) is still pending must defer the close
- * rather than tear the snapshot session down under the live read.
+ * The second test pins the ordering that makes that gapless: every live collection rebaselines
+ * from the new slot's exported snapshot BEFORE the stream opens, so no event can be delivered
+ * while a collection is still rebuilding.
  *
  * Uses a split URL configuration: the runtime's
  * `databaseUrl` (walsender + admin pool) routes through the test-only TCP proxy, `sourceDb`
@@ -19,7 +17,7 @@
 import { describe, expect, test } from 'bun:test';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
-import { createPulseClient } from 'drizzle-pulse/client/embedded';
+import { createPulseClient, createPulseEvents } from 'drizzle-pulse/client/embedded';
 import { createPulseRegistry, LogLevel, PulseRuntime } from 'drizzle-pulse/server';
 import postgres from 'postgres';
 import { orders, ordersByStatusArgsSchema } from './fixtures/minimal-orders/schema.js';
@@ -155,18 +153,14 @@ describe('Reconnect rebaseline', () => {
     }
   });
 
-  test('a reconnect rebaseline whose SELECT outlives the 5s snapshot-session window still converges gaplessly', async () => {
-    const base = new URL(baseDatabaseUrl());
-    const proxy = startWalProxy(base.hostname, Number(base.port));
-    const proxyPort = await proxy.listen();
-
-    const scenario = await createScenarioDb('pulse_reconnrb_g5');
-    const publicationName = `reconnrb_g5_pub_${randomSuffix()}`;
-    const slotName = `reconnrb_g5_slot_${randomSuffix()}`;
+  test('rebaselines to completion before opening the stream: nothing is delivered while collections rebuild', async () => {
+    const scenario = await createScenarioDb('pulse_reconnrb_order');
+    const publicationName = `reconnrb_order_pub_${randomSuffix()}`;
+    const slotName = `reconnrb_order_slot_${randomSuffix()}`;
     const sourceSql = postgres(withQuietPostgresUrl(scenario.databaseUrl));
 
     const runtime = new PulseRuntime(buildRegistry(), {
-      databaseUrl: proxiedDatabaseUrl(scenario.databaseUrl, proxyPort),
+      databaseUrl: scenario.databaseUrl,
       sourceDb: drizzle({ client: sourceSql }),
       pull: true,
       wal: { publicationName, slotName },
@@ -184,6 +178,14 @@ describe('Reconnect rebaseline', () => {
       const client = createPulseClient(runtime);
       const collection = await client.ordersByStatus({ status: 'accepted' });
 
+      // The stateless feed delivers straight off the tap with no baseline buffering, so it
+      // observes exactly what the stream delivers, when it delivers it.
+      const events = createPulseEvents(runtime);
+      let delivered = 0;
+      const unsubFeed = events.ordersByStatus({ status: 'accepted' }, () => {
+        delivered++;
+      });
+
       await scenario.sql.unsafe(
         `INSERT INTO "orders" (driver_id, status, price) VALUES (1, 'accepted', 10)`,
       );
@@ -192,30 +194,39 @@ describe('Reconnect rebaseline', () => {
       const epochBefore = await eventsTableEpoch(scenario.sql);
       expect(epochBefore).toBeDefined();
 
-      // Arm the stall BEFORE forcing the recreate path. recoverSlot's sequence is
-      // rotateAndSeedEvents (admin traffic, must NOT stall) -> openRebaselinePin (5s window
-      // timer starts) -> rep.start() sends START_REPLICATION on the walsender, the first
-      // observable event after the pin opens — arming here guarantees the window is already
-      // running while the collection's baseline SELECT response is held.
-      proxy.stallAdminOnStartReplication(6500);
+      // Rebaseline listeners run inside the pre-stream window, so this one both slows that window
+      // down and probes it: the row it writes commits AFTER the new slot's consistent point, so no
+      // baseline can contain it and only the stream can carry it.
+      const REBASELINE_MS = 3000;
+      let deliveredDuringRebaseline = -1; // -1 = the rebaseline listener never ran
+      let probeWritten = false;
+      runtime.onReconnect(async () => {
+        const before = delivered;
+        await scenario.sql.unsafe(
+          `INSERT INTO "orders" (driver_id, status, price) VALUES (3, 'accepted', 30)`,
+        );
+        probeWritten = true;
+        await new Promise((resolve) => setTimeout(resolve, REBASELINE_MS));
+        deliveredDuringRebaseline = delivered - before;
+      });
 
       await forceSlotLoss(scenario.sql, slotName);
       const tEdge = Date.now();
 
-      // Downtime delta — the gap the pinned snapshot must cover.
+      // Downtime write — committed before the recreate, so it arrives through the baseline.
       await scenario.sql.unsafe(
         `INSERT INTO "orders" (driver_id, status, price) VALUES (2, 'accepted', 20)`,
       );
 
-      // Gapless convergence: both orders arrive through the pinned baseline, exactly what
-      // breaks if the pin were released while the read is still in flight.
-      await waitFor(() => collection.list().length === 2, 15000);
-      const tConverged = Date.now();
+      await waitFor(() => collection.list().length === 3, 20000);
+      expect(new Set(collection.list().map((r) => r.driverId))).toEqual(new Set([1, 2, 3]));
 
-      expect(new Set(collection.list().map((r) => r.driverId))).toEqual(new Set([1, 2]));
-      // Convergence happened after the window closed underneath the held read — proves the
-      // SELECT actually outlived BASELINE_SNAPSHOT_WINDOW_MS rather than completing inside it.
-      expect(tConverged - tEdge).toBeGreaterThan(5000);
+      // The ordering itself: the probe row existed and was streamable the whole time the
+      // rebaseline ran, and still nothing was delivered — the stream had not opened yet. Moving
+      // the rebaseline back after rep.start() fails here.
+      expect(probeWritten).toBe(true);
+      expect(deliveredDuringRebaseline).toBe(0);
+      expect(Date.now() - tEdge).toBeGreaterThan(REBASELINE_MS);
 
       const epochAfter = await eventsTableEpoch(scenario.sql);
       expect(epochAfter).toBeDefined();
@@ -223,18 +234,18 @@ describe('Reconnect rebaseline', () => {
 
       expect(terminalError).toBeNull();
 
-      // Post-recovery delivery still arrives.
+      // Delivery resumes once the stream opens.
       await scenario.sql.unsafe(
-        `INSERT INTO "orders" (driver_id, status, price) VALUES (3, 'accepted', 30)`,
+        `INSERT INTO "orders" (driver_id, status, price) VALUES (4, 'accepted', 40)`,
       );
-      await waitFor(() => collection.list().length === 3, 10000);
+      await waitFor(() => collection.list().length === 4, 10000);
 
+      unsubFeed();
       collection.dispose();
     } finally {
       await runtime.stop();
       await sourceSql.end();
       await dropSlotWithRetry(scenario.sql, slotName).catch(() => {});
-      await proxy.close();
       await scenario.drop();
     }
   });
