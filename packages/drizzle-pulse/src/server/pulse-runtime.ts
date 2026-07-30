@@ -76,22 +76,21 @@ type SourceTableMetadata = {
 };
 
 // A decoded WAL row event, buffered between a transaction's `begin` and `commit` so the whole
-// transaction persists atomically and acks together. `row`/`oldRow` arrive from minipg's
-// per-table shapes already decoded and keyed by JS property names — for delete, `row` is deliberately `{}` (the
-// tap represents a delete by the absent new row); the persisted events-table row still carries the old row's
-// data (PulseStore's buildEventRow), so persistence and the tap emit stay correctly divergent
-// for deletes.
+// transaction persists atomically and acks together. `row`/`oldRow` arrive from minipg's per-table
+// shapes, already decoded and keyed by JS property names. A delete's `row` is `{}`: the tap
+// represents a delete by the absent new row, while its persisted events-table row is built from
+// the old row instead (PulseStore's buildEventRow) — persistence and the tap stay correctly
+// divergent there. The old row is present exactly when the op has one, since bootstrap() forces
+// REPLICA IDENTITY FULL on every source: update/delete always carry a complete old tuple, insert
+// never does. Discriminating on `op` puts that invariant in the type instead of in every
+// consumer's null check.
 export type PendingWalEvent = {
   eventsTable: PgTable;
   pkKey: string;
   pkValue: unknown;
-  op: 'insert' | 'update' | 'delete';
   row: Record<string, unknown>;
-  // Always a full old tuple for update/delete (REPLICA IDENTITY FULL is forced on every
-  // source), null for insert — so a WHERE is always evaluable against it when present.
-  oldRow: Record<string, unknown> | null;
   tableQualifiedName: string;
-};
+} & ({ op: 'insert'; oldRow: null } | { op: 'update' | 'delete'; oldRow: Record<string, unknown> });
 
 // In-process (embedded) tap subscribers receive each decoded WAL event with its transaction's
 // commit LSN. There is no separate tap-payload shape: a PendingWalEvent already carries the
@@ -1230,73 +1229,67 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       return;
     }
 
-    let row: Record<string, unknown>;
-    let oldRow: Record<string, unknown> | null;
-
-    if (event.kind === 'insert') {
-      row = event.new;
-      oldRow = null;
-    } else {
-      // bootstrap() forces REPLICA IDENTITY FULL on every source before it joins the
-      // publication, so a full old tuple accompanies every update/delete. WAL written under an
-      // earlier identity can still replay (a FOR ALL TABLES publication retains changes from
-      // before a table's first registration); those events can't be decoded faithfully — minipg
-      // null-renders the non-key columns of a 'key' tuple, indistinguishable from real SQL
-      // nulls — so they're skipped loudly instead of emitted with fabricated nulls or silently
-      // missing TOAST-omitted columns.
-      if (event.oldKind !== 'full') {
-        this.logError(
-          `Skipping ${event.kind} on ${tableQualifiedName}: old tuple is ${event.oldKind ?? 'absent'}, not full — this WAL predates the REPLICA IDENTITY FULL applied at boot`,
-        );
-        return;
-      }
-      oldRow = event.old;
-      if (event.kind === 'update') {
-        // pgoutput omits an UPDATE's unchanged TOASTed columns from the new tuple; the
-        // old-under-new spread carries them forward (a full old tuple always has them).
-        row = { ...oldRow, ...event.new };
-      } else {
-        // Deliberately empty: the tap represents a delete by the absent new row. The persisted
-        // events-table row still carries the old row's data via PulseStore's buildEventRow.
-        row = {};
-      }
-    }
-
-    const pkSource = event.kind === 'delete' ? oldRow : row;
-    const pkValue = pkSource?.[metadata.pkKey];
-    if (pkValue === undefined || pkValue === null) {
+    const base = {
+      eventsTable: metadata.eventsTable,
+      pkKey: metadata.pkKey,
+      tableQualifiedName,
+    };
+    // A row whose pk is absent or null can't be keyed by any consumer; the events table and the
+    // tap are both pk-addressed, so the event is dropped rather than emitted unaddressable.
+    const usablePk = (pkValue: unknown): boolean => {
+      if (pkValue !== undefined && pkValue !== null) return true;
       this.logDebug(
         `Skipping ${event.kind} on ${tableQualifiedName}: missing pk (${String(pkValue)})`,
       );
+      return false;
+    };
+
+    if (event.kind === 'insert') {
+      const pkValue = event.new[metadata.pkKey];
+      if (!usablePk(pkValue)) return;
+      tx.events.push({ ...base, op: 'insert', pkValue, row: event.new, oldRow: null });
       return;
     }
 
-    const oldPk = oldRow?.[metadata.pkKey];
-    const pkChanged = !pkValuesEqual(oldPk, pkValue);
-    if (event.kind === 'update' && oldPk != null && pkChanged) {
-      // pk-changing UPDATE: a single update entry keyed by the new pk leaves every
-      // consumer holding a ghost row under the old pk. Synthesize delete(oldPk) then
-      // insert(newPk) — delete MUST precede insert since stream()'s commit case fans out
-      // `events` in order (per-index snapshots for the events table, emit order for the tap).
-      const base = {
-        eventsTable: metadata.eventsTable,
-        pkKey: metadata.pkKey,
-        tableQualifiedName,
-      };
+    // bootstrap() forces REPLICA IDENTITY FULL on every source before it joins the publication, so
+    // a full old tuple accompanies every update/delete. WAL written under an earlier identity can
+    // still replay (a FOR ALL TABLES publication retains changes from before a table's first
+    // registration); those events can't be decoded faithfully — minipg null-renders the non-key
+    // columns of a 'key' tuple, indistinguishable from real SQL nulls — so they're skipped loudly
+    // instead of emitted with fabricated nulls or silently missing TOAST-omitted columns.
+    if (event.oldKind !== 'full') {
+      this.logError(
+        `Skipping ${event.kind} on ${tableQualifiedName}: old tuple is ${event.oldKind ?? 'absent'}, not full — this WAL predates the REPLICA IDENTITY FULL applied at boot`,
+      );
+      return;
+    }
+    const oldRow = event.old;
+
+    if (event.kind === 'delete') {
+      const pkValue = oldRow[metadata.pkKey];
+      if (!usablePk(pkValue)) return;
+      tx.events.push({ ...base, op: 'delete', pkValue, row: {}, oldRow });
+      return;
+    }
+
+    // pgoutput omits an UPDATE's unchanged TOASTed columns from the new tuple; the old-under-new
+    // spread carries them forward (a full old tuple always has them).
+    const row = { ...oldRow, ...event.new };
+    const pkValue = row[metadata.pkKey];
+    if (!usablePk(pkValue)) return;
+
+    const oldPk = oldRow[metadata.pkKey];
+    if (oldPk != null && !pkValuesEqual(oldPk, pkValue)) {
+      // pk-changing UPDATE: a single update entry keyed by the new pk leaves every consumer
+      // holding a ghost row under the old pk. Synthesize delete(oldPk) then insert(newPk) —
+      // delete MUST precede insert since stream()'s commit case fans out `events` in order
+      // (per-index snapshots for the events table, emit order for the tap).
       tx.events.push({ ...base, op: 'delete', pkValue: oldPk, row: {}, oldRow });
       tx.events.push({ ...base, op: 'insert', pkValue, row, oldRow: null });
       return;
     }
 
-    tx.events.push({
-      eventsTable: metadata.eventsTable,
-      pkKey: metadata.pkKey,
-      pkValue,
-      op: event.kind,
-      row,
-      oldRow,
-      tableQualifiedName,
-    });
+    tx.events.push({ ...base, op: 'update', pkValue, row, oldRow });
   }
 
   private getPulseStore(): PulseStore {

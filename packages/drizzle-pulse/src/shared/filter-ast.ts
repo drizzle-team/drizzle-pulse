@@ -1,19 +1,9 @@
 import type { WhereClause } from '../types.js';
 
 /** @internal */
-export const LOGICAL_KEYS = new Set(['OR', 'AND', 'NOT']);
+const LOGICAL_KEYS = new Set(['OR', 'AND', 'NOT']);
 /** @internal */
-export const OPERATOR_KEYS = [
-  'eq',
-  'ne',
-  'gt',
-  'gte',
-  'lt',
-  'lte',
-  'in',
-  'isNull',
-  'isNotNull',
-] as const;
+const OPERATOR_KEYS = ['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'in', 'isNull', 'isNotNull'] as const;
 
 /** @internal */
 export type OperatorObject = {

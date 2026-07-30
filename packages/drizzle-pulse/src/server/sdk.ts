@@ -2,6 +2,7 @@ import { and, eq, getColumns, gt, or, sql } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { extractRow } from '../shared/event-normalization.js';
 import { comparePkValues, isInsertPrepend, isPkComparable } from '../shared/pk-utils.js';
+import { applyProjectionPipeline } from '../shared/projection.js';
 import type {
   LoadMoreRequest,
   LoadMoreResponse,
@@ -23,7 +24,6 @@ import type {
 import { formatCursor, parseCursor } from './cursor.js';
 import { buildWhereClausePredicate } from './drizzle-utils.js';
 import type { AnyPulseBuilders, PulseRegistry } from './pulse-registry.js';
-import { applyResponsePipeline } from './pulse-registry.js';
 import type { PulseSourceDb } from './pulse-sql.js';
 import { buildSelectQuery } from './pulse-sql.js';
 import type { PulseStore } from './pulse-store.js';
@@ -74,6 +74,15 @@ type NormalizedEvent = {
   row: Record<string, unknown> | null;
   old_row: Record<string, unknown> | null;
 };
+
+// The query's own `.transform()` runs before projection, so a transform may add or rename fields
+// that `.columns()` then selects from.
+async function applyResponsePipeline(
+  rows: Record<string, unknown>[],
+  pulseQuery: ResolvedPulseQuery,
+): Promise<Record<string, unknown>[]> {
+  return applyProjectionPipeline(await pulseQuery.transformRows(rows), pulseQuery);
+}
 
 export class PulseRequestHandler {
   constructor(

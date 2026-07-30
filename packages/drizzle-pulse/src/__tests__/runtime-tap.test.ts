@@ -18,6 +18,8 @@ function walEvent(
   row: Record<string, unknown>,
   oldRow: Record<string, unknown> | null,
 ): PendingWalEvent {
+  // Cast: op/oldRow are independent parameters here so the tap's fan-out can be driven with any
+  // combination, including ones PendingWalEvent's op-discriminated shape forbids.
   return {
     eventsTable,
     pkKey: 'id',
@@ -26,7 +28,7 @@ function walEvent(
     row,
     oldRow,
     tableQualifiedName,
-  };
+  } as PendingWalEvent;
 }
 
 function emit(runtime: unknown, event: PendingWalEvent, lsn: string): void {

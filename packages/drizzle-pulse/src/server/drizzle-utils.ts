@@ -26,15 +26,6 @@ import type { WhereClause } from '../types.js';
 
 type WhereAst = ReturnType<typeof parseWhereClause>;
 
-function combineWithAnd(clauses: SQL[]): SQL | undefined {
-  if (clauses.length === 0) return undefined;
-  if (clauses.length === 1) {
-    const [singleClause] = clauses;
-    return singleClause;
-  }
-  return and(...clauses) ?? undefined;
-}
-
 function getColumn(
   columnName: string,
   columns: Record<string, PgColumn>,
@@ -101,7 +92,7 @@ function buildColumnFilterPredicate(
     clauses.push(drizzleIsNotNull(column));
   }
 
-  return combineWithAnd(clauses);
+  return and(...clauses);
 }
 
 function buildWhereAstPredicate(
@@ -159,7 +150,7 @@ function buildWhereAstPredicate(
     }
   }
 
-  return combineWithAnd(clauses);
+  return and(...clauses);
 }
 
 /**

@@ -73,17 +73,7 @@ export class PulseStore {
   ): Promise<void> {
     await this.db.transaction(async (tx) => {
       for (const event of events) {
-        await this.insertEventRow(
-          event.eventsTable,
-          this.buildEventRow({
-            op: event.op,
-            pkKey: event.pkKey,
-            pkValue: event.pkValue,
-            row: event.row,
-            oldRow: event.oldRow,
-          }),
-          tx,
-        );
+        await this.insertEventRow(event.eventsTable, this.buildEventRow(event), tx);
       }
 
       await tx
@@ -150,18 +140,17 @@ export class PulseStore {
   // rather than which fields are present. `row` is always passed (delete's is `{}` per
   // PendingWalEvent's tap contract) but deliberately ignored for deletes below — a delete's
   // persisted row is old-row-derived.
-  private buildEventRow(input: {
-    op: 'insert' | 'update' | 'delete' | 'snapshot';
-    pkKey: string;
-    pkValue: unknown;
-    row: Record<string, unknown>;
-    oldRow: Record<string, unknown> | null;
-  }): Record<string, unknown> {
-    const { pkKey, pkValue, op, row, oldRow } = input;
+  private buildEventRow(
+    input: { pkKey: string; pkValue: unknown; row: Record<string, unknown> } & (
+      | { op: 'insert'; oldRow: null }
+      | { op: 'update' | 'delete' | 'snapshot'; oldRow: Record<string, unknown> }
+    ),
+  ): Record<string, unknown> {
+    const { pkKey, pkValue, op, row } = input;
 
     const nextRowData = op === 'delete' ? null : this.withPrimaryKeyValue(row, pkKey, pkValue);
     const nextOldRowData =
-      op === 'insert' ? nextRowData : this.withPrimaryKeyValue(oldRow ?? row, pkKey, pkValue);
+      op === 'insert' ? nextRowData : this.withPrimaryKeyValue(input.oldRow, pkKey, pkValue);
 
     return {
       [pkKey]: pkValue,

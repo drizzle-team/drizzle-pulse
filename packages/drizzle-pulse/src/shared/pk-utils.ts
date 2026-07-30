@@ -1,7 +1,6 @@
 /**
- * Shared PK comparison and validation utilities.
- * Used by both server (pulse-runtime.ts) and client (react.ts) for consistent
- * monotonic-invariant behavior.
+ * PK comparison and validation shared by the merge cores, the pull handlers (sdk.ts), and the
+ * HTTP client's range tracking, so all three agree on the monotonic invariant.
  */
 
 /**

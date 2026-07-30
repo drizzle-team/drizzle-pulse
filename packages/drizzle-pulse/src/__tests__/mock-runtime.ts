@@ -128,7 +128,9 @@ export function makeMockRuntime(opts: MockRuntimeOptions = {}) {
     oldRow: Record<string, unknown> | null,
     lsn: string,
   ): void => {
-    const event: PendingWalEvent = {
+    // Cast: op/oldRow arrive as independent parameters so a test can emit any combination,
+    // including the ones PendingWalEvent's op-discriminated shape forbids.
+    const event = {
       eventsTable: ordersTable,
       pkKey: 'id',
       pkValue: (row as { id?: unknown }).id ?? (oldRow as { id?: unknown } | null)?.id,
@@ -136,7 +138,7 @@ export function makeMockRuntime(opts: MockRuntimeOptions = {}) {
       row,
       oldRow,
       tableQualifiedName,
-    };
+    } as PendingWalEvent;
     for (const listener of tapListeners.get(tableQualifiedName) ?? []) listener(event, lsn);
   };
 
