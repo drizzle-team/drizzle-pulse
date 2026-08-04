@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import { getTableUniqueName } from 'drizzle-orm';
-import { createPulseEvents } from '../client/embedded/events.js';
-import { makeMockRuntime, ordersTable } from './mock-runtime.js';
+import { createPulseEvents, type PulseEventsOptions } from '../client/embedded/events.js';
+import type { PulseEvent } from '../shared/pulse-events.js';
+import { asRuntime, makeMockRuntime, ordersTable } from './mock-runtime.js';
 
 // ---------------------------------------------------------------------------
 // No DB required: createPulseEvents is synchronous and stateless — no baseline,
@@ -11,39 +12,52 @@ import { makeMockRuntime, ordersTable } from './mock-runtime.js';
 
 const tableKey = getTableUniqueName(ordersTable);
 
+type TestRow = Record<string, unknown> & { $pk: unknown };
+type TestCallback = (event: PulseEvent<TestRow>, lsn: string) => void;
+
+// The mock's feed, narrowed to the queries the fixture registry serves — subscriptions
+// get typed events instead of `any`.
+function makeEvents(runtime: ReturnType<typeof makeMockRuntime>) {
+  return createPulseEvents(asRuntime(runtime)) as unknown as {
+    orders: (callback: TestCallback, options?: PulseEventsOptions) => () => void;
+    nope: (callback: TestCallback) => () => void;
+  };
+}
+
 describe('createPulseEvents — sync rejection paths', () => {
   test('an unknown query name throws synchronously', () => {
     const runtime = makeMockRuntime();
-    runtime.registry = { ...runtime.registry, getPulseQuery: () => undefined } as any;
-    const events = createPulseEvents(runtime as any);
-    expect(() => (events as any).nope(() => {})).toThrow('Unknown query: "nope"');
+    runtime.registry = { ...runtime.registry, getPulseQuery: () => undefined };
+    const events = makeEvents(runtime);
+    expect(() => events.nope(() => {})).toThrow('Unknown query: "nope"');
   });
 
   test('subscribing before runtime.start() throws synchronously', () => {
     const runtime = makeMockRuntime({ isRunning: false });
-    const events = createPulseEvents(runtime as any);
-    expect(() => (events as any).orders(() => {})).toThrow(/after runtime\.start\(\)/);
+    const events = makeEvents(runtime);
+    expect(() => events.orders(() => {})).toThrow(/after runtime\.start\(\)/);
   });
 
   test('a .transform() query throws synchronously', () => {
     const runtime = makeMockRuntime({ hasTransform: true });
-    const events = createPulseEvents(runtime as any);
-    expect(() => (events as any).orders(() => {})).toThrow(/\.transform\(\)/);
+    const events = makeEvents(runtime);
+    expect(() => events.orders(() => {})).toThrow(/\.transform\(\)/);
   });
 
   test('a .limit() query throws synchronously', () => {
     const runtime = makeMockRuntime({ limit: 2 });
-    const events = createPulseEvents(runtime as any);
-    expect(() => (events as any).orders(() => {})).toThrow(/\.limit\(\)/);
+    const events = makeEvents(runtime);
+    expect(() => events.orders(() => {})).toThrow(/\.limit\(\)/);
   });
 
   test('a missing/wrong-arity callback throws synchronously instead of failing silently per event', () => {
     const runtime = makeMockRuntime();
-    const events = createPulseEvents(runtime as any);
-    // No-args query called as `events.orders(optionsObject)` — the "callback" is really options.
-    expect(() => (events as any).orders({ auth: { userId: 'u1' } })).toThrow(
-      /expected a callback function/,
-    );
+    const events = makeEvents(runtime);
+    // No-args query called as `events.orders(optionsObject)` — the "callback" is really options,
+    // a misuse the type surface forbids, so the call goes through a deliberately-wrong shape.
+    expect(() =>
+      (events.orders as unknown as (options: unknown) => void)({ auth: { userId: 'u1' } }),
+    ).toThrow(/expected a callback function/);
   });
 });
 
@@ -53,11 +67,11 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
     runtime.readCollectionBaseline = async () => {
       throw new Error('readCollectionBaseline must never be called by createPulseEvents');
     };
-    const events = createPulseEvents(runtime as any);
+    const events = makeEvents(runtime);
     const received: unknown[] = [];
 
     expect(() =>
-      (events as any).orders((event: unknown) => {
+      events.orders((event: unknown) => {
         received.push(event);
       }),
     ).not.toThrow();
@@ -68,9 +82,9 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
 
   test('only rows matching the resolved WHERE produce callbacks', () => {
     const runtime = makeMockRuntime({ where: { status: { eq: 'accepted' } } });
-    const events = createPulseEvents(runtime as any);
+    const events = makeEvents(runtime);
     const received: unknown[] = [];
-    (events as any).orders((event: unknown) => received.push(event));
+    events.orders((event: unknown) => received.push(event));
 
     runtime.emitTap(tableKey, 'insert', { id: 1, status: 'requested', price: 10 }, null, '0/100');
     expect(received).toHaveLength(0);
@@ -81,9 +95,9 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
 
   test('the callback receives (event, lsn) with lsn equal to the emitted payload lsn', () => {
     const runtime = makeMockRuntime();
-    const events = createPulseEvents(runtime as any);
+    const events = makeEvents(runtime);
     const received: Array<[string, string]> = [];
-    (events as any).orders((event: any, lsn: string) => received.push([event.op, lsn]));
+    events.orders((event: any, lsn: string) => received.push([event.op, lsn]));
 
     runtime.emitTap(tableKey, 'insert', { id: 1, status: 'accepted', price: 10 }, null, '0/1A2B');
     expect(received).toEqual([['insert', '0/1A2B']]);
@@ -91,9 +105,9 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
 
   test('an update carries matchesNew as the row moves out of the filter', () => {
     const runtime = makeMockRuntime({ where: { status: { eq: 'accepted' } } });
-    const events = createPulseEvents(runtime as any);
+    const events = makeEvents(runtime);
     const received: Array<{ matchesNew: boolean }> = [];
-    (events as any).orders((event: any) => received.push(event));
+    events.orders((event: any) => received.push(event));
 
     runtime.emitTap(
       tableKey,
@@ -107,11 +121,11 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
     expect(received[0]!.matchesNew).toBe(false);
   });
 
-  test('a delete whose old row does not match the where is suppressed (CR-01)', () => {
+  test('a delete whose old row does not match the where is suppressed', () => {
     const runtime = makeMockRuntime({ where: { status: { eq: 'accepted' } } });
-    const events = createPulseEvents(runtime as any);
+    const events = makeEvents(runtime);
     const received: Array<{ op: string }> = [];
-    (events as any).orders((event: any) => received.push(event));
+    events.orders((event: any) => received.push(event));
 
     runtime.emitTap(tableKey, 'delete', {}, { id: 1, status: 'completed', price: 10 }, '0/302');
 
@@ -120,9 +134,9 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
 
   test('a delete whose old row matches the where is delivered', () => {
     const runtime = makeMockRuntime({ where: { status: { eq: 'accepted' } } });
-    const events = createPulseEvents(runtime as any);
+    const events = makeEvents(runtime);
     const received: Array<{ op: string }> = [];
-    (events as any).orders((event: any) => received.push(event));
+    events.orders((event: any) => received.push(event));
 
     runtime.emitTap(tableKey, 'delete', {}, { id: 1, status: 'accepted', price: 10 }, '0/303');
 
@@ -130,11 +144,11 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
     expect(received[0]!.op).toBe('delete');
   });
 
-  test('an update where neither side matches the where is suppressed (CR-01)', () => {
+  test('an update where neither side matches the where is suppressed', () => {
     const runtime = makeMockRuntime({ where: { status: { eq: 'accepted' } } });
-    const events = createPulseEvents(runtime as any);
+    const events = makeEvents(runtime);
     const received: unknown[] = [];
-    (events as any).orders((event: unknown) => received.push(event));
+    events.orders((event: unknown) => received.push(event));
 
     runtime.emitTap(
       tableKey,
@@ -147,11 +161,11 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
     expect(received).toHaveLength(0);
   });
 
-  test('an update leaving the filter is delivered with the row redacted to pk-only (CR-01)', () => {
+  test('an update leaving the filter is delivered with the row redacted to pk-only', () => {
     const runtime = makeMockRuntime({ where: { status: { eq: 'accepted' } } });
-    const events = createPulseEvents(runtime as any);
+    const events = makeEvents(runtime);
     const received: Array<{ row: unknown; matchesNew: boolean }> = [];
-    (events as any).orders((event: any) => received.push(event));
+    events.orders((event: any) => received.push(event));
 
     runtime.emitTap(
       tableKey,
@@ -168,9 +182,9 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
 
   test('unsubscribe stops delivery and is idempotent', () => {
     const runtime = makeMockRuntime();
-    const events = createPulseEvents(runtime as any);
+    const events = makeEvents(runtime);
     let count = 0;
-    const unsub = (events as any).orders(() => count++);
+    const unsub = events.orders(() => count++);
 
     runtime.emitTap(tableKey, 'insert', { id: 1, status: 'accepted', price: 10 }, null, '0/100');
     expect(count).toBe(1);
@@ -192,9 +206,9 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
       };
     };
 
-    const events = createPulseEvents(runtime as any);
+    const events = makeEvents(runtime);
     let count = 0;
-    (events as any).orders(() => count++);
+    events.orders(() => count++);
 
     runtime.emitTap(tableKey, 'insert', { id: 1, status: 'accepted', price: 10 }, null, '0/100');
     expect(count).toBe(1);

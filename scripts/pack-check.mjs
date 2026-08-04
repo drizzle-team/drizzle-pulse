@@ -86,7 +86,7 @@ if (catalogOrWorkspaceLeaks.length > 0) {
 }
 
 // Catches stale compiled output from since-deleted src files (a bare `tsc` prepack
-// doesn't clean dist/, so deleted modules can keep shipping — see WR-01).
+// doesn't clean dist/, so deleted modules can keep shipping).
 const orphanedDistFiles = [];
 for (const path of packedPaths) {
   if (!path.startsWith('dist/') || !path.endsWith('.js')) continue;

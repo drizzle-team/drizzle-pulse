@@ -25,7 +25,7 @@ function parseLsnForAssertions(lsn: string): bigint {
 }
 
 // ---------------------------------------------------------------------------
-// createPulseEvents (SPLIT-06): stateless, per-event WAL subscription — typed,
+// createPulseEvents: stateless, per-event WAL subscription — typed,
 // WHERE-filtered insert/update/delete callbacks in commit order, no baseline, no
 // merge core, no materialized state anywhere in this suite's assertions.
 // ---------------------------------------------------------------------------
@@ -43,7 +43,7 @@ describe('createPulseEvents', () => {
     .args(fixture.schemas.ordersByStatusArgs)
     .order('asc')
     .query((ctx) => ctx.query({ status: ctx.args.status }));
-  // Kept solely to prove the synchronous rejections below (SPLIT-02/SPLIT-06 guardrails).
+  // Kept solely to prove the synchronous rejections below.
   const ordersByStatusLimited = pulse(orders)
     .args(fixture.schemas.ordersByStatusArgs)
     .order('asc')

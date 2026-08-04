@@ -98,7 +98,7 @@ export interface MockRuntimeOptions {
 
 // Shared mock runtime for createPulseClient/createPulseEvents tests — deliberately has no
 // `handlers` property: the tap-direct embedded path must not need the SDK/wire-protocol
-// surface (SPLIT-03). Tests override individual methods (registry, onStop, etc.) post-
+// surface. Tests override individual methods (registry, onStop, etc.) post-
 // construction the same way they reassign subscribeTap.
 export function makeMockRuntime(opts: MockRuntimeOptions = {}) {
   const registryStub = makeRegistryStub({
@@ -151,13 +151,20 @@ export function makeMockRuntime(opts: MockRuntimeOptions = {}) {
       watermark: opts.watermark ?? '0/100',
     }),
     registry: {
-      getPulseQuery: () => registryStub,
+      getPulseQuery: (): PulseRegistryQuery | undefined => registryStub,
       resolve: () => resolved,
     },
     onReconnect: (_listener: () => void) => () => {},
     onStop: (_listener: () => void) => () => {},
     onTerminalError: (_listener: (error: Error) => void) => () => {},
   };
+}
+
+// PulseRuntime carries private state, so no structural mock can satisfy its class type.
+// This is the one deliberate cast that hands the mock to the embedded factories — tests
+// keep the mock's own (fully typed) shape everywhere else.
+export function asRuntime(mock: ReturnType<typeof makeMockRuntime>): PulseRuntime<any> {
+  return mock as unknown as PulseRuntime<any>;
 }
 
 // Construct a real PulseRuntime with an empty registry (no DB required).
@@ -169,8 +176,7 @@ export function makePulseRuntime(
     logLevel?: LogLevel;
   } = {},
 ): PulseRuntime<any> {
-  const emptyRegistry = createPulseRegistry({});
-  return new PulseRuntime(emptyRegistry as any, {
+  return new PulseRuntime(createPulseRegistry({}), {
     databaseUrl: opts.databaseUrl ?? 'postgresql://user:pass@localhost/test',
     sourceDb: opts.sourceDb ?? ({} as PulseSourceDb),
     pull: opts.pull ?? true,

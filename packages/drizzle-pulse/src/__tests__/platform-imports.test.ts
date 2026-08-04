@@ -39,15 +39,6 @@ function bannedReason(specifier: string): string | null {
   if (specifier.startsWith('node:') || NODE_BUILTINS.has(specifier)) {
     return 'node builtin';
   }
-  if (specifier === 'pg' || specifier.startsWith('pg/')) {
-    return 'pg (server-only Postgres driver)';
-  }
-  if (specifier === 'pg-logical-replication' || specifier.startsWith('pg-logical-replication/')) {
-    return 'pg-logical-replication (server-only WAL client)';
-  }
-  if (specifier === 'postgres' || specifier.startsWith('postgres/')) {
-    return 'postgres (server-only driver)';
-  }
   if (specifier === 'minipg' || specifier.startsWith('minipg/')) {
     return 'minipg (server-only replication/store driver)';
   }
@@ -55,8 +46,8 @@ function bannedReason(specifier: string): string | null {
     return 'hono (server-only HTTP framework)';
   }
   // Bare `drizzle-orm` (query-building/metadata utils) is dialect-agnostic and allowed.
-  // Any subpath (`drizzle-orm/node-postgres`, `drizzle-orm/pg-core`, ...) binds to a
-  // specific dialect/driver and is treated as server-only runtime surface.
+  // Any subpath (`drizzle-orm/pg-core`, `drizzle-orm/postgres`, ...) binds to a specific
+  // dialect/driver and is treated as server-only runtime surface.
   if (specifier.startsWith('drizzle-orm/')) {
     return 'drizzle-orm/* runtime driver subpath';
   }
@@ -256,7 +247,7 @@ describe('platform-agnostic entrypoint import purity', () => {
   });
 });
 
-// Per-root positive/negative reachability: SPLIT-05's contract is that each client
+// Per-root positive/negative reachability: the contract is that each client
 // entrypoint's value graph excludes what it doesn't need and includes what it does — an
 // exclusion-only guard can pass vacuously if the traversal itself silently breaks (e.g. a
 // resolver bug that stops walking early), so every excluded root also carries a positive
@@ -283,8 +274,8 @@ function checkRootStructure(
   return violations;
 }
 
-describe('SPLIT-05 embedded/events per-root inclusion and exclusion contract', () => {
-  test('embedded root excludes the HTTP/wire-protocol/ranged-merge surface and includes the tap-direct primitives; the events-module root additionally excludes the merge core (SPLIT-01/SPLIT-06)', () => {
+describe('embedded/events per-root inclusion and exclusion contract', () => {
+  test('embedded root excludes the HTTP/wire-protocol/ranged-merge surface and includes the tap-direct primitives; the events-module root additionally excludes the merge core', () => {
     // Explicit denylist entries mirror what Task 1's generic src/server/* path ban already
     // catches for these two roots — spelled out here so a violation names the exact expected
     // module in the report, rather than only the first server path the traversal happens to
@@ -365,7 +356,7 @@ describe('SPLIT-05 embedded/events per-root inclusion and exclusion contract', (
       const report = violations
         .map((v) => `  root ${v.root}\n    ${v.rule} violation: ${v.path}`)
         .join('\n');
-      throw new Error(`SPLIT-05 per-root structural contract violated:\n${report}`);
+      throw new Error(`Per-root structural contract violated:\n${report}`);
     }
   });
 });

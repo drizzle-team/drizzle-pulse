@@ -1,10 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { desc, type EmptyRelations, eq, getColumns, getTableUniqueName, sql } from 'drizzle-orm';
+import { desc, eq, getColumns, getTableUniqueName, sql } from 'drizzle-orm';
 import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
-import { drizzle } from 'drizzle-orm/postgres';
 import { buildShape } from 'drizzle-orm/postgres/shape';
 import {
-  type Connection,
   lsnFromString,
   type ReplicationConnection,
   type ReplicationEvent,
@@ -128,7 +126,7 @@ type Run = { abort: AbortController; attempts: number; done?: Promise<void> };
 // rebaselineCollections() — the collections read the exact state the stream is about to start
 // from. `watermark` is that start position (the slot's consistent point).
 export type BaselineSnapshot = {
-  db: ReturnType<typeof drizzle<EmptyRelations, Connection>>;
+  db: PulseSourceDb;
   watermark: string;
 };
 
@@ -141,17 +139,6 @@ function getPgErrorCode(error: unknown): string | undefined {
     (cause as { code?: string } | null | undefined)?.code ??
     (error as { code?: string } | null | undefined)?.code
   );
-}
-
-// Defense-in-depth: the exported snapshot name comes from Postgres itself, but `SET
-// TRANSACTION SNAPSHOT` cannot take a bind parameter — validate its charset before it is ever
-// interpolated into a raw SQL string.
-function assertSnapshotName(name: string): void {
-  if (!/^[0-9A-Fa-f-]+$/.test(name)) {
-    throw new Error(
-      `Refusing to use exported snapshot name "${name}": expected only hex digits and dashes`,
-    );
-  }
 }
 
 // A resolve() with idempotent settling — runReplicationLoop() resolves `startupSettled` from
@@ -584,7 +571,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
       // Runs a self-provisioning DDL statement, rethrowing on failure with the exact statement
       // and the grant it most likely needs — the error a misconfigured deploy actually hits.
-      const execDdl = async (statement: string, missingGrant: string): Promise<void> => {
+      const execAssumingGrant = async (statement: string, missingGrant: string): Promise<void> => {
         try {
           await tx.execute(sql.raw(statement));
         } catch (cause) {
@@ -630,7 +617,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
           sql`SELECT c.relreplident FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ${source.schemaName} AND c.relname = ${source.tableName}`,
         );
         if (relreplident !== 'f') {
-          await execDdl(
+          await execAssumingGrant(
             `ALTER TABLE ${source.quoted} REPLICA IDENTITY FULL`,
             `ownership of ${source.name}`,
           );
@@ -650,7 +637,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
           registeredSources.length > 0
             ? ` FOR TABLE ${registeredSources.map((source) => source.quoted).join(', ')}`
             : '';
-        await execDdl(
+        await execAssumingGrant(
           `CREATE PUBLICATION ${pubIdent}${forTables} WITH (publish = 'insert, update, delete')`,
           'the database CREATE privilege and ownership of the published tables',
         );
@@ -670,7 +657,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
         for (const source of registeredSources) {
           if (!memberNames.has(source.name)) {
-            await execDdl(
+            await execAssumingGrant(
               `ALTER PUBLICATION ${pubIdent} ADD TABLE ${source.quoted}`,
               `ownership of the publication and of ${source.name}`,
             );
@@ -682,11 +669,11 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         // pg_class, so a dropped table has already left membership on its own).
         for (const member of members) {
           if (registeredNames.has(member.name)) continue;
-          await execDdl(
+          await execAssumingGrant(
             `ALTER PUBLICATION ${pubIdent} DROP TABLE ${member.quoted}`,
             'ownership of the publication',
           );
-          await execDdl(
+          await execAssumingGrant(
             `ALTER TABLE ${member.quoted} REPLICA IDENTITY DEFAULT`,
             `ownership of ${member.name}`,
           );
@@ -1038,14 +1025,11 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   // epoch, truncates it, and seeds it from the exported snapshot — the sole write path outside
   // bootstrap()/the WAL loop; sdk.ts pull handlers stay strictly read-only.
   private async rotateAndSeedEvents(snapshotName: string, consistentPoint: string): Promise<void> {
-    assertSnapshotName(snapshotName);
     const adminDb = this.getPulseStore().getDb();
     const { pulseMeta, pulseStream } = this.getPulseStore();
 
     const epochByName = await adminDb.transaction(
       async (tx) => {
-        await tx.execute(sql.raw(`SET TRANSACTION SNAPSHOT '${snapshotName}'`));
-
         const epochs = new Map<string, string>();
         for (const queryName of this.registry.getQueryNames()) {
           const pulseQuery = this.registry.getPulseQuery(queryName);
@@ -1098,7 +1082,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
         return epochs;
       },
-      { isolationLevel: 'repeatable read' },
+      { isolationLevel: 'repeatable read', snapshot: snapshotName },
     );
 
     this.eventsEpochs = new Map([...this.eventsEpochs, ...epochByName]);
@@ -1131,26 +1115,19 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       return;
     }
 
-    assertSnapshotName(snapshot);
-    const { client, release } = await this.getPulseStore().checkout();
-    try {
-      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
-      await client.query(`SET TRANSACTION SNAPSHOT '${snapshot}'`);
-      // Nothing else consumes WAL until these reads return, so an unbounded one (a baseline
-      // queued behind an ACCESS EXCLUSIVE lock, a black-holed route) would stall replication and
-      // grow the slot's retained WAL for as long as it hangs. Failing that read instead costs one
-      // collection its rebaseline — it reports onError and re-syncs on the next reconnect.
-      await client.query(`SET LOCAL statement_timeout = ${REBASELINE_TIMEOUT_MS}`);
-      const baseline: BaselineSnapshot = { db: drizzle({ client }), watermark };
-      await Promise.allSettled(listeners.map(async (listener) => listener(baseline)));
-    } finally {
-      try {
-        await client.query('ROLLBACK');
-      } catch {
-        // Connection may already be dead — release() below still runs.
-      }
-      release();
-    }
+    const adminDb = this.getPulseStore().getDb();
+    await adminDb.transaction(
+      async (tx) => {
+        // Nothing else consumes WAL until these reads return, so an unbounded one (a baseline
+        // queued behind an ACCESS EXCLUSIVE lock, a black-holed route) would stall replication and
+        // grow the slot's retained WAL for as long as it hangs. Failing that read instead costs one
+        // collection its rebaseline — it reports onError and re-syncs on the next reconnect.
+        await tx.execute(sql.raw(`SET LOCAL statement_timeout = ${REBASELINE_TIMEOUT_MS}`));
+        const baseline: BaselineSnapshot = { db: tx, watermark };
+        await Promise.allSettled(listeners.map(async (listener) => listener(baseline)));
+      },
+      { isolationLevel: 'repeatable read', accessMode: 'read only', snapshot },
+    );
   }
 
   // One `tx` local per connection, so a reconnect can never observe a stale half-buffered

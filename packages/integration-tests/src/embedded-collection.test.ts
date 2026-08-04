@@ -50,7 +50,7 @@ describe('Embedded Collection', () => {
     .args(fixture.schemas.ordersByStatusArgs)
     .order('asc')
     .query((ctx) => ctx.query({ status: ctx.args.status }));
-  // Kept solely to prove the SPLIT-02 rejection below — embedded collections must reject
+  // Kept solely to prove the rejection below — embedded collections must reject
   // `.limit()` at creation, so the registry needs one such query on hand.
   const ordersByStatusLimited = pulse(orders)
     .args(fixture.schemas.ordersByStatusArgs)
@@ -266,7 +266,7 @@ describe('Embedded Collection', () => {
     collection.dispose();
   });
 
-  // SPLIT-02: the registry keeps a `.limit(2)` query definition precisely so this rejection
+  // The registry keeps a `.limit(2)` query definition precisely so this rejection
   // is exercised against a real runtime, not just unit-mocked.
   test('embedded collections reject .limit() queries at creation', async () => {
     const client = createPulseClient(runtime);

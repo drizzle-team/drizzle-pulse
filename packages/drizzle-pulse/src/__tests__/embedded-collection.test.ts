@@ -1,7 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import { getTableUniqueName } from 'drizzle-orm';
-import { createPulseClient } from '../client/embedded/index.js';
-import { makeMockRuntime, ordersTable } from './mock-runtime.js';
+import {
+  createPulseClient,
+  type PulseCollection,
+  type PulseCollectionOptions,
+} from '../client/embedded/index.js';
+import { asRuntime, makeMockRuntime, ordersTable } from './mock-runtime.js';
 
 // ---------------------------------------------------------------------------
 // No DB required: these cover the embedded client's tap-direct handshake, the
@@ -11,6 +15,17 @@ import { makeMockRuntime, ordersTable } from './mock-runtime.js';
 
 const tableKey = getTableUniqueName(ordersTable);
 
+type TestRow = Record<string, unknown> & { $pk: unknown };
+
+// The mock's client, narrowed to the queries the fixture registry serves — collection
+// assertions get the real PulseCollection surface instead of `any`.
+function makeClient(runtime: ReturnType<typeof makeMockRuntime>) {
+  return createPulseClient(asRuntime(runtime)) as unknown as {
+    orders: (options?: PulseCollectionOptions) => Promise<PulseCollection<TestRow>>;
+    nope: () => Promise<PulseCollection<TestRow>>;
+  };
+}
+
 async function flushMicrotasks(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -18,27 +33,27 @@ async function flushMicrotasks(): Promise<void> {
 describe('embedded client — user-facing error paths', () => {
   test('creating a .transform() query rejects (unsupported in the embedded client)', async () => {
     const runtime = makeMockRuntime({ hasTransform: true });
-    const client = createPulseClient(runtime as any);
-    await expect((client as any).orders()).rejects.toThrow(/\.transform\(\)/);
+    const client = makeClient(runtime);
+    await expect(client.orders()).rejects.toThrow(/\.transform\(\)/);
   });
 
   test('creating a .limit() query rejects (unsupported in the embedded client)', async () => {
     const runtime = makeMockRuntime({ limit: 2 });
-    const client = createPulseClient(runtime as any);
-    await expect((client as any).orders()).rejects.toThrow(/\.limit\(\)/);
+    const client = makeClient(runtime);
+    await expect(client.orders()).rejects.toThrow(/\.limit\(\)/);
   });
 
   test('creating a collection before runtime.start() rejects', async () => {
     const runtime = makeMockRuntime({ isRunning: false });
-    const client = createPulseClient(runtime as any);
-    await expect((client as any).orders()).rejects.toThrow(/after runtime\.start\(\)/);
+    const client = makeClient(runtime);
+    await expect(client.orders()).rejects.toThrow(/after runtime\.start\(\)/);
   });
 
   test('an unknown query name rejects', async () => {
     const runtime = makeMockRuntime();
-    runtime.registry = { ...runtime.registry, getPulseQuery: () => undefined } as any;
-    const client = createPulseClient(runtime as any);
-    await expect((client as any).nope()).rejects.toThrow('Unknown query: "nope"');
+    runtime.registry = { ...runtime.registry, getPulseQuery: () => undefined };
+    const client = makeClient(runtime);
+    await expect(client.nope()).rejects.toThrow('Unknown query: "nope"');
   });
 
   test('the factory rejects when the initial baseline read fails and the tap is detached', async () => {
@@ -57,8 +72,8 @@ describe('embedded client — user-facing error paths', () => {
       };
     };
 
-    const client = createPulseClient(runtime as any);
-    await expect((client as any).orders()).rejects.toThrow('DB connection failed');
+    const client = makeClient(runtime);
+    await expect(client.orders()).rejects.toThrow('DB connection failed');
     // dispose() ran on the failed handshake, detaching the WAL tap.
     expect(unsubCount).toBe(1);
   });
@@ -80,8 +95,8 @@ describe('embedded client — user-facing error paths', () => {
       return () => {};
     };
 
-    const client = createPulseClient(runtime as any);
-    const pending = (client as any).orders();
+    const client = makeClient(runtime);
+    const pending = client.orders();
     // Simulate runtime.stop() broadcasting while the baseline read is in flight.
     for (const listener of stopListeners) listener();
     releaseBaseline();
@@ -91,9 +106,9 @@ describe('embedded client — user-facing error paths', () => {
 
   test('the client proxy is not accidentally thenable — awaiting it settles instead of hanging', async () => {
     const runtime = makeMockRuntime();
-    const client = createPulseClient(runtime as any);
+    const client = makeClient(runtime);
 
-    expect((client as any).then).toBeUndefined();
+    expect((client as { then?: unknown }).then).toBeUndefined();
     // Race against a short timeout: pre-fix, `await client` never settles because the
     // proxy's `then` triggers a rejected-but-ignored promise instead of resolving/rejecting
     // the awaiting one. `Promise.race` proves the await itself resolves promptly.
@@ -105,14 +120,14 @@ describe('embedded client — user-facing error paths', () => {
   });
 });
 
-describe('embedded client — zero wire protocol (SPLIT-03)', () => {
+describe('embedded client — zero wire protocol', () => {
   test('the mock runtime has no handlers property and the collection still works', async () => {
     // The tap-direct client must not need the SDK/wire-protocol surface at all.
     const runtime = makeMockRuntime({ baselineRows: [{ id: 1, status: 'accepted', price: 10 }] });
     expect('handlers' in runtime).toBe(false);
 
-    const client = createPulseClient(runtime as any);
-    const collection = await (client as any).orders();
+    const client = makeClient(runtime);
+    const collection = await client.orders();
     expect(collection.list()).toHaveLength(1);
 
     runtime.emitTap(tableKey, 'insert', { id: 2, status: 'accepted', price: 20 }, null, '0/999');
@@ -128,8 +143,8 @@ describe('embedded client — tap-direct handshake', () => {
       baselineRows: [{ id: 1, status: 'accepted', price: 10 }],
       watermark: '0/100',
     });
-    const client = createPulseClient(runtime as any);
-    const collection = await (client as any).orders();
+    const client = makeClient(runtime);
+    const collection = await client.orders();
 
     const changes: Array<{ events: readonly any[]; state: readonly any[]; lsn: string }> = [];
     collection.onChange((c: any) => changes.push(c));
@@ -153,8 +168,8 @@ describe('embedded client — tap-direct handshake', () => {
       baselineRows: [{ id: 1, status: 'accepted', price: 10 }],
       watermark: '0/100',
     });
-    const client = createPulseClient(runtime as any);
-    const collection = await (client as any).orders();
+    const client = makeClient(runtime);
+    const collection = await client.orders();
 
     runtime.emitTap(tableKey, 'insert', { id: 1, status: 'accepted', price: 10 }, null, '0/110');
 
@@ -169,8 +184,8 @@ describe('embedded client — tap-direct handshake', () => {
       baselineRows: [{ id: 1, status: 'accepted', price: 10 }],
       where: { status: { eq: 'accepted' } },
     });
-    const client = createPulseClient(runtime as any);
-    const collection = await (client as any).orders();
+    const client = makeClient(runtime);
+    const collection = await client.orders();
 
     const changes: any[] = [];
     collection.onChange((c: any) => changes.push(c));
@@ -208,8 +223,8 @@ describe('embedded client — tap-direct handshake', () => {
       };
     };
 
-    const client = createPulseClient(runtime as any);
-    const collection = await (client as any).orders();
+    const client = makeClient(runtime);
+    const collection = await client.orders();
 
     let changeCount = 0;
     let errorCount = 0;
@@ -245,8 +260,8 @@ describe('embedded client — tap-direct handshake', () => {
       };
     };
 
-    const client = createPulseClient(runtime as any);
-    const collection = await (client as any).orders();
+    const client = makeClient(runtime);
+    const collection = await client.orders();
     expect(collection.list()).toHaveLength(1);
 
     const changes: any[] = [];
@@ -271,7 +286,7 @@ describe('embedded client — tap-direct handshake', () => {
     collection.dispose();
   });
 
-  test('an overlapping reconnect handshake supersedes a slower stale one (CR-01)', async () => {
+  test('an overlapping reconnect handshake supersedes a slower stale one', async () => {
     let reconnectListener: (() => void) | undefined;
     const runtime = makeMockRuntime({
       baselineRows: [{ id: 1, status: 'accepted', price: 10 }],
@@ -310,12 +325,12 @@ describe('embedded client — tap-direct handshake', () => {
       };
     };
 
-    const client = createPulseClient(runtime as any);
+    const client = makeClient(runtime);
     // Initial handshake (gen 1) starts and blocks on initialGate.
-    const collectionPromise = (client as any).orders();
+    const collectionPromise = client.orders();
 
     // Reconnect fires while the initial handshake is still awaiting its baseline read — this
-    // is the overlap CR-01 describes: a reconnect racing collection creation.
+    // is the overlap under test: a reconnect racing collection creation.
     reconnectListener?.();
 
     // The newer handshake (gen 2) resolves first with the current 2-row state...
@@ -349,8 +364,8 @@ describe('embedded client — tap-direct handshake', () => {
       };
     };
 
-    const client = createPulseClient(runtime as any);
-    const collection = await (client as any).orders();
+    const client = makeClient(runtime);
+    const collection = await client.orders();
 
     const errors: Error[] = [];
     collection.onError((e: Error) => errors.push(e));
@@ -365,7 +380,7 @@ describe('embedded client — tap-direct handshake', () => {
     expect(errors).toHaveLength(1);
     expect(errors[0]!.message).toBe('reconnect baseline failed');
 
-    // The collection must not be left permanently latched into buffering (CR-02): a live tap
+    // The collection must not be left permanently latched into buffering: a live tap
     // payload after the failed rebaseline should apply immediately, not queue forever.
     runtime.emitTap(tableKey, 'insert', { id: 2, status: 'accepted', price: 20 }, null, '0/999');
     expect(collection.list()).toHaveLength(1);
@@ -383,8 +398,8 @@ describe('embedded client — tap-direct handshake', () => {
       };
     };
 
-    const client = createPulseClient(runtime as any);
-    const collection = await (client as any).orders();
+    const client = makeClient(runtime);
+    const collection = await client.orders();
 
     let changeCount = 0;
     collection.onChange(() => changeCount++);
@@ -422,8 +437,8 @@ describe('embedded client — tap-direct handshake', () => {
       };
     };
 
-    const client = createPulseClient(runtime as any);
-    const collection = await (client as any).orders();
+    const client = makeClient(runtime);
+    const collection = await client.orders();
 
     const errors: Error[] = [];
     collection.onError((e: Error) => errors.push(e));

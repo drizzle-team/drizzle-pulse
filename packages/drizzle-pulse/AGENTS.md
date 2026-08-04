@@ -183,5 +183,5 @@ remaining consumer).
 - ❌ Import server modules from client/runtime codepaths
 - ❌ Change merge/event semantics in `PulseQuery` without updating integration coverage
 - ❌ Forget that `usePulseQuery` is a thin wrapper over `PulseQuery`; the embedded `PulseCollection` is a separate tap-direct implementation over `PulseMergeCore` (not a `PulseQuery` wrapper) — do not reintroduce that coupling
-- ❌ Add a merge-core or collection import to `client/embedded/events.ts` — `createPulseEvents` must stay stateless (SPLIT-06)
+- ❌ Add a merge-core or collection import to `client/embedded/events.ts` — `createPulseEvents` must stay stateless
 - ❌ Re-export `buildEventsTable` / the DDL renderer from the root or client entrypoints — they are server-only and pull in `drizzle-orm/pg-core`

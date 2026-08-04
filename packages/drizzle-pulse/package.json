@@ -67,9 +67,9 @@
     "typecheck": "tsc --noEmit && tsc --noEmit --project src/__tests__/tsconfig.json",
     "test": "bun test",
     "test:types": "tsc --noEmit --project type-tests/tsconfig.json",
-    "lint:publish": "node ../../scripts/publint-allow-minipg-file.mjs",
+    "lint:publish": "node ../../scripts/publint.mjs",
     "check:types": "attw --pack --profile esm-only",
-    "verify:publish": "bun run lint:publish && bun run check:types && node ../../scripts/pack-check.mjs && node ../../scripts/check-dts-no-pg.mjs"
+    "verify:publish": "bun run lint:publish && bun run check:types && node ../../scripts/pack-check.mjs"
   },
   "peerDependencies": {
     "drizzle-orm": "^1.0.0-rc.4",

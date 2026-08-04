@@ -21,7 +21,7 @@ import {
 } from './helpers/test-harness.js';
 
 // ---------------------------------------------------------------------------
-// SPLIT-04: the LSN watermark handshake re-opens the mid-baseline exactly-once
+// The LSN watermark handshake re-opens the mid-baseline exactly-once
 // question the events-table snapshot cursor used to answer. This suite proves it
 // two ways: Part A deterministically races insert/update/delete against collection
 // creation; Part B runs 15 randomized operation sequences comparing THREE views of
@@ -53,7 +53,7 @@ function sortById(rows: ComparableRow[]): ComparableRow[] {
   return [...rows].sort((a, b) => a.id - b.id);
 }
 
-describe('Consistency Oracle (SPLIT-04)', () => {
+describe('Consistency Oracle', () => {
   const fixture = fullOrdersFixture;
   const { orders } = fixture.tables;
 
