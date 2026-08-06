@@ -1,6 +1,6 @@
 {
   "name": "drizzle-pulse",
-  "version": "0.0.4",
+  "version": "0.1.0",
   "description": "Type-safe Pulse SDK for Drizzle — server runtime, HTTP client, React hook, and embedded client",
   "type": "module",
   "license": "Apache-2.0",
@@ -67,13 +67,14 @@
     "typecheck": "tsc --noEmit && tsc --noEmit --project src/__tests__/tsconfig.json",
     "test": "bun test",
     "test:types": "tsc --noEmit --project type-tests/tsconfig.json",
-    "lint:publish": "node ../../scripts/publint.mjs",
+    "lint:publish": "publint --strict",
     "check:types": "attw --pack --profile esm-only",
     "verify:publish": "bun run lint:publish && bun run check:types && node ../../scripts/pack-check.mjs"
   },
   "peerDependencies": {
     "drizzle-orm": "^1.0.0-rc.4",
     "hono": "^4.6.0",
+    "minipg": "*",
     "react": ">=18.0.0",
     "zod": "^4.0.0"
   },
@@ -86,10 +87,10 @@
     }
   },
   "dependencies": {
-    "minipg": "file:../../vendor/minipg-0.1.0.tgz",
     "superjson": "^2.2.6"
   },
   "devDependencies": {
+    "minipg": "file:../../vendor/minipg-0.1.0.tgz",
     "@arethetypeswrong/cli": "^0.18.4",
     "@types/node": "^20.11.30",
     "@types/react": "^18.2.0",
