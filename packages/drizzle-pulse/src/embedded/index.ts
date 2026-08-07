@@ -101,6 +101,8 @@ export {
   type PulseEventsOptions,
   type PulseRow,
 } from '../client/embedded/index.js';
+export type { PulseBuilder } from '../server/pulse-builder.js';
+export type { AnyPulseBuilders } from '../server/pulse-registry.js';
 export { LogLevel, type PulseRuntimeWalConfig } from '../server/pulse-runtime.js';
 export type {
   PulseDeleteEvent,

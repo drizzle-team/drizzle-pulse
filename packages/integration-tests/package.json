@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "bun test --timeout 20000",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc --project tsconfig.portability.json"
   },
   "dependencies": {
     "drizzle-pulse": "workspace:*",

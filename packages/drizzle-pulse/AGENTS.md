@@ -33,7 +33,7 @@ purity test).
 
 | Path | Purpose |
 |------|---------|
-| `src/index.ts` | root barrel: `pulse`, `PulseTable`, `QueryDescriptor` (values) plus the `ColumnOperators`/`WhereCondition` **types** only — the full protocol/wire/query type family lives on `./server` instead |
+| `src/index.ts` | root barrel: `pulse`, `PulseTable`, `QueryDescriptor` (values) plus the `PulseBuilder`/`ColumnOperators`/`WhereCondition` **types** only (`PulseBuilder` so an exported builder's declaration is nameable — TS2742) — the full protocol/wire/query type family lives on `./server` instead |
 | `src/types.ts` | shared public types such as `QueryDescriptor`, `ResolvedPulseQuery`, `WhereClause`, `PullResponse`, `LoadMoreResponse`, `PulseAuthContext`, `PulseWireEvent` (a `PulseEvent<Record<string, unknown>>` alias) |
 | `src/pulse-table.ts` | collection entity: `pulse(table)` → `PulseTable`; lazy PK validation at `.query()` time; value-imports `drizzle-orm/pg-core` (`getTableConfig`) — the sole client-unreachable pg-core exemption in the purity test |
 | `src/shared/` | protocol request/response types, filter AST helpers, PK utilities, `pulse-merge-core.ts` (merge state machine reused by HTTP `PulseQuery` and embedded `PulseCollection`; keys rows by out-of-band pks — rebuild entries + each event's `pk` field — so rows carry no identity property; the ranged/HTTP subclass derives entry pks from wire rows' `$pk`) |
@@ -143,7 +143,7 @@ Embedded (in-process, tap-direct):
 // drizzle-pulse (root)
 pulse, PulseTable
 QueryDescriptor
-type ColumnOperators, WhereCondition
+type PulseBuilder, ColumnOperators, WhereCondition
 
 // drizzle-pulse/server
 PulseRuntime, LogLevel, type PulseRuntimeConfig, type PulseRuntimeWalConfig
@@ -183,6 +183,7 @@ type EmbeddedPulseEvents, PulseEventsCallback, PulseEventsOptions
 // drizzle-pulse/embedded
 createRuntime, LogLevel, PulseCollection
 type EmbeddedRuntime, EmbeddedRuntimeConfig, PulseRuntimeWalConfig
+type PulseBuilder, AnyPulseBuilders
 type EmbeddedPulseClient, EmbeddedPulseEvents
 type PulseCollectionOptions, PulseCollectionChange, PulseRow
 type PulseEventsCallback, PulseEventsOptions
