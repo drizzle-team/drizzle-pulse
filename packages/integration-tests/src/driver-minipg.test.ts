@@ -119,7 +119,7 @@ describe('a plain pg sourceDb coexisting with minipg replication', () => {
         .select()
         .from(pgDataTypes)
         .where(eq(pgDataTypes.id, insertedId));
-      expect(collection.list()[0]).toEqual({ ...baselineRow!, $pk: insertedId });
+      expect(collection.list()[0]).toEqual(baselineRow!);
 
       // Mutate exactly the columns the old raw-text-OID override used to special-case.
       const updatedDate = new Date('2025-02-03T00:00:00.000Z');
@@ -142,12 +142,16 @@ describe('a plain pg sourceDb coexisting with minipg replication', () => {
         .select()
         .from(pgDataTypes)
         .where(eq(pgDataTypes.id, insertedId));
-      expect(collection.list()[0]).toEqual({ ...updatedBaseline!, $pk: insertedId });
+      expect(collection.list()[0]).toEqual(updatedBaseline!);
 
       // HTTP baseline decode (drizzle codecs, via sourceDb) === WAL decode (shape bridge) — one
-      // stream, two decoders, same shape.
+      // stream, two decoders, same shape. The wire row additionally carries $pk (the HTTP
+      // client's identity key); embedded rows don't.
       const subscribed = await subscribeClient(s.router, 'allPgDataTypes', {});
-      expect(subscribed.rows[0]).toEqual(collection.list()[0]);
+      expect(subscribed.rows[0]).toEqual({
+        ...(collection.list()[0] as Record<string, unknown>),
+        $pk: insertedId,
+      });
 
       await s.sourceDb.delete(pgDataTypes).where(eq(pgDataTypes.id, insertedId));
       await waitFor(() => collection.list().length === 0);
@@ -173,7 +177,7 @@ describe('a plain pg sourceDb coexisting with minipg replication', () => {
         .returning({ id: pgDataTypes.id });
       const insertedId = inserted!.id;
 
-      await waitFor(() => collection.list().some((row) => row.$pk === insertedId));
+      await waitFor(() => collection.list().some((row) => row.id === insertedId));
 
       await s.sourceDb
         .update(pgDataTypes)
@@ -181,13 +185,13 @@ describe('a plain pg sourceDb coexisting with minipg replication', () => {
         .where(eq(pgDataTypes.id, insertedId));
 
       await waitFor(() => {
-        const row = collection.list().find((r) => r.$pk === insertedId) as
+        const row = collection.list().find((r) => r.id === insertedId) as
           | { integerCol?: number }
           | undefined;
         return row?.integerCol === 42;
       });
 
-      const row = collection.list().find((r) => r.$pk === insertedId) as
+      const row = collection.list().find((r) => r.id === insertedId) as
         | { textCol?: string }
         | undefined;
       expect(row?.textCol).toBe(largeText);

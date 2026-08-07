@@ -2,7 +2,7 @@ import type { PgColumn } from 'drizzle-orm/pg-core';
 import type { WithPk } from '../server/pulse-types.js';
 
 // Must stay free of drizzle-orm/pg-core VALUE imports (bare `drizzle-orm` only): the embedded
-// client entrypoint value-imports applyProjectionPipeline directly, and platform-imports.test.ts
+// client entrypoint value-imports projectEmbeddedRows directly, and platform-imports.test.ts
 // enforces purity across everything reachable from there.
 export function getQueryColumnKey(columns: Record<string, PgColumn>, targetColumn: PgColumn) {
   for (const [queryKey, column] of Object.entries(columns)) {

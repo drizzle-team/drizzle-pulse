@@ -530,6 +530,14 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
    * the whole transaction back instead of provisioning partially.
    */
   async provision(): Promise<void> {
+    // On a running runtime the ??= below would adopt the LIVE admin store and the finally
+    // would close it under the replication loop — every later store access (rebaseline,
+    // commit persistence) would then throw until the loop gives up.
+    if (this.run) {
+      throw new Error(
+        'provision() must run before start() — it closes its admin connection when it returns',
+      );
+    }
     this.store ??= new PulseStore(this.config.databaseUrl, this.eventsSchema);
     try {
       await this.bootstrap();

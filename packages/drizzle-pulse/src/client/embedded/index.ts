@@ -7,7 +7,7 @@ import type {
 } from '../../server/pulse-runtime.js';
 import type { PulseClientContract } from '../../server/pulse-types.js';
 import { compareLsn } from '../../shared/lsn.js';
-import { applyProjectionPipeline } from '../../shared/projection.js';
+import { projectEmbeddedRows } from '../../shared/projection.js';
 import type { PulseEvent } from '../../shared/pulse-events.js';
 import { PulseMergeCore } from '../../shared/pulse-merge-core.js';
 import type { PulseAuthContext, QueryDescriptor } from '../../types.js';
@@ -37,11 +37,12 @@ export type EmbeddedPulseClient<TQueries extends AnyPulseBuilders> = {
   [K in keyof PulseClientContract<TQueries>]: PulseClientContract<TQueries>[K] extends (
     ...args: infer A
   ) => QueryDescriptor<infer R>
-    ? // R always includes $pk (QueryDescriptor is created with WithPk<TResult>); the
-      // intersection makes this explicit so PulseCollection<T>'s constraint is satisfied.
+    ? // R is the wire contract shape and includes $pk (QueryDescriptor is created with
+      // WithPk<TResult>). Embedded rows carry no $pk — identity lives in the merge core's
+      // entries and in each event's pk field — so the wire-only key is stripped here.
       (
         ...args: [...A, options?: PulseCollectionOptions]
-      ) => Promise<PulseCollection<R & { $pk: unknown }>>
+      ) => Promise<PulseCollection<Omit<R, '$pk'>>>
     : never;
 };
 
@@ -51,7 +52,7 @@ type AnyRow = TapRow;
 // PulseCollection — a full-set merge core fed tap-direct (no HTTP wire protocol).
 // ---------------------------------------------------------------------------
 
-export class PulseCollection<TRow extends { $pk: unknown }> {
+export class PulseCollection<TRow> {
   private disposed = false;
   private readonly onChangeListeners = new Set<(change: PulseCollectionChange<TRow>) => void>();
   private readonly onErrorListeners = new Set<(error: Error) => void>();
@@ -203,7 +204,7 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
         // is required because a commit written exactly at the watermark position was
         // necessarily written at-or-after the watermark read — strict greater-than would risk
         // dropping a commit landing exactly there. Any baseline/tap overlap this admits is
-        // absorbed by the merge core's $pk dedup, making the handshake exactly-once.
+        // absorbed by the merge core's pk dedup, making the handshake exactly-once.
         //
         // A reconnect rebaseline runs while the stream is closed, so its buffer is empty and the
         // watermark filter is inert — the snapshot IS the stream's start position. The buffering
@@ -234,7 +235,7 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
             throw err;
           }
           if (gen !== handshakeGen) return null;
-          core.rebuildFromRows(applyProjectionPipeline(baseline.rows, query) as AnyRow[]);
+          core.rebuild(projectEmbeddedRows(baseline.rows, query));
           const pending = buffer;
           buffer = [];
           baselining = false;

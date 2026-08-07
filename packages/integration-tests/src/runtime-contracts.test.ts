@@ -163,6 +163,13 @@ describe('Runtime Contracts', () => {
       }),
     );
     expect(updatePull.events[0]).not.toHaveProperty('matchesOld');
+    // The new row left the subscriber's WHERE, so its state is out of scope: the wire ships
+    // it pk-only (the client keys the membership removal off $pk). The old side matched, so
+    // it ships in full.
+    expect((updatePull.events[0] as { row: unknown }).row).toEqual({ $pk: seededId });
+    expect((updatePull.events[0] as { old_row: unknown }).old_row).toEqual(
+      expect.objectContaining({ status: 'requested', $pk: seededId }),
+    );
   });
 
   test('transition into filter exposes exact update flags', async () => {
@@ -198,6 +205,12 @@ describe('Runtime Contracts', () => {
       }),
     );
     expect(updatePull.events[0]).not.toHaveProperty('matchesOld');
+    // The old row never matched this subscriber's WHERE, so its pre-update state is out of
+    // scope and ships empty; the new side matched and ships in full.
+    expect((updatePull.events[0] as { old_row: unknown }).old_row).toEqual({});
+    expect((updatePull.events[0] as { row: unknown }).row).toEqual(
+      expect.objectContaining({ status: 'requested', $pk: seededId }),
+    );
   });
 
   test('a token minted against a since-recreated events table resets on epoch mismatch', async () => {

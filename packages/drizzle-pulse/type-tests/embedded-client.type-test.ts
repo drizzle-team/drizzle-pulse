@@ -45,7 +45,8 @@ expectTypeOf<typeof client>().toEqualTypeOf<
 // Call shapes mirror PulseClientContract
 // ---------------------------------------------------------------------------
 
-// Args query: (args, options?) → Promise<PulseCollection<FullRow>>
+// Args query: (args, options?) → Promise<PulseCollection<FullRow>>. Embedded rows carry no
+// $pk — the wire-only identity key is stripped from the contract shape.
 const withArgsPromise = client.withArgs({ status: 'requested' });
 expectTypeOf(withArgsPromise).toMatchTypeOf<
   Promise<
@@ -59,7 +60,6 @@ expectTypeOf(withArgsPromise).toMatchTypeOf<
       acceptedAt: Date | null;
       createdAt: Date;
       updatedAt: Date;
-      $pk: unknown;
     }>
   >
 >();
@@ -74,7 +74,6 @@ declare const noArgsCollection: Awaited<ReturnType<typeof client.noArgs>>;
 expectTypeOf(noArgsCollection.list()[0]).toMatchTypeOf<
   | {
       id: number;
-      $pk: unknown;
     }
   | undefined
 >();
@@ -86,10 +85,11 @@ expectTypeOf(noArgsCollection.list()[0]).toMatchTypeOf<
 
 type WithArgsRow = PulseRow<typeof withArgsPromise>;
 expectTypeOf<WithArgsRow['id']>().toEqualTypeOf<number>();
-expectTypeOf<WithArgsRow['$pk']>().toEqualTypeOf<unknown>();
 expectTypeOf<WithArgsRow['status']>().toEqualTypeOf<
   'requested' | 'accepted' | 'completed' | 'cancelled'
 >();
+// @ts-expect-error $pk is stripped from embedded rows
+type _NoPk = WithArgsRow['$pk'];
 
 // The awaited collection resolves to the same row type as the promise form.
 expectTypeOf<PulseRow<Awaited<typeof withArgsPromise>>>().toEqualTypeOf<WithArgsRow>();

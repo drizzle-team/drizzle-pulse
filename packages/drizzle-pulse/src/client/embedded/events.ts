@@ -14,7 +14,7 @@ import { buildTapEvent, type TapRow } from './tap-events.js';
  * Called with each tapped event in WAL commit order. Delivery is **at-least-once**: a
  * disconnect between the tap emit and the replication slot's per-message acknowledge replays
  * the same commit again after reconnect, and this surface has no baseline/dedup to absorb it
- * (unlike `PulseCollection`, which dedups the replay via its merge core's $pk map). Consumers
+ * (unlike `PulseCollection`, which dedups the replay via its merge core's pk map). Consumers
  * with side effects keyed off `lsn` should treat `(pk, lsn)` — or `lsn` alone for single-event
  * transactions — as an idempotency key.
  */
@@ -29,14 +29,11 @@ export type EmbeddedPulseEvents<TQueries extends AnyPulseBuilders> = {
     ...args: infer A
   ) => QueryDescriptor<infer R>
     ? A extends []
-      ? (
-          callback: PulseEventsCallback<R & { $pk: unknown }>,
-          options?: PulseEventsOptions,
-        ) => () => void
+      ? (callback: PulseEventsCallback<Omit<R, '$pk'>>, options?: PulseEventsOptions) => () => void
       : (
           ...args: [
             ...A,
-            callback: PulseEventsCallback<R & { $pk: unknown }>,
+            callback: PulseEventsCallback<Omit<R, '$pk'>>,
             options?: PulseEventsOptions,
           ]
         ) => () => void
@@ -91,8 +88,9 @@ export function createPulseEvents<TQueries extends AnyPulseBuilders>(
         const auth: PulseAuthContext = options?.auth ?? { userId: null };
         // resolve() validates args and yields the auth-scoped WHERE. buildTapEvent always gates
         // inserts on it; updates/deletes are gated too when the old tuple is fully evaluable
-        // (RID FULL, or pull:true), otherwise delivered with the row redacted to pk-only so
-        // membership stays correct without leaking out-of-scope column data (see tap-events.ts).
+        // (RID FULL, or pull:true), otherwise delivered with an empty row — the event's pk
+        // carries the identity — so membership stays correct without leaking out-of-scope
+        // column data (see tap-events.ts).
         const query = runtime.registry.resolve(prop, rawArgs, auth);
         const tableKey = getTableUniqueName(query.table);
 

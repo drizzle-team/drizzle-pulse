@@ -76,7 +76,7 @@ describe('Embedded Collection', () => {
   });
 
   // A row committed while the collection is being created appears exactly once — the
-  // baseline SELECT and the buffered tap payloads dedupe by $pk against the read watermark.
+  // baseline SELECT and the buffered tap payloads dedupe by pk against the read watermark.
   test('a concurrently-inserted row appears exactly once in list()', async () => {
     await processDbOperations([
       db

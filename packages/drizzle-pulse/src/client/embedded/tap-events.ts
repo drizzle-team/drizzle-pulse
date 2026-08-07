@@ -1,7 +1,7 @@
 import type { PendingWalEvent } from '../../server/pulse-runtime.js';
 import { extractRow } from '../../shared/event-normalization.js';
 import { evaluateCondition } from '../../shared/filter-ast.js';
-import { applyProjectionPipeline } from '../../shared/projection.js';
+import { projectEmbeddedRows } from '../../shared/projection.js';
 import type { PulseEvent } from '../../shared/pulse-events.js';
 import type { ResolvedPulseQuery } from '../../types.js';
 
@@ -9,16 +9,17 @@ import type { ResolvedPulseQuery } from '../../types.js';
 // createPulseClient's collections and createPulseEvents value-import buildTapEvent, and
 // platform-imports.test.ts enforces purity across the embedded entrypoint's import graph.
 
-export type TapRow = Record<string, unknown> & { $pk: unknown };
+export type TapRow = Record<string, unknown>;
 
 /**
  * Builds a `PulseEvent` from a decoded WAL event, or `null` when the event should not be
  * delivered at all. Insert is gated on `query.where` matching the new row. Update/delete carry
  * a full old tuple (the runtime forces REPLICA IDENTITY FULL on every source), so `query.where`
  * is evaluated against both sides: an event neither side matches was never visible to this
- * subscriber and is suppressed. An update whose old row matched but new row doesn't is
- * delivered pk-only — the subscriber needs the membership removal, not the out-of-scope column
- * data.
+ * subscriber and is suppressed. Each side of a delivered update is included only when that
+ * side matches the WHERE — the non-matching side ships as an empty object with the event's
+ * `pk` field carrying the identity — so out-of-scope column data (the new row of a
+ * membership removal, the old row of a membership entry) never reaches the subscriber.
  */
 export function buildTapEvent(
   event: PendingWalEvent,
@@ -34,28 +35,29 @@ export function buildTapEvent(
 
   if (event.op === 'insert') {
     if (!matchesNew || !newRow) return null;
-    const row = applyProjectionPipeline([newRow], query)[0] as TapRow;
-    return { op: 'insert', row, pk: row.$pk };
+    const [projected] = projectEmbeddedRows([newRow], query);
+    if (!projected) return null;
+    return { op: 'insert', row: projected.row, pk: projected.pk };
   }
 
   if (event.op === 'update') {
     if (!matchesNew && !matchesOld) return null;
-    const projectedNew = newRow ? (applyProjectionPipeline([newRow], query)[0] as TapRow) : null;
-    const projectedOld = oldRow ? (applyProjectionPipeline([oldRow], query)[0] as TapRow) : null;
+    const projectedNew = newRow ? projectEmbeddedRows([newRow], query)[0] : null;
+    const projectedOld = oldRow ? projectEmbeddedRows([oldRow], query)[0] : null;
     const fallback = projectedNew ?? projectedOld;
     if (!fallback) return null;
-    const row = matchesNew ? (projectedNew as TapRow) : ({ $pk: fallback.$pk } as TapRow);
     return {
       op: 'update',
-      row,
-      old_row: projectedOld ?? {},
-      pk: fallback.$pk,
+      row: matchesNew && projectedNew ? projectedNew.row : {},
+      old_row: matchesOld && projectedOld ? projectedOld.row : {},
+      pk: fallback.pk,
       matchesNew,
     };
   }
 
   // delete
   if (!oldRow || !matchesOld) return null;
-  const projectedOld = applyProjectionPipeline([oldRow], query)[0] as TapRow;
-  return { op: 'delete', old_row: projectedOld, pk: projectedOld.$pk };
+  const [projected] = projectEmbeddedRows([oldRow], query);
+  if (!projected) return null;
+  return { op: 'delete', old_row: projected.row, pk: projected.pk };
 }

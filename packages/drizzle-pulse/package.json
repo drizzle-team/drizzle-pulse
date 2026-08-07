@@ -1,6 +1,6 @@
 {
   "name": "drizzle-pulse",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Type-safe Pulse SDK for Drizzle — server runtime, HTTP client, React hook, and embedded client",
   "type": "module",
   "license": "Apache-2.0",
@@ -47,6 +47,10 @@
     "./client/embedded": {
       "types": "./dist/client/embedded/index.d.ts",
       "default": "./dist/client/embedded/index.js"
+    },
+    "./embedded": {
+      "types": "./dist/embedded/index.d.ts",
+      "default": "./dist/embedded/index.js"
     },
     "./server": {
       "types": "./dist/server/index.d.ts",

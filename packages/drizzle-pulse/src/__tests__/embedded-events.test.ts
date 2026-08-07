@@ -12,7 +12,7 @@ import { asRuntime, makeMockRuntime, ordersTable } from './mock-runtime.js';
 
 const tableKey = getTableUniqueName(ordersTable);
 
-type TestRow = Record<string, unknown> & { $pk: unknown };
+type TestRow = Record<string, unknown>;
 type TestCallback = (event: PulseEvent<TestRow>, lsn: string) => void;
 
 // The mock's feed, narrowed to the queries the fixture registry serves — subscriptions
@@ -161,10 +161,10 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
     expect(received).toHaveLength(0);
   });
 
-  test('an update leaving the filter is delivered with the row redacted to pk-only', () => {
+  test('an update leaving the filter is delivered with an empty row and the pk on the event', () => {
     const runtime = makeMockRuntime({ where: { status: { eq: 'accepted' } } });
     const events = makeEvents(runtime);
-    const received: Array<{ row: unknown; matchesNew: boolean }> = [];
+    const received: Array<{ row: unknown; pk: unknown; matchesNew: boolean }> = [];
     events.orders((event: any) => received.push(event));
 
     runtime.emitTap(
@@ -177,7 +177,28 @@ describe('createPulseEvents — WHERE-filtered per-event delivery', () => {
 
     expect(received).toHaveLength(1);
     expect(received[0]!.matchesNew).toBe(false);
-    expect(received[0]!.row).toEqual({ $pk: 1 });
+    expect(received[0]!.row).toEqual({});
+    expect(received[0]!.pk).toBe(1);
+  });
+
+  test('an update entering the filter redacts old_row — out-of-scope pre-update data never delivers', () => {
+    const runtime = makeMockRuntime({ where: { status: { eq: 'accepted' } } });
+    const events = makeEvents(runtime);
+    const received: Array<{ row: unknown; old_row: unknown; pk: unknown }> = [];
+    events.orders((event: any) => received.push(event));
+
+    runtime.emitTap(
+      tableKey,
+      'update',
+      { id: 1, status: 'accepted', price: 10 },
+      { id: 1, status: 'secret-other-scope', price: 999 },
+      '0/306',
+    );
+
+    expect(received).toHaveLength(1);
+    expect(received[0]!.row).toEqual({ id: 1, status: 'accepted', price: 10 });
+    expect(received[0]!.old_row).toEqual({});
+    expect(received[0]!.pk).toBe(1);
   });
 
   test('unsubscribe stops delivery and is idempotent', () => {

@@ -230,7 +230,6 @@ describe('pull: false — embedded-only runtime writes nothing to events tables'
       expect(deleteEvent.pk).toBe(insertedId);
       const oldRow = deleteEvent.old_row as Record<string, unknown>;
       expect(Object.keys(oldRow).sort()).toEqual([
-        '$pk',
         'createdAt',
         'driverId',
         'id',
@@ -238,7 +237,6 @@ describe('pull: false — embedded-only runtime writes nothing to events tables'
         'status',
       ]);
       expect(oldRow.id).toBe(insertedId);
-      expect(oldRow.$pk).toBe(insertedId);
       expect(oldRow.status).toBe('accepted');
       expect(oldRow.price).toBe(20);
 

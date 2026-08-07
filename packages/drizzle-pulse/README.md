@@ -14,6 +14,8 @@ npm install drizzle-pulse
 npm install drizzle-orm zod
 ```
 
+`minipg` is also a required peer for the server-side entrypoints (`/server`, `/embedded`). Do not install it from the public npm registry — that name is held by an unrelated package; install the `minipg` tarball vendored in this repository (`vendor/minipg-0.1.0.tgz`).
+
 `react` is only required if you use the [`drizzle-pulse/client/react`](#drizzle-pulseclientreact) entrypoint.
 
 ## 60-second quickstart
@@ -121,7 +123,7 @@ Every pulsed source table gets a matching **events table** — WAL changes are p
 - **Location:** `<eventsSchema>.<sourceSchema>_<sourceTable>`, with each component's `_` doubled to `__` before joining — `eventsSchema` defaults to `'drizzle_pulse'` (override via `PulseRuntime`'s `eventsSchema` option)
 - **Self-provisioning:** `runtime.start()` provisions everything itself inside one advisory-locked transaction — creates the events schema, the events tables and their `pulse_meta` bookkeeping, the publication (plus membership diff), and sets `REPLICA IDENTITY FULL` on each registered source (resetting it to `DEFAULT` on un-pulse). Full old tuples are what every update/delete decodes from, in both pull modes — the runtime never reads old-row data back from your tables. An events table is recreated when the sha256 of its rendered DDL diverges (a source-column change), which rotates a per-table epoch so stale client cursors reset. `wal_level = logical` is the one precondition the runtime can't fix — it stays a fail-fast assert.
 
-**Stateless-feed WHERE gating for updates/deletes:** `createPulseEvents` evaluates the query's `WHERE` against both the old and new row (the full old tuple makes that always possible). An event neither side matches is suppressed; an update whose old row matched but new row doesn't is delivered with the row redacted to pk-only, so a subscriber's materialized collection can remove the row via pk membership without leaking out-of-scope column data.
+**WHERE gating for updates/deletes:** every delivery surface (the HTTP pull protocol, embedded collections, `createPulseEvents`) evaluates the query's `WHERE` against both the old and new row (the full old tuple makes that always possible). An event neither side matches is suppressed, and a delivered update includes each side only when that side matches — the out-of-scope side ships redacted (pk-only on the HTTP wire, an empty object on the embedded feed with the pk on the event) — so a subscriber can maintain membership without ever receiving column data its `WHERE` does not admit.
 
 See [`docs/events-table-convention.md`](../../docs/events-table-convention.md) for the full name-derivation, column-mapping, and bootstrap contract.
 
@@ -155,6 +157,42 @@ app.route('/pulse', router);
 ```
 
 `hono` is an optional peer dependency — only installed if you mount this router.
+
+## `drizzle-pulse/embedded`
+
+The embedded-only entrypoint, for apps that consume pulse entirely in-process and never serve the HTTP pull protocol. `createRuntime(queries, config)` wires the registry and a `pull: false` runtime internally, so the only knobs left are the ones that matter in this mode — no `pull`, no `sourceDb`:
+
+```ts
+import { pulse } from 'drizzle-pulse';
+import { createRuntime } from 'drizzle-pulse/embedded';
+
+const ordersByStatus = pulse(orders)
+  .args(z.object({ status: z.string() }))
+  .query((ctx) => ctx.query({ status: ctx.args.status }));
+
+const runtime = createRuntime(
+  { ordersByStatus },
+  { databaseUrl: process.env.DATABASE_URL! }, // must have wal_level=logical
+);
+await runtime.start(); // self-provisions publication + REPLICA IDENTITY FULL, then opens WAL
+
+const collection = await runtime.client.ordersByStatus({ status: 'active' });
+collection.list(); // synchronous current filtered set
+collection.onChange(({ events, state }) => { /* ... */ });
+
+const unsub = runtime.events.ordersByStatus({ status: 'active' }, (event, lsn) => { /* ... */ });
+
+unsub();
+collection.dispose();
+await runtime.stop();
+```
+
+- `config` — `databaseUrl` plus optional `wal: { publicationName?, slotName? }` and `logLevel`. Every connection comes from an internal pool on `databaseUrl`; there is no app-provided `sourceDb`, so baseline reads carry no app session context (RLS, `search_path`) — row scoping is each query's resolve-time auth-scoped `WHERE` (pass `{ auth }` in the trailing options).
+- `runtime.client` / `runtime.events` — the same surfaces `drizzle-pulse/client/embedded` builds from a full `PulseRuntime` (see below).
+- `runtime.provision()` — the split-role deploy step: provisions replication prerequisites under an elevated role without opening WAL (see "Provisioning & privileges" above).
+- `runtime.onFatalError(cb)` — fires once replication gives up permanently; the handle then stops itself and closes its pool, so it is terminal — create a new runtime to stream again.
+- `runtime.stop()` is terminal for the handle: it closes the internal pool for good, so create a new runtime to start again. A failed `start()` is retryable.
+- No events tables exist in this mode, and the replication slot is temporary with a randomized suffix — a crashed process can't leak WAL-retaining slot state.
 
 ## `drizzle-pulse/client`
 
@@ -201,27 +239,33 @@ function OrdersList() {
 
 ## `drizzle-pulse/client/embedded`
 
-For server-side consumers that live in the same process as the WAL runtime: `createPulseClient(runtime)` returns live, WAL-fed `PulseCollection`s with no HTTP round trip and no additional DB reads after the initial baseline.
+For server-side consumers that live in the same process as a full `PulseRuntime` — typically a `pull: true` runtime that serves HTTP clients and also feeds in-process taps. `createPulseClient(runtime)` returns live, WAL-fed `PulseCollection`s with no HTTP round trip; `createPulseEvents(runtime)` returns stateless per-event subscriptions. (For embedded-only apps, prefer [`drizzle-pulse/embedded`](#drizzle-pulseembedded), which builds the runtime for you and exposes these same two surfaces as `runtime.client` / `runtime.events`.)
 
 ```ts
-import { createPulseClient } from 'drizzle-pulse/client/embedded';
+import { createPulseClient, createPulseEvents } from 'drizzle-pulse/client/embedded';
 
 const client = createPulseClient(runtime); // same PulseRuntime from drizzle-pulse/server
 
 const collection = await client.ordersByStatus({ status: 'active' });
 
-collection.list(); // synchronous current filtered set
-collection.getState(); // { data, isLoading, isLoadingMore, hasMore, error }
-collection.onChange(({ events, state }) => {
+collection.list(); // synchronous current filtered set — rows are exactly the selected columns
+const offChange = collection.onChange(({ events, state, lsn }) => {
   console.log('changed:', events, 'now:', state);
 });
-
-await collection.loadMore(); // next page of a `.limit()` query — extends list() in place
+const offError = collection.onError((error) => {
+  console.error('collection error:', error);
+});
 
 collection.dispose(); // stop the collection when done
+
+const events = createPulseEvents(runtime);
+const unsub = events.ordersByStatus({ status: 'active' }, (event, lsn) => {
+  // WAL commit order, at-least-once — key idempotency off (event.pk, lsn)
+});
+unsub();
 ```
 
-Updates are push-shaped: the collection re-pulls when the runtime's WAL tap signals a change on its source table (or on reconnect), with no polling interval.
+Updates are push-shaped: each decoded WAL commit is applied to the collection as it streams in (and the collection rebaselines on reconnect) — there is no polling interval. Every event carries the row's primary key as `event.pk`; collection rows themselves carry no synthetic identity field.
 
 `drizzle-pulse/client` and `drizzle-pulse/client/embedded` are two import-path-selected flavors of the same `createPulseClient` concept: pick `/client` for remote/browser consumers over HTTP, or `/client/embedded` for in-process server-side consumers with synchronous live data.
 
@@ -231,6 +275,7 @@ Updates are push-shaped: the collection re-pulls when the runtime's WAL tap sign
 |---|---|---|
 | `drizzle-orm` | `^1.0.0-rc.4` | Tested against `1.0.0-rc.4` |
 | `zod` | `^4.0.0` | |
+| `minipg` | `0.1.0` | Required peer for `/server` and `/embedded` — install the vendored tarball, not the (squatted) public npm package |
 | `react` | `>=18.0.0` | Optional — only required for `drizzle-pulse/client/react` |
 | `hono` | `^4.6.0` | Optional — only required for `drizzle-pulse/server/hono` |
 | `node` | `>=20` | |
@@ -239,4 +284,4 @@ Updates are push-shaped: the collection re-pulls when the runtime's WAL tap sign
 ## Transport & guardrails
 
 - **Transport:** HTTP polling only (`drizzle-pulse/client`, `drizzle-pulse/client/react`) — no SSE or WebSocket transport.
-- **Embedded collections** (`drizzle-pulse/client/embedded`) are in-process only: no `.transform()` (transforms stay HTTP-only), and no dedupe (each call creates an independent collection — create once, hold, `dispose()`). `.limit()` queries are supported and paginate via `loadMore()`.
+- **Embedded collections** (`drizzle-pulse/client/embedded`, `drizzle-pulse/embedded`) are in-process only: no `.transform()` and no `.limit()` (both throw at materialization — transforms and pagination stay HTTP-only), and no dedupe (each call creates an independent collection — create once, hold, `dispose()`).

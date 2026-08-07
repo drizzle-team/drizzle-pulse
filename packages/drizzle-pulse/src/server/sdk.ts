@@ -679,8 +679,13 @@ export class PulseRequestHandler {
         }
         events.push({
           op: 'update',
-          row: pipelinedRow ?? row ?? {},
-          old_row: pipelinedOldRow ?? oldRow ?? {},
+          // Each side ships only when that side matches the subscriber's WHERE — the other
+          // side is out-of-scope row state. The redacted new side keeps `$pk` because the
+          // client's merge core keys the membership removal off the wire row; a
+          // transform-filtered new row has no post-transform `$pk` and ships `{}`, which the
+          // client skips whole.
+          row: matchesNew ? (pipelinedRow ?? {}) : pipelinedRow ? { $pk: pipelinedRow['$pk'] } : {},
+          old_row: matchesOld && pipelinedOldRow ? pipelinedOldRow : {},
           pk: event.pk,
           matchesNew,
         });

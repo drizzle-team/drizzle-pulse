@@ -15,7 +15,7 @@ import { asRuntime, makeMockRuntime, ordersTable } from './mock-runtime.js';
 
 const tableKey = getTableUniqueName(ordersTable);
 
-type TestRow = Record<string, unknown> & { $pk: unknown };
+type TestRow = Record<string, unknown>;
 
 // The mock's client, narrowed to the queries the fixture registry serves — collection
 // assertions get the real PulseCollection surface instead of `any`.
@@ -163,7 +163,7 @@ describe('embedded client — tap-direct handshake', () => {
     collection.dispose();
   });
 
-  test('an insert already present in the baseline is deduped by $pk, even above the watermark', async () => {
+  test('an insert already present in the baseline is deduped by pk, even above the watermark', async () => {
     const runtime = makeMockRuntime({
       baselineRows: [{ id: 1, status: 'accepted', price: 10 }],
       watermark: '0/100',
