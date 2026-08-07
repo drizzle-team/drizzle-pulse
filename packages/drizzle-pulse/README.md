@@ -160,7 +160,7 @@ app.route('/pulse', router);
 
 ## `drizzle-pulse/embedded`
 
-The embedded-only entrypoint, for apps that consume pulse entirely in-process and never serve the HTTP pull protocol. `createRuntime(queries, config)` wires the registry and a `pull: false` runtime internally, so the only knobs left are the ones that matter in this mode — no `pull`, no `sourceDb`:
+The embedded-only entrypoint, for apps that consume pulse entirely in-process and never serve the HTTP pull protocol. `createRuntime(config)` wires the registry and a `pull: false` runtime internally, so the only knobs left are the ones that matter in this mode — no `pull`, no separate registry or client factories:
 
 ```ts
 import { pulse } from 'drizzle-pulse';
@@ -170,10 +170,11 @@ const ordersByStatus = pulse(orders)
   .args(z.object({ status: z.string() }))
   .query((ctx) => ctx.query({ status: ctx.args.status }));
 
-const runtime = createRuntime(
-  { ordersByStatus },
-  { databaseUrl: process.env.DATABASE_URL! }, // must have wal_level=logical
-);
+const runtime = createRuntime({
+  queries: { ordersByStatus },
+  databaseUrl: process.env.DATABASE_URL!, // must have wal_level=logical
+  sourceDb, // the app's own drizzle connection
+});
 await runtime.start(); // self-provisions publication + REPLICA IDENTITY FULL, then opens WAL
 
 const collection = await runtime.client.ordersByStatus({ status: 'active' });
@@ -187,11 +188,10 @@ collection.dispose();
 await runtime.stop();
 ```
 
-- `config` — `databaseUrl` plus optional `wal: { publicationName?, slotName? }` and `logLevel`. Every connection comes from an internal pool on `databaseUrl`; there is no app-provided `sourceDb`, so baseline reads carry no app session context (RLS, `search_path`) — row scoping is each query's resolve-time auth-scoped `WHERE` (pass `{ auth }` in the trailing options).
+- `config` — `queries` (the `pulse(table)` builders, keyed by query name), `databaseUrl`, `sourceDb`, plus optional `wal: { publicationName?, slotName? }` and `logLevel`. `sourceDb` is the app's own drizzle connection: collection baseline reads run on it, keeping its session context (RLS, `search_path`). Post-reconnect rebaselines read the recreated slot's exported snapshot on the admin connection instead, where row scoping is each query's resolve-time auth-scoped `WHERE` (pass `{ auth }` in the trailing options).
 - `runtime.client` / `runtime.events` — the same surfaces `drizzle-pulse/client/embedded` builds from a full `PulseRuntime` (see below).
-- `runtime.provision()` — the split-role deploy step: provisions replication prerequisites under an elevated role without opening WAL (see "Provisioning & privileges" above).
-- `runtime.onFatalError(cb)` — fires once replication gives up permanently; the handle then stops itself and closes its pool, so it is terminal — create a new runtime to stream again.
-- `runtime.stop()` is terminal for the handle: it closes the internal pool for good, so create a new runtime to start again. A failed `start()` is retryable.
+- `runtime.provision()` — the split-role deploy step: provisions replication prerequisites under an elevated role without opening WAL (see "Provisioning & privileges" above). Refuses to run on a started runtime.
+- `runtime.onFatalError(cb)` — fires once replication gives up permanently; the runtime stops itself right after.
 - No events tables exist in this mode, and the replication slot is temporary with a randomized suffix — a crashed process can't leak WAL-retaining slot state.
 
 ## `drizzle-pulse/client`

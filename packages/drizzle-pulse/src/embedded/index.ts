@@ -1,5 +1,3 @@
-import { drizzle } from 'drizzle-orm/postgres';
-import { createPool } from 'minipg';
 import {
   createPulseClient,
   createPulseEvents,
@@ -12,10 +10,20 @@ import {
   PulseRuntime,
   type PulseRuntimeWalConfig,
 } from '../server/pulse-runtime.js';
+import type { PulseSourceDb } from '../server/pulse-sql.js';
 
-export interface EmbeddedRuntimeConfig {
-  /** Must have `wal_level=logical`. Every connection the runtime opens comes from this URL. */
+export interface EmbeddedRuntimeConfig<TQueries extends AnyPulseBuilders> {
+  /** The `pulse(table)` query builders to serve, keyed by query name. */
+  queries: TQueries;
+  /** Must have `wal_level=logical`. The admin pool and the replication stream connect here. */
   databaseUrl: string;
+  /**
+   * The app's own drizzle connection; collection baseline reads run on it to keep its session
+   * context (RLS, search_path) — except post-reconnect rebaselines, which read the recreated
+   * slot's exported snapshot on the admin connection. Row scoping there relies on the
+   * resolve-time auth-scoped WHERE, not on sourceDb-session RLS.
+   */
+  sourceDb: PulseSourceDb;
   wal?: PulseRuntimeWalConfig;
   logLevel?: LogLevel;
 }
@@ -34,61 +42,27 @@ export interface EmbeddedRuntime<TQueries extends AnyPulseBuilders> {
 /**
  * Embedded-only pulse: collections and event subscriptions served in-process over the WAL tap,
  * with no HTTP pull protocol and no events-table storage. The registry and the `pull: false`
- * runtime are wired internally; baseline reads run on a pulse-owned pool built from
- * `databaseUrl`, so row scoping comes from each query's resolve-time auth-scoped WHERE, not
- * from any session context (RLS, search_path) an app connection would carry.
+ * runtime are wired internally.
  */
 export function createRuntime<TQueries extends AnyPulseBuilders>(
-  queries: TQueries,
-  config: EmbeddedRuntimeConfig,
+  config: EmbeddedRuntimeConfig<TQueries>,
 ): EmbeddedRuntime<TQueries> {
-  // Lazy pool: no connection opens before the first collection baseline, so an unstarted or
-  // failed-start handle holds no sockets and start() stays retryable.
-  const pool = createPool(config.databaseUrl);
-  const runtime = new PulseRuntime(createPulseRegistry(queries), {
+  const runtime = new PulseRuntime(createPulseRegistry(config.queries), {
     databaseUrl: config.databaseUrl,
-    sourceDb: drizzle({ client: pool }),
+    sourceDb: config.sourceDb,
     pull: false,
     wal: config.wal,
     logLevel: config.logLevel,
   });
 
-  // Latched on the first stop() call: overlapping stop()s await the same teardown instead of
-  // resolving while connections are still open, and start() reads it as "terminal".
-  let stopping: Promise<void> | null = null;
-  const handle: EmbeddedRuntime<TQueries> = {
+  return {
     client: createPulseClient(runtime),
     events: createPulseEvents(runtime),
-    async start() {
-      // pool.end() is permanent in minipg, so a stopped handle can never stream again.
-      if (stopping) {
-        throw new Error('This runtime has been stopped — create a new one to start again');
-      }
-      await runtime.start();
-    },
-    stop() {
-      stopping ??= (async () => {
-        try {
-          await runtime.stop();
-        } finally {
-          await pool.end();
-        }
-      })();
-      return stopping;
-    },
+    start: () => runtime.start(),
+    stop: () => runtime.stop(),
     provision: () => runtime.provision(),
     onFatalError: (listener) => runtime.onTerminalError(listener),
   };
-
-  // A terminal replication error self-stops the runtime, but the source pool is this
-  // factory's to release — run the handle's own teardown so the pool dies with it. Deferred
-  // a microtask so the runtime's terminal-listener loop (and any app onFatalError handler
-  // registered after this one) finishes firing before teardown starts.
-  runtime.onTerminalError(() => {
-    queueMicrotask(() => void handle.stop());
-  });
-
-  return handle;
 }
 
 export {
@@ -104,6 +78,7 @@ export {
 export type { PulseBuilder } from '../server/pulse-builder.js';
 export type { AnyPulseBuilders } from '../server/pulse-registry.js';
 export { LogLevel, type PulseRuntimeWalConfig } from '../server/pulse-runtime.js';
+export type { PulseSourceDb } from '../server/pulse-sql.js';
 export type {
   PulseDeleteEvent,
   PulseEvent,

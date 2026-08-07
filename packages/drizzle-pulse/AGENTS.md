@@ -7,7 +7,7 @@ Type-safe Pulse SDK shared by server, client, React, and embedded layers.
 - root side: `pulse`, `PulseTable` — the collection entity, exported once per table from schema files
 - server side: `PulseBuilder` (seeded via `PulseTable.query(fn?)`), `createPulseRegistry`, `PulseRuntime`, the transport-agnostic request handler (SDK), and the events-table machinery (`buildEventsTable` resolver + internal DDL renderer + `bootstrap`/`provision`)
 - server/hono side: `createPulseHonoRouter` — an optional Hono wrapper over the SDK on the `./server/hono` subpath
-- embedded-entrypoint side: `createRuntime` — the `./embedded` subpath's embedded-only factory (registry + `pull: false` runtime + internal source pool wired internally)
+- embedded-entrypoint side: `createRuntime` — the `./embedded` subpath's embedded-only factory (registry + `pull: false` runtime wired internally over the app's `sourceDb`)
 - client side: `createPulseClient`, `PulseQuery` (over a pluggable transport)
 - React side: `usePulseQuery`
 - embedded side: `createPulseClient` (in-process, tap-direct, runtime-backed), `PulseCollection` facade, `createPulseEvents` (stateless per-event subscription)
@@ -20,8 +20,8 @@ Type-safe Pulse SDK shared by server, client, React, and embedded layers.
 
 `superjson` is the only hard `dependency`; `minipg` is a **required peer** (consumers install
 the vendored tarball — the public npm name is squatted by an unrelated package). `minipg` is
-value-imported only by the `./server` and `./embedded` entrypoints (replication + admin pool +
-the embedded factory's source pool); client entrypoints (`./client`, `./client/react`,
+value-reached only from the `./server` and `./embedded` entrypoints (replication + admin pool,
+via `pulse-runtime.ts`/`pulse-store.ts`); client entrypoints (`./client`, `./client/react`,
 `./client/embedded`) never reach it on a value-import path (enforced by the platform-imports
 purity test).
 
@@ -37,7 +37,7 @@ purity test).
 | `src/types.ts` | shared public types such as `QueryDescriptor`, `ResolvedPulseQuery`, `WhereClause`, `PullResponse`, `LoadMoreResponse`, `PulseAuthContext`, `PulseWireEvent` (a `PulseEvent<Record<string, unknown>>` alias) |
 | `src/pulse-table.ts` | collection entity: `pulse(table)` → `PulseTable`; lazy PK validation at `.query()` time; value-imports `drizzle-orm/pg-core` (`getTableConfig`) — the sole client-unreachable pg-core exemption in the purity test |
 | `src/shared/` | protocol request/response types, filter AST helpers, PK utilities, `pulse-merge-core.ts` (merge state machine reused by HTTP `PulseQuery` and embedded `PulseCollection`; keys rows by out-of-band pks — rebuild entries + each event's `pk` field — so rows carry no identity property; the ranged/HTTP subclass derives entry pks from wire rows' `$pk`) |
-| `src/embedded/index.ts` | embedded-only factory: `createRuntime(queries, { databaseUrl, wal?, logLevel? })` → `{ client, events, start, stop, provision, onFatalError }`; wires `createPulseRegistry` + a `pull: false` `PulseRuntime` internally with a lazy minipg pool as `sourceDb`; `stop()` ends the pool, so the handle is one-shot |
+| `src/embedded/index.ts` | embedded-only factory: `createRuntime({ queries, databaseUrl, sourceDb, wal?, logLevel? })` → `{ client, events, start, stop, provision, onFatalError }`; wires `createPulseRegistry` + a `pull: false` `PulseRuntime` internally and delegates the lifecycle straight through |
 | `src/client/create-client.ts` | proxy-based typed HTTP client + `PullClient` (batched auto-poll, default 1s, `pollIntervalMs: 0` disables) |
 | `src/client/transport.ts` | `createHttpTransport` (fetch+superjson) + the `PulseHttpTransport` inferred type — the HTTP client's single transport (the old `PulseQueryTransport` interface was deleted with the embedded direct transport) |
 | `src/client/pulse-query.ts` | framework-agnostic subscribe/poll/load-more state machine (`PulseQuery`); `destroy()` stops polling — the client holds no server-side state to release |
@@ -105,11 +105,10 @@ React:
   usePulseQuery(descriptor) → { data, isLoading, isLoadingMore, hasMore, error, loadMore, refetch }
 
 Embedded entrypoint (./embedded — embedded-only apps):
-  createRuntime({ queryName }, { databaseUrl, wal?, logLevel? })
-    → createPulseRegistry + new PulseRuntime(registry, { pull: false, sourceDb: <lazy minipg
-      pool over databaseUrl>, ... }) wired internally
+  createRuntime({ queries: { queryName }, databaseUrl, sourceDb, wal?, logLevel? })
+    → createPulseRegistry + new PulseRuntime(registry, { pull: false, ... }) wired internally
     → { client, events } = the two embedded surfaces below over that runtime
-    → start() / stop() (terminal: ends the pool) / provision() / onFatalError()
+    → start() / stop() / provision() / onFatalError() delegate straight to the runtime
 
 Embedded (in-process, tap-direct):
   createPulseClient(runtime).queryName(args?, { auth? })
@@ -182,7 +181,7 @@ type EmbeddedPulseEvents, PulseEventsCallback, PulseEventsOptions
 
 // drizzle-pulse/embedded
 createRuntime, LogLevel, PulseCollection
-type EmbeddedRuntime, EmbeddedRuntimeConfig, PulseRuntimeWalConfig
+type EmbeddedRuntime, EmbeddedRuntimeConfig, PulseRuntimeWalConfig, PulseSourceDb
 type PulseBuilder, AnyPulseBuilders
 type EmbeddedPulseClient, EmbeddedPulseEvents
 type PulseCollectionOptions, PulseCollectionChange, PulseRow

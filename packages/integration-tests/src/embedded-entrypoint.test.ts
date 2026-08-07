@@ -1,16 +1,20 @@
 /**
  * Integration proof for the drizzle-pulse/embedded entrypoint. The primitives it composes
  * (collection convergence, events delivery, pull:false provisioning) are covered by
- * pull-false.test.ts — this suite exercises only what the factory itself adds: baseline
- * reads over its internal pool (there is no sourceDb knob), full connection release on
- * stop(), and the one-shot handle contract.
+ * pull-false.test.ts — this suite exercises only the factory's own wiring: the registry and
+ * pull:false runtime built internally, collection baselines read over the app-provided
+ * sourceDb, the provision-on-running guard, and full release of the runtime's connections on
+ * stop().
  */
 
 import { describe, expect, test } from 'bun:test';
+import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createRuntime, LogLevel } from 'drizzle-pulse/embedded';
+import postgres from 'postgres';
 import { orders, ordersByStatusArgsSchema } from './fixtures/minimal-orders/schema.js';
 import { createScenarioDb, waitFor } from './helpers/scenario.js';
+import { withQuietPostgresUrl } from './helpers/test-harness.js';
 
 const ordersByStatus = pulse(orders)
   .args(ordersByStatusArgsSchema)
@@ -18,21 +22,21 @@ const ordersByStatus = pulse(orders)
   .query((ctx) => ctx.query({ status: ctx.args.status }));
 
 describe('drizzle-pulse/embedded — createRuntime', () => {
-  test('baselines read over the internal pool; stop() releases every connection; a stopped handle is terminal', async () => {
+  test('baselines read over the app sourceDb; stop() releases the runtime connections', async () => {
     const scenario = await createScenarioDb('pulse_embedded_entry');
+    const sourceSql = postgres(withQuietPostgresUrl(scenario.databaseUrl));
     try {
       await scenario.sql.unsafe(
         `INSERT INTO "orders" (driver_id, status, price) VALUES (1, 'accepted', 10)`,
       );
 
-      const runtime = createRuntime(
-        { ordersByStatus },
-        {
-          databaseUrl: scenario.databaseUrl,
-          wal: { publicationName: 'embedded_entry_pub', slotName: 'embedded_entry_slot' },
-          logLevel: LogLevel.Error,
-        },
-      );
+      const runtime = createRuntime({
+        queries: { ordersByStatus },
+        databaseUrl: scenario.databaseUrl,
+        sourceDb: drizzle({ client: sourceSql }),
+        wal: { publicationName: 'embedded_entry_pub', slotName: 'embedded_entry_slot' },
+        logLevel: LogLevel.Error,
+      });
 
       const backendCount = async (): Promise<number> => {
         const rows = await scenario.sql.unsafe<{ count: string }[]>(
@@ -41,6 +45,9 @@ describe('drizzle-pulse/embedded — createRuntime', () => {
         );
         return Number(rows[0]?.count ?? '0');
       };
+      // Open the app connection first so the post-stop floor accounts for it — sourceDb is
+      // app-owned and must survive the runtime's teardown.
+      await sourceSql`SELECT 1`;
       const floor = await backendCount();
 
       await runtime.start();
@@ -54,16 +61,13 @@ describe('drizzle-pulse/embedded — createRuntime', () => {
       await expect(runtime.provision()).rejects.toThrow(/before start/);
 
       collection.dispose();
-      // Overlapping stops both settle only once teardown is complete.
-      await Promise.all([runtime.stop(), runtime.stop()]);
+      await runtime.stop();
 
-      // Everything the entrypoint opened — admin store, replication connection, and the
-      // internal source pool the baseline read on — must be gone.
+      // The admin store and the replication connection must be gone; the app's sourceDb
+      // connection (inside the floor) must not be.
       await waitFor(async () => (await backendCount()) <= floor);
-
-      await expect(runtime.start()).rejects.toThrow(/stopped/);
-      await runtime.stop(); // stop after stop still resolves
     } finally {
+      await sourceSql.end();
       await scenario.drop();
     }
   });

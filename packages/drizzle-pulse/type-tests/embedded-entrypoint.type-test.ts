@@ -5,9 +5,12 @@ import {
   type EmbeddedPulseEvents,
   LogLevel,
   type PulseRow,
+  type PulseSourceDb,
 } from '../src/embedded/index.js';
 import { pulse } from '../src/index.js';
 import { orders, statusSchema } from './fixtures.js';
+
+declare const sourceDb: PulseSourceDb;
 
 // ---------------------------------------------------------------------------
 // Build queries (mirrors embedded-client.type-test.ts)
@@ -23,14 +26,13 @@ const noArgs = pulse(orders).query();
 // Factory inference — no explicit generic required, full config accepted
 // ---------------------------------------------------------------------------
 
-const runtime = createRuntime(
-  { withArgs, noArgs },
-  {
-    databaseUrl: 'postgres://unused',
-    wal: { publicationName: 'pub', slotName: 'slot' },
-    logLevel: LogLevel.Error,
-  },
-);
+const runtime = createRuntime({
+  queries: { withArgs, noArgs },
+  databaseUrl: 'postgres://unused',
+  sourceDb,
+  wal: { publicationName: 'pub', slotName: 'slot' },
+  logLevel: LogLevel.Error,
+});
 
 expectTypeOf<typeof runtime.client>().toEqualTypeOf<
   EmbeddedPulseClient<{ withArgs: typeof withArgs; noArgs: typeof noArgs }>
@@ -59,14 +61,17 @@ expectTypeOf<WithArgsRow['status']>().toEqualTypeOf<
 type _NoPk = WithArgsRow['$pk'];
 
 // ---------------------------------------------------------------------------
-// Config has no pull/sourceDb knobs
+// Config has no pull knob; queries, databaseUrl, and sourceDb are required
 // ---------------------------------------------------------------------------
 
 // @ts-expect-error pull is not a knob on the embedded runtime
-createRuntime({ noArgs }, { databaseUrl: 'postgres://unused', pull: false });
+createRuntime({ queries: { noArgs }, databaseUrl: 'postgres://unused', sourceDb, pull: false });
 
-// @ts-expect-error sourceDb is not a knob on the embedded runtime
-createRuntime({ noArgs }, { databaseUrl: 'postgres://unused', sourceDb: {} });
+// @ts-expect-error sourceDb is required
+createRuntime({ queries: { noArgs }, databaseUrl: 'postgres://unused' });
 
 // @ts-expect-error databaseUrl is required
-createRuntime({ noArgs }, {});
+createRuntime({ queries: { noArgs }, sourceDb });
+
+// @ts-expect-error queries is required
+createRuntime({ databaseUrl: 'postgres://unused', sourceDb });
