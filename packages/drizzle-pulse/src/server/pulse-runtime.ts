@@ -38,18 +38,21 @@ export enum LogLevel {
 }
 
 /**
- * Fired once per row event the runtime applies. `committedAt` is the transaction's WAL commit
- * time in epoch microseconds (database host clock); `appliedAt` is when the runtime applied the
- * event, epoch microseconds (application host clock, monotonic after process start). A
- * pk-changing UPDATE is applied as delete-then-insert (see `decodeInto`) and therefore reports
- * two events.
+ * Fired once per (table, op) group of each transaction the runtime applies; `count` is the
+ * number of row events in the group. `committedAt` is the transaction's WAL commit time in epoch
+ * microseconds (database host clock); `appliedAt` is when the whole commit batch became visible
+ * to collections, epoch microseconds (application host clock); `commitLsn` is the transaction's
+ * commit LSN. A pk-changing UPDATE is applied as delete-then-insert (see `decodeInto`) and
+ * therefore counts into both groups.
  */
 export type TelemetryEvent = {
   schema: string;
   table: string;
   op: 'insert' | 'update' | 'delete';
+  count: number;
   committedAt: number;
   appliedAt: number;
+  commitLsn: string;
 };
 
 export type PulseRuntimeConfig = {
@@ -80,9 +83,10 @@ export type PulseRuntimeConfig = {
   wal?: PulseRuntimeWalConfig;
   logLevel?: LogLevel;
   /**
-   * Fires once per row event the runtime applies, synchronously on the replication loop — keep
-   * it cheap (push a line to a buffer, no IO). A thrown error is logged and swallowed. Reaches
-   * the runtime under both `pull` modes, but is documented only on the embedded surface.
+   * Fires once per (table, op) group of each transaction the runtime applies, synchronously on
+   * the replication loop — keep it cheap (push a line to a buffer, no IO). A thrown error is
+   * logged and swallowed. Reaches the runtime under both `pull` modes, but is documented only on
+   * the embedded surface.
    */
   telemetry?: (event: TelemetryEvent) => void;
 };
@@ -1217,23 +1221,45 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       run.attempts = 0;
 
       const telemetry = this.config.telemetry;
+      const telemetryGroups = telemetry
+        ? new Map<
+            string,
+            { schema: string; table: string; op: PendingWalEvent['op']; count: number }
+          >()
+        : null;
       for (const pendingEvent of batch.events) {
-        if (telemetry) {
-          try {
-            telemetry({
+        if (telemetryGroups) {
+          const key = `${pendingEvent.op} ${pendingEvent.tableQualifiedName}`;
+          const group = telemetryGroups.get(key);
+          if (group) {
+            group.count += 1;
+          } else {
+            telemetryGroups.set(key, {
               schema: pendingEvent.schema,
               table: pendingEvent.table,
               op: pendingEvent.op,
-              // appliedAt is stamped before emitTap on purpose: stamping after would fold
-              // subscriber callback runtime into the metric.
+              count: 1,
+            });
+          }
+        }
+        this.emitTap(pendingEvent, batch.commitLsn);
+      }
+      if (telemetry && telemetryGroups && telemetryGroups.size > 0) {
+        // Stamped after the tap fan-out: a row counts as synced once its whole commit batch is
+        // visible to collections.
+        const appliedAt = Math.round((performance.timeOrigin + performance.now()) * 1000);
+        for (const group of telemetryGroups.values()) {
+          try {
+            telemetry({
+              ...group,
               committedAt: event.commitTimeUs,
-              appliedAt: Math.round((performance.timeOrigin + performance.now()) * 1000),
+              appliedAt,
+              commitLsn: batch.commitLsn,
             });
           } catch (err) {
             this.logError('telemetry callback error:', err);
           }
         }
-        this.emitTap(pendingEvent, batch.commitLsn);
       }
 
       // Only after persist resolves — acking earlier reopens the data-loss window this
