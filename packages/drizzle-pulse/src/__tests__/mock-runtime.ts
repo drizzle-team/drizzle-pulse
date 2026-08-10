@@ -128,6 +128,7 @@ export function makeMockRuntime(opts: MockRuntimeOptions = {}) {
     oldRow: Record<string, unknown> | null,
     lsn: string,
   ): void => {
+    const [schema, table] = tableQualifiedName.split('.') as [string, string];
     // Cast: op/oldRow arrive as independent parameters so a test can emit any combination,
     // including the ones PendingWalEvent's op-discriminated shape forbids.
     const event = {
@@ -138,6 +139,8 @@ export function makeMockRuntime(opts: MockRuntimeOptions = {}) {
       row,
       oldRow,
       tableQualifiedName,
+      schema,
+      table,
     } as PendingWalEvent;
     for (const listener of tapListeners.get(tableQualifiedName) ?? []) listener(event, lsn);
   };

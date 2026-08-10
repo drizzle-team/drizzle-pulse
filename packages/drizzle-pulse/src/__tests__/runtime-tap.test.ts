@@ -18,6 +18,7 @@ function walEvent(
   row: Record<string, unknown>,
   oldRow: Record<string, unknown> | null,
 ): PendingWalEvent {
+  const [schema, table] = tableQualifiedName.split('.') as [string, string];
   // Cast: op/oldRow are independent parameters here so the tap's fan-out can be driven with any
   // combination, including ones PendingWalEvent's op-discriminated shape forbids.
   return {
@@ -28,6 +29,8 @@ function walEvent(
     row,
     oldRow,
     tableQualifiedName,
+    schema,
+    table,
   } as PendingWalEvent;
 }
 

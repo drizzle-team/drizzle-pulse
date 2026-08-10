@@ -9,6 +9,7 @@ import {
   type LogLevel,
   PulseRuntime,
   type PulseRuntimeWalConfig,
+  type TelemetryEvent,
 } from '../server/pulse-runtime.js';
 import type { PulseSourceDb } from '../server/pulse-sql.js';
 
@@ -26,6 +27,16 @@ export interface EmbeddedRuntimeConfig<TQueries extends AnyPulseBuilders> {
   sourceDb: PulseSourceDb;
   wal?: PulseRuntimeWalConfig;
   logLevel?: LogLevel;
+  /**
+   * Fired once per row event the runtime applies, with `{ schema, table, op, committedAt,
+   * appliedAt }`. Both stamps are epoch microseconds, so `appliedAt - committedAt` is the sync
+   * latency in microseconds; `committedAt` comes from the database host's clock and `appliedAt`
+   * from this process's clock, so cross-host skew can make individual deltas negative. Runs
+   * synchronously on the replication loop — keep it cheap. A throwing callback is logged at
+   * error level and never disrupts replication. A pk-changing UPDATE is applied as
+   * delete-then-insert and reports both.
+   */
+  telemetry?: (event: TelemetryEvent) => void;
 }
 
 export interface EmbeddedRuntime<TQueries extends AnyPulseBuilders> {
@@ -53,6 +64,7 @@ export function createRuntime<TQueries extends AnyPulseBuilders>(
     pull: false,
     wal: config.wal,
     logLevel: config.logLevel,
+    telemetry: config.telemetry,
   });
 
   return {
@@ -77,7 +89,7 @@ export {
 } from '../client/embedded/index.js';
 export type { PulseBuilder } from '../server/pulse-builder.js';
 export type { AnyPulseBuilders } from '../server/pulse-registry.js';
-export { LogLevel, type PulseRuntimeWalConfig } from '../server/pulse-runtime.js';
+export { LogLevel, type PulseRuntimeWalConfig, type TelemetryEvent } from '../server/pulse-runtime.js';
 export type { PulseSourceDb } from '../server/pulse-sql.js';
 export type {
   PulseDeleteEvent,

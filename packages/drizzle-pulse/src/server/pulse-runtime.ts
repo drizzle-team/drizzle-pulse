@@ -37,6 +37,21 @@ export enum LogLevel {
   Debug = 3,
 }
 
+/**
+ * Fired once per row event the runtime applies. `committedAt` is the transaction's WAL commit
+ * time in epoch microseconds (database host clock); `appliedAt` is when the runtime applied the
+ * event, epoch microseconds (application host clock, monotonic after process start). A
+ * pk-changing UPDATE is applied as delete-then-insert (see `decodeInto`) and therefore reports
+ * two events.
+ */
+export type TelemetryEvent = {
+  schema: string;
+  table: string;
+  op: 'insert' | 'update' | 'delete';
+  committedAt: number;
+  appliedAt: number;
+};
+
 export type PulseRuntimeConfig = {
   databaseUrl: string;
   /**
@@ -64,6 +79,12 @@ export type PulseRuntimeConfig = {
       };
   wal?: PulseRuntimeWalConfig;
   logLevel?: LogLevel;
+  /**
+   * Fires once per row event the runtime applies, synchronously on the replication loop — keep
+   * it cheap (push a line to a buffer, no IO). A thrown error is logged and swallowed. Reaches
+   * the runtime under both `pull` modes, but is documented only on the embedded surface.
+   */
+  telemetry?: (event: TelemetryEvent) => void;
 };
 
 type SourceTableMetadata = {
@@ -88,6 +109,8 @@ export type PendingWalEvent = {
   pkValue: unknown;
   row: Record<string, unknown>;
   tableQualifiedName: string;
+  schema: string;
+  table: string;
 } & ({ op: 'insert'; oldRow: null } | { op: 'update' | 'delete'; oldRow: Record<string, unknown> });
 
 // In-process (embedded) tap subscribers receive each decoded WAL event with its transaction's
@@ -1193,7 +1216,23 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       // terminal path instead of reconnecting forever.
       run.attempts = 0;
 
+      const telemetry = this.config.telemetry;
       for (const pendingEvent of batch.events) {
+        if (telemetry) {
+          try {
+            telemetry({
+              schema: pendingEvent.schema,
+              table: pendingEvent.table,
+              op: pendingEvent.op,
+              // appliedAt is stamped before emitTap on purpose: stamping after would fold
+              // subscriber callback runtime into the metric.
+              committedAt: event.commitTimeUs,
+              appliedAt: Math.round((performance.timeOrigin + performance.now()) * 1000),
+            });
+          } catch (err) {
+            this.logError('telemetry callback error:', err);
+          }
+        }
         this.emitTap(pendingEvent, batch.commitLsn);
       }
 
@@ -1218,6 +1257,8 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       eventsTable: metadata.eventsTable,
       pkKey: metadata.pkKey,
       tableQualifiedName,
+      schema: event.schema,
+      table: event.table,
     };
     // A row whose pk is absent or null can't be keyed by any consumer; the events table and the
     // tap are both pk-addressed, so the event is dropped rather than emitted unaddressable.
