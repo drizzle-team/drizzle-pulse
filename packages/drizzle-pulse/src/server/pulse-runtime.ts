@@ -83,10 +83,11 @@ export type PulseRuntimeConfig = {
   wal?: PulseRuntimeWalConfig;
   logLevel?: LogLevel;
   /**
-   * Fires once per (table, op) group of each transaction the runtime applies, synchronously on
-   * the replication loop — keep it cheap (push a line to a buffer, no IO). A thrown error is
-   * logged and swallowed. Reaches the runtime under both `pull` modes, but is documented only on
-   * the embedded surface.
+   * Fires once per (table, op) group of each transaction the runtime applies. Invoked
+   * asynchronously after the commit batch is applied and acked, so it never delays replication;
+   * `appliedAt` is stamped before the deferral, so telemetry's own work never skews it. A thrown
+   * error is logged and swallowed. Reaches the runtime under both `pull` modes, but is
+   * documented only on the embedded surface.
    */
   telemetry?: (event: TelemetryEvent) => void;
 };
@@ -1220,46 +1221,41 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       // terminal path instead of reconnecting forever.
       run.attempts = 0;
 
-      const telemetry = this.config.telemetry;
-      const telemetryGroups = telemetry
-        ? new Map<
-            string,
-            { schema: string; table: string; op: PendingWalEvent['op']; count: number }
-          >()
-        : null;
       for (const pendingEvent of batch.events) {
-        if (telemetryGroups) {
-          const key = `${pendingEvent.op} ${pendingEvent.tableQualifiedName}`;
-          const group = telemetryGroups.get(key);
-          if (group) {
-            group.count += 1;
-          } else {
-            telemetryGroups.set(key, {
-              schema: pendingEvent.schema,
-              table: pendingEvent.table,
-              op: pendingEvent.op,
-              count: 1,
-            });
-          }
-        }
         this.emitTap(pendingEvent, batch.commitLsn);
       }
-      if (telemetry && telemetryGroups && telemetryGroups.size > 0) {
-        // Stamped after the tap fan-out: a row counts as synced once its whole commit batch is
-        // visible to collections.
+
+      const telemetry = this.config.telemetry;
+      if (telemetry && batch.events.length > 0) {
+        // Stamped right after the tap fan-out (a row counts as synced once its whole commit
+        // batch is visible to collections) and before any telemetry work, so grouping and the
+        // user callback can't skew the metric. Everything else is deferred to a microtask: it
+        // runs after this iteration's ack, off the replication path. batch.events is safe to
+        // capture — nothing mutates it after the commit is handled.
         const appliedAt = Math.round((performance.timeOrigin + performance.now()) * 1000);
-        for (const group of telemetryGroups.values()) {
-          try {
-            telemetry({
-              ...group,
-              committedAt: event.commitTimeUs,
-              appliedAt,
-              commitLsn: batch.commitLsn,
-            });
-          } catch (err) {
-            this.logError('telemetry callback error:', err);
+        const committedAt = event.commitTimeUs;
+        const { commitLsn, events } = batch;
+        queueMicrotask(() => {
+          const groups = new Map<
+            string,
+            { schema: string; table: string; op: PendingWalEvent['op']; count: number }
+          >();
+          for (const { op, tableQualifiedName, schema, table } of events) {
+            const group = groups.get(`${op} ${tableQualifiedName}`);
+            if (group) {
+              group.count += 1;
+            } else {
+              groups.set(`${op} ${tableQualifiedName}`, { schema, table, op, count: 1 });
+            }
           }
-        }
+          for (const group of groups.values()) {
+            try {
+              telemetry({ ...group, committedAt, appliedAt, commitLsn });
+            } catch (err) {
+              this.logError('telemetry callback error:', err);
+            }
+          }
+        });
       }
 
       // Only after persist resolves — acking earlier reopens the data-loss window this

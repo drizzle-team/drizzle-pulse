@@ -33,10 +33,10 @@ export interface EmbeddedRuntimeConfig<TQueries extends AnyPulseBuilders> {
    * in the group. Both stamps are epoch microseconds, so `appliedAt - committedAt` is the sync
    * latency in microseconds; `committedAt` comes from the database host's clock and `appliedAt`
    * (taken once the whole commit batch is visible to collections) from this process's clock, so
-   * cross-host skew can make individual deltas negative. Runs synchronously on the replication
-   * loop — keep it cheap. A throwing callback is logged at error level and never disrupts
-   * replication. A pk-changing UPDATE is applied as delete-then-insert and counts into both
-   * groups.
+   * cross-host skew can make individual deltas negative. Invoked asynchronously after the batch
+   * is applied and acked, so it never delays replication. A throwing callback is logged at
+   * error level and never disrupts replication. A pk-changing UPDATE is applied as
+   * delete-then-insert and counts into both groups.
    */
   telemetry?: (event: TelemetryEvent) => void;
 }
