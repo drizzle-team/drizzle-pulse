@@ -37,7 +37,7 @@ purity test).
 | `src/types.ts` | shared public types such as `QueryDescriptor`, `ResolvedPulseQuery`, `WhereClause`, `PullResponse`, `LoadMoreResponse`, `PulseAuthContext`, `PulseWireEvent` (a `PulseEvent<Record<string, unknown>>` alias) |
 | `src/pulse-table.ts` | collection entity: `pulse(table)` → `PulseTable`; lazy PK validation at `.query()` time; value-imports `drizzle-orm/pg-core` (`getTableConfig`) — the sole client-unreachable pg-core exemption in the purity test |
 | `src/shared/` | protocol request/response types, filter AST helpers, PK utilities, `pulse-merge-core.ts` (merge state machine reused by HTTP `PulseQuery` and embedded `PulseCollection`; keys rows by out-of-band pks — rebuild entries + each event's `pk` field — so rows carry no identity property; the ranged/HTTP subclass derives entry pks from wire rows' `$pk`) |
-| `src/embedded/index.ts` | embedded-only factory: `createRuntime({ queries, databaseUrl, sourceDb, wal?, logLevel? })` → `{ client, events, start, stop, provision, onFatalError }`; wires `createPulseRegistry` + a `pull: false` `PulseRuntime` internally and delegates the lifecycle straight through |
+| `src/embedded/index.ts` | embedded-only factory: `createRuntime({ queries, databaseUrl, sourceDb, wal?, logLevel?, telemetry? })` → `{ client, events, start, stop, provision, onFatalError }`; wires `createPulseRegistry` + a `pull: false` `PulseRuntime` internally and delegates the lifecycle straight through |
 | `src/client/create-client.ts` | proxy-based typed HTTP client + `PullClient` (batched auto-poll, default 1s, `pollIntervalMs: 0` disables) |
 | `src/client/transport.ts` | `createHttpTransport` (fetch+superjson) + the `PulseHttpTransport` inferred type — the HTTP client's single transport (the old `PulseQueryTransport` interface was deleted with the embedded direct transport) |
 | `src/client/pulse-query.ts` | framework-agnostic subscribe/poll/load-more state machine (`PulseQuery`); `destroy()` stops polling — the client holds no server-side state to release |
@@ -55,7 +55,7 @@ purity test).
 | `src/server/pulse-sql.ts` | query compilation / row predicate evaluation |
 | `src/server/sdk.ts` | `PulseRequestHandler` — the transport-agnostic SDK core: subscribe/pull/loadMore, cursor-token mint/validate, `DEFAULT_PULL_EVENT_LIMIT` overflow→reset. Stateless: auth re-resolved per pull, no subscription registry |
 | `src/server/hono.ts` | `createPulseHonoRouter` — optional Hono wrapper over the SDK's three routes (`/subscribe`, `/pull`, `/load-more`); superjson-encoded responses; `./server/hono` subpath |
-| `src/server/pulse-runtime.ts` | `PulseRuntime` assembly, `PulseRuntimeConfig` (publication/slot default `drizzle_pulse`, `eventsSchema`, `pullEventLimit`, `logLevel`), `bootstrap()` self-provisioning + `provision()`, WAL listener lifecycle |
+| `src/server/pulse-runtime.ts` | `PulseRuntime` assembly, `PulseRuntimeConfig` (publication/slot default `drizzle_pulse`, `eventsSchema`, `pullEventLimit`, `logLevel`, `telemetry`), `bootstrap()` self-provisioning + `provision()`, WAL listener lifecycle |
 | `src/server/pulse-store.ts` | `PulseStore` — events-table reads/writes over the pulse-owned pool |
 | `src/__tests__/` | runtime/unit tests for SDK internals |
 
@@ -105,7 +105,7 @@ React:
   usePulseQuery(descriptor) → { data, isLoading, isLoadingMore, hasMore, error, loadMore, refetch }
 
 Embedded entrypoint (./embedded — embedded-only apps):
-  createRuntime({ queries: { queryName }, databaseUrl, sourceDb, wal?, logLevel? })
+  createRuntime({ queries: { queryName }, databaseUrl, sourceDb, wal?, logLevel?, telemetry? })
     → createPulseRegistry + new PulseRuntime(registry, { pull: false, ... }) wired internally
     → { client, events } = the two embedded surfaces below over that runtime
     → start() / stop() / provision() / onFatalError() delegate straight to the runtime
@@ -181,7 +181,7 @@ type EmbeddedPulseEvents, PulseEventsCallback, PulseEventsOptions
 
 // drizzle-pulse/embedded
 createRuntime, LogLevel, PulseCollection
-type EmbeddedRuntime, EmbeddedRuntimeConfig, PulseRuntimeWalConfig, PulseSourceDb
+type EmbeddedRuntime, EmbeddedRuntimeConfig, PulseRuntimeWalConfig, PulseSourceDb, TelemetryEvent
 type PulseBuilder, AnyPulseBuilders
 type EmbeddedPulseClient, EmbeddedPulseEvents
 type PulseCollectionOptions, PulseCollectionChange, PulseRow

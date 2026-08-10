@@ -89,7 +89,11 @@ export {
 } from '../client/embedded/index.js';
 export type { PulseBuilder } from '../server/pulse-builder.js';
 export type { AnyPulseBuilders } from '../server/pulse-registry.js';
-export { LogLevel, type PulseRuntimeWalConfig, type TelemetryEvent } from '../server/pulse-runtime.js';
+export {
+  LogLevel,
+  type PulseRuntimeWalConfig,
+  type TelemetryEvent,
+} from '../server/pulse-runtime.js';
 export type { PulseSourceDb } from '../server/pulse-sql.js';
 export type {
   PulseDeleteEvent,
