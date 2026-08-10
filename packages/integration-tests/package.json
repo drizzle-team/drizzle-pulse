@@ -11,7 +11,7 @@
     "drizzle-orm": "catalog:",
     "fast-check": "^3.23.2",
     "hono": "^4.6.0",
-    "minipg": "file:../../vendor/minipg-0.1.0.tgz",
+    "minipg": "file:../../vendor/minipg-0.3.1.tgz",
     "pg": "^8.13.0",
     "postgres": "^3.4.9",
     "superjson": "^2.2.6",

@@ -94,7 +94,7 @@
     "superjson": "^2.2.6"
   },
   "devDependencies": {
-    "minipg": "file:../../vendor/minipg-0.1.0.tgz",
+    "minipg": "file:../../vendor/minipg-0.3.1.tgz",
     "@arethetypeswrong/cli": "^0.18.4",
     "@types/node": "^20.11.30",
     "@types/react": "^18.2.0",

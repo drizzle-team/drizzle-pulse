@@ -6,12 +6,12 @@
       "name": "drizzle-pulse-workspace",
       "devDependencies": {
         "@biomejs/biome": "2.4.4",
-        "minipg": "file:./vendor/minipg-0.1.0.tgz",
+        "minipg": "file:./vendor/minipg-0.3.1.tgz",
       },
     },
     "packages/drizzle-pulse": {
       "name": "drizzle-pulse",
-      "version": "0.1.0",
+      "version": "0.3.0",
       "dependencies": {
         "superjson": "^2.2.6",
       },
@@ -23,7 +23,7 @@
         "drizzle-orm": "catalog:",
         "fast-check": "^3.23.2",
         "hono": "^4.6.0",
-        "minipg": "file:../../vendor/minipg-0.1.0.tgz",
+        "minipg": "file:../../vendor/minipg-0.3.1.tgz",
         "publint": "^0.3.21",
         "react": "^18.2.0",
         "typescript": "^5.9.3",
@@ -48,7 +48,7 @@
         "drizzle-pulse": "workspace:*",
         "fast-check": "^3.23.2",
         "hono": "^4.6.0",
-        "minipg": "file:../../vendor/minipg-0.1.0.tgz",
+        "minipg": "file:../../vendor/minipg-0.3.1.tgz",
         "pg": "^8.13.0",
         "postgres": "^3.4.9",
         "superjson": "^2.2.6",
@@ -1084,7 +1084,7 @@
 
     "minipass": ["minipass@7.1.3", "", {}, "sha512-tEBHqDnIoM/1rXME1zgka9g6Q2lcoCkxHLuc7ODJ5BxbP5d4c2Z5cGgtXAku59200Cx7diuHTOYfSBD8n6mm8A=="],
 
-    "minipg": ["minipg@./vendor/minipg-0.1.0.tgz", { "peerDependencies": { "typescript": "^5" } }],
+    "minipg": ["minipg@./vendor/minipg-0.3.1.tgz", { "peerDependencies": { "typescript": "^5" } }],
 
     "minizlib": ["minizlib@3.1.0", "", { "dependencies": { "minipass": "^7.1.2" } }, "sha512-KZxYo1BUkWD2TVFLr0MQoM8vUUigWD3LlD83a/75BqC+4qE0Hb1Vo5v1FgcfaNXvfXzr+5EhQ6ing/CaBijTlw=="],
 
@@ -1512,7 +1512,7 @@
 
     "@babel/plugin-transform-runtime/semver": ["semver@6.3.1", "", { "bin": { "semver": "bin/semver.js" } }, "sha512-BR7VvDCVHO+q2xBEWskxS6DJE1qRnb7DxzUrogb71CWoSficBxYsiAGd+Kl0mmq/MprG9yArRkyrQxTO6XjMzA=="],
 
-    "@drizzle-pulse/integration-tests/minipg": ["minipg@../../vendor/minipg-0.1.0.tgz", { "peerDependencies": { "typescript": "^5" } }],
+    "@drizzle-pulse/integration-tests/minipg": ["minipg@../../vendor/minipg-0.3.1.tgz", { "peerDependencies": { "typescript": "^5" } }],
 
     "@effect/sql-pg/pg-types": ["pg-types@4.1.0", "", { "dependencies": { "pg-int8": "1.0.1", "pg-numeric": "1.0.2", "postgres-array": "~3.0.1", "postgres-bytea": "~3.0.0", "postgres-date": "~2.1.0", "postgres-interval": "^3.0.0", "postgres-range": "^1.1.1" } }, "sha512-o2XFanIMy/3+mThw69O8d4n1E5zsLhdO+OPqswezu7Z5ekP4hYDqlDjlmOpYMbzY2Br0ufCwJLdDIXeNVwcWFg=="],
 
@@ -1560,7 +1560,7 @@
 
     "cross-spawn/which": ["which@2.0.2", "", { "dependencies": { "isexe": "^2.0.0" }, "bin": { "node-which": "./bin/node-which" } }, "sha512-BLI3Tl1TW3Pvl70l3yq3Y64i+awpwXqsGBYWkkqMtnbXgrMD+yj7rhW0kuEDxzJaYXGjEW5ogapKNMEKNMjibA=="],
 
-    "drizzle-pulse/minipg": ["minipg@../../vendor/minipg-0.1.0.tgz", { "peerDependencies": { "typescript": "^5" } }],
+    "drizzle-pulse/minipg": ["minipg@../../vendor/minipg-0.3.1.tgz", { "peerDependencies": { "typescript": "^5" } }],
 
     "effect/fast-check": ["fast-check@4.9.0", "", { "dependencies": { "pure-rand": "^8.0.0" } }, "sha512-7ms6T7SybUev/PQITciI0yLM2pOSFy5zpG8Ty7tQofcVaQUvrMXp6CBwqF6fThLCLOrfBtuHAtwq6Yu4XPCllg=="],
 

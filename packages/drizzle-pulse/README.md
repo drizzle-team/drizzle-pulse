@@ -14,7 +14,7 @@ npm install drizzle-pulse
 npm install drizzle-orm zod
 ```
 
-`minipg` is also a required peer for the server-side entrypoints (`/server`, `/embedded`). Do not install it from the public npm registry — that name is held by an unrelated package; install the `minipg` tarball vendored in this repository (`vendor/minipg-0.1.0.tgz`).
+`minipg` is also a required peer for the server-side entrypoints (`/server`, `/embedded`). Do not install it from the public npm registry — that name is held by an unrelated package; install the `minipg` tarball vendored in this repository (`vendor/minipg-0.3.1.tgz`).
 
 `react` is only required if you use the [`drizzle-pulse/client/react`](#drizzle-pulseclientreact) entrypoint.
 
@@ -275,7 +275,7 @@ Updates are push-shaped: each decoded WAL commit is applied to the collection as
 |---|---|---|
 | `drizzle-orm` | `^1.0.0-rc.4` | Tested against `1.0.0-rc.4` |
 | `zod` | `^4.0.0` | |
-| `minipg` | `0.1.0` | Required peer for `/server` and `/embedded` — install the vendored tarball, not the (squatted) public npm package |
+| `minipg` | `0.3.1` | Required peer for `/server` and `/embedded` — install the vendored tarball, not the (squatted) public npm package |
 | `react` | `>=18.0.0` | Optional — only required for `drizzle-pulse/client/react` |
 | `hono` | `^4.6.0` | Optional — only required for `drizzle-pulse/server/hono` |
 | `node` | `>=20` | |

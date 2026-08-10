@@ -23,6 +23,6 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.4",
-    "minipg": "file:./vendor/minipg-0.1.0.tgz"
+    "minipg": "file:./vendor/minipg-0.3.1.tgz"
   }
 }
