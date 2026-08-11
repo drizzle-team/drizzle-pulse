@@ -29,8 +29,8 @@ export interface EmbeddedRuntimeConfig<TQueries extends AnyPulseBuilders> {
   logLevel?: LogLevel;
   /**
    * Fired once per (table, op) group of each transaction the runtime applies, with `{ schema,
-   * table, op, count, committedAt, appliedAt, commitLsn }`. `count` is the number of row events
-   * in the group. Both stamps are epoch microseconds, so `appliedAt - committedAt` is the sync
+   * table, op, rowCount, committedAt, appliedAt, commitLsn }`. `rowCount` is the number of row
+   * events in the group. Both stamps are epoch microseconds, so `appliedAt - committedAt` is the sync
    * latency in microseconds; `committedAt` comes from the database host's clock and `appliedAt`
    * (taken once the whole commit batch is visible to collections) from this process's clock, so
    * cross-host skew can make individual deltas negative. Invoked asynchronously after the batch

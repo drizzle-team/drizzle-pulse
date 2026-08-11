@@ -50,15 +50,15 @@ describe('drizzle-pulse/embedded — telemetry', () => {
         'appliedAt',
         'commitLsn',
         'committedAt',
-        'count',
         'op',
+        'rowCount',
         'schema',
         'table',
       ]);
       expect(event.op).toBe('insert');
       expect(event.schema).toBe('public');
       expect(event.table).toBe('orders');
-      expect(event.count).toBe(1);
+      expect(event.rowCount).toBe(1);
       expect(event.commitLsn).toMatch(/^[0-9A-F]+\/[0-9A-F]+$/i);
       expect(Number.isInteger(event.committedAt)).toBe(true);
       expect(Number.isInteger(event.appliedAt)).toBe(true);
@@ -69,14 +69,14 @@ describe('drizzle-pulse/embedded — telemetry', () => {
       // correct epoch-microsecond value stays within it.
       expect(Math.abs(event.committedAt - Date.now() * 1000)).toBeLessThan(60_000_000);
 
-      // Two rows in one transaction collapse into a single grouped event with count 2.
+      // Two rows in one transaction collapse into a single grouped event with rowCount 2.
       await scenario.sql.unsafe(
         `INSERT INTO "orders" (driver_id, status, price) VALUES (3, 'accepted', 30), (4, 'accepted', 40)`,
       );
       await waitFor(() => received.length === 2);
       const grouped = received[1]!;
       expect(grouped.op).toBe('insert');
-      expect(grouped.count).toBe(2);
+      expect(grouped.rowCount).toBe(2);
       expect(grouped.commitLsn).not.toBe(event.commitLsn);
 
       collection.dispose();

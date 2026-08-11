@@ -38,7 +38,7 @@ export enum LogLevel {
 }
 
 /**
- * Fired once per (table, op) group of each transaction the runtime applies; `count` is the
+ * Fired once per (table, op) group of each transaction the runtime applies; `rowCount` is the
  * number of row events in the group. `committedAt` is the transaction's WAL commit time in epoch
  * microseconds (database host clock); `appliedAt` is when the whole commit batch became visible
  * to collections, epoch microseconds (application host clock); `commitLsn` is the transaction's
@@ -49,7 +49,7 @@ export type TelemetryEvent = {
   schema: string;
   table: string;
   op: 'insert' | 'update' | 'delete';
-  count: number;
+  rowCount: number;
   committedAt: number;
   appliedAt: number;
   commitLsn: string;
@@ -82,13 +82,7 @@ export type PulseRuntimeConfig = {
       };
   wal?: PulseRuntimeWalConfig;
   logLevel?: LogLevel;
-  /**
-   * Fires once per (table, op) group of each transaction the runtime applies. Invoked
-   * asynchronously after the commit batch is applied and acked, so it never delays replication;
-   * `appliedAt` is stamped before the deferral, so telemetry's own work never skews it. A thrown
-   * error is logged and swallowed. Reaches the runtime under both `pull` modes, but is
-   * documented only on the embedded surface.
-   */
+  /** Fires once per (table, op) group of each transaction the runtime applies. */
   telemetry?: (event: TelemetryEvent) => void;
 };
 
@@ -1227,25 +1221,20 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
       const telemetry = this.config.telemetry;
       if (telemetry && batch.events.length > 0) {
-        // Stamped right after the tap fan-out (a row counts as synced once its whole commit
-        // batch is visible to collections) and before any telemetry work, so grouping and the
-        // user callback can't skew the metric. Everything else is deferred to a microtask: it
-        // runs after this iteration's ack, off the replication path. batch.events is safe to
-        // capture — nothing mutates it after the commit is handled.
         const appliedAt = Math.round((performance.timeOrigin + performance.now()) * 1000);
         const committedAt = event.commitTimeUs;
         const { commitLsn, events } = batch;
         queueMicrotask(() => {
           const groups = new Map<
             string,
-            { schema: string; table: string; op: PendingWalEvent['op']; count: number }
+            { schema: string; table: string; op: PendingWalEvent['op']; rowCount: number }
           >();
           for (const { op, tableQualifiedName, schema, table } of events) {
             const group = groups.get(`${op} ${tableQualifiedName}`);
             if (group) {
-              group.count += 1;
+              group.rowCount += 1;
             } else {
-              groups.set(`${op} ${tableQualifiedName}`, { schema, table, op, count: 1 });
+              groups.set(`${op} ${tableQualifiedName}`, { schema, table, op, rowCount: 1 });
             }
           }
           for (const group of groups.values()) {
