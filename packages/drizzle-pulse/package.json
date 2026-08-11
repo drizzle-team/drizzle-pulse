@@ -1,6 +1,6 @@
 {
   "name": "drizzle-pulse",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Type-safe Pulse SDK for Drizzle — server runtime, HTTP client, React hook, and embedded client",
   "type": "module",
   "license": "Apache-2.0",
