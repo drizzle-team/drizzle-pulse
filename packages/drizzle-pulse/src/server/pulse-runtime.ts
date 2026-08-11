@@ -37,14 +37,7 @@ export enum LogLevel {
   Debug = 3,
 }
 
-/**
- * Fired once per (table, op) group of each transaction the runtime applies; `rowCount` is the
- * number of row events in the group. `committedAt` is the transaction's WAL commit time in epoch
- * microseconds (database host clock); `appliedAt` is when the whole commit batch became visible
- * to collections, epoch microseconds (application host clock); `commitLsn` is the transaction's
- * commit LSN. A pk-changing UPDATE is applied as delete-then-insert (see `decodeInto`) and
- * therefore counts into both groups.
- */
+/** Fired once per (table, op) group of each transaction the runtime applies */
 export type TelemetryEvent = {
   schema: string;
   table: string;
@@ -1168,11 +1161,15 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     iterator: AsyncGenerator<ReplicationEvent>,
     run: Run,
   ): Promise<void> {
-    let tx: { commitLsn: string; events: PendingWalEvent[] } | null = null;
+    let tx: {
+      commitLsn: string;
+      events: PendingWalEvent[];
+      wireCounts: Map<string, Pick<TelemetryEvent, 'schema' | 'table' | 'op' | 'rowCount'>>;
+    } | null = null;
 
     for await (const event of iterator) {
       if (event.kind === 'begin') {
-        tx = { commitLsn: event.finalLsn, events: [] };
+        tx = { commitLsn: event.finalLsn, events: [], wireCounts: new Map() };
         continue;
       }
       if (event.kind === 'insert' || event.kind === 'update' || event.kind === 'delete') {
@@ -1220,24 +1217,12 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       }
 
       const telemetry = this.config.telemetry;
-      if (telemetry && batch.events.length > 0) {
+      if (telemetry && batch.wireCounts.size > 0) {
         const appliedAt = Math.round((performance.timeOrigin + performance.now()) * 1000);
         const committedAt = event.commitTimeUs;
-        const { commitLsn, events } = batch;
+        const { commitLsn, wireCounts } = batch;
         queueMicrotask(() => {
-          const groups = new Map<
-            string,
-            { schema: string; table: string; op: PendingWalEvent['op']; rowCount: number }
-          >();
-          for (const { op, tableQualifiedName, schema, table } of events) {
-            const group = groups.get(`${op} ${tableQualifiedName}`);
-            if (group) {
-              group.rowCount += 1;
-            } else {
-              groups.set(`${op} ${tableQualifiedName}`, { schema, table, op, rowCount: 1 });
-            }
-          }
-          for (const group of groups.values()) {
+          for (const group of wireCounts.values()) {
             try {
               telemetry({ ...group, committedAt, appliedAt, commitLsn });
             } catch (err) {
@@ -1254,7 +1239,10 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   }
 
   private decodeInto(
-    tx: { events: PendingWalEvent[] },
+    tx: {
+      events: PendingWalEvent[];
+      wireCounts: Map<string, Pick<TelemetryEvent, 'schema' | 'table' | 'op' | 'rowCount'>>;
+    },
     event: Extract<ReplicationEvent, { kind: 'insert' | 'update' | 'delete' }>,
   ): void {
     const tableQualifiedName = `${event.schema}.${event.table}`;
@@ -1262,6 +1250,23 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     const metadata = this.sourceTableMetadata.get(tableQualifiedName);
     if (!metadata) {
       return;
+    }
+
+    // Telemetry counts WAL events as the wire delivered them — before the pk-drop and the
+    // pk-change delete+insert synthesis below.
+    if (this.config.telemetry) {
+      const key = `${event.kind} ${tableQualifiedName}`;
+      const group = tx.wireCounts.get(key);
+      if (group) {
+        group.rowCount += 1;
+      } else {
+        tx.wireCounts.set(key, {
+          schema: event.schema,
+          table: event.table,
+          op: event.kind,
+          rowCount: 1,
+        });
+      }
     }
 
     const base = {

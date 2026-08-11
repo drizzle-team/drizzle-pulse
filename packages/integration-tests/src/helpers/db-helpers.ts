@@ -159,7 +159,6 @@ export async function waitForProcessedEventsForFixture(
   });
 }
 
-/** The one canonical bounded async predicate poller, replacing 7 per-suite copies. */
 export async function waitFor(
   predicate: () => boolean | Promise<boolean>,
   timeoutMs = 8000,

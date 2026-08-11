@@ -27,17 +27,7 @@ export interface EmbeddedRuntimeConfig<TQueries extends AnyPulseBuilders> {
   sourceDb: PulseSourceDb;
   wal?: PulseRuntimeWalConfig;
   logLevel?: LogLevel;
-  /**
-   * Fired once per (table, op) group of each transaction the runtime applies, with `{ schema,
-   * table, op, rowCount, committedAt, appliedAt, commitLsn }`. `rowCount` is the number of row
-   * events in the group. Both stamps are epoch microseconds, so `appliedAt - committedAt` is the sync
-   * latency in microseconds; `committedAt` comes from the database host's clock and `appliedAt`
-   * (taken once the whole commit batch is visible to collections) from this process's clock, so
-   * cross-host skew can make individual deltas negative. Invoked asynchronously after the batch
-   * is applied and acked, so it never delays replication. A throwing callback is logged at
-   * error level and never disrupts replication. A pk-changing UPDATE is applied as
-   * delete-then-insert and counts into both groups.
-   */
+  /** Fired once per (table, op) group of each transaction the runtime applies */
   telemetry?: (event: TelemetryEvent) => void;
 }
 

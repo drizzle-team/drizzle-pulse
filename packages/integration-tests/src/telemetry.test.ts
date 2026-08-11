@@ -79,6 +79,14 @@ describe('drizzle-pulse/embedded — telemetry', () => {
       expect(grouped.rowCount).toBe(2);
       expect(grouped.commitLsn).not.toBe(event.commitLsn);
 
+      // Telemetry counts WAL events as the wire delivered them: a pk-changing UPDATE (which
+      // pulse applies as delete-then-insert) reports one update.
+      await scenario.sql.unsafe(`UPDATE "orders" SET id = 99 WHERE id = 1`);
+      await waitFor(() => received.length === 3);
+      const pkChange = received[2]!;
+      expect(pkChange.op).toBe('update');
+      expect(pkChange.rowCount).toBe(1);
+
       collection.dispose();
       await runtime.stop();
     } finally {
