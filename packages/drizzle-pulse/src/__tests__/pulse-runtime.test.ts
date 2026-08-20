@@ -22,14 +22,14 @@ describe('start() failure rolls back to a restartable state', () => {
     const runtime = makePulseRuntime({
       databaseUrl: 'postgresql://user:pass@localhost/test',
     });
-    // store/bootstrap/runReplicationLoop are private seams; every other access in this
+    // store/bootstrap/openSession are private seams; every other access in this
     // test stays on the public type.
     const internals = runtime as any;
 
-    // Baseline seeding moved inside the replication loop's connect (resolveSlot's resume branch) —
-    // a failure there now becomes a replication-loop retry, not a start()
-    // rejection. bootstrap() is the only await left in start()'s try block before the guard
-    // resolves, so it's the seam that must throw to exercise the rollback path.
+    // Baseline seeding happens inside the CDC session's backfill/resume callbacks — a failure
+    // there becomes a driver retry, not a start() rejection. bootstrap() is the only await left
+    // in start()'s try block before the session opens, so it's the seam that must throw to
+    // exercise the rollback path.
     let storeEnded = 0;
     internals.store = {
       end: async () => {
@@ -52,11 +52,8 @@ describe('start() failure rolls back to a restartable state', () => {
     internals.bootstrap = async () => {
       secondAttemptRan = true;
     };
-    internals.runReplicationLoop = async (
-      _run: unknown,
-      startupSettled: { resolve: () => void },
-    ) => {
-      startupSettled.resolve();
+    internals.openSession = async () => {
+      internals.session = { stop: async () => {} };
     };
 
     await runtime.start();

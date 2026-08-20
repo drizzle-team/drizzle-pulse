@@ -93,12 +93,9 @@ describe('onTerminalError', () => {
       events.push('stop');
     });
 
-    // `isRunning` is now a getter over `run !== null` — install a run object directly.
-    // RECONNECT_MAX_RETRIES is a hardcoded module constant in pulse-runtime.ts (no reconnect
-    // knobs), not a per-runtime config surface — mirror its value (10) directly.
-    (runtime as any).run = { abort: new AbortController(), attempts: 10 };
-
-    (runtime as any).giveUp();
+    // handleFatal is the private terminal seam the driver's onFatalError routes into. A plain
+    // Error is not slot-recoverable, so it takes the fan-out-and-stop path directly.
+    await (runtime as any).handleFatal(new Error('replication gave up'));
     // stop() is invoked fire-and-forget (`void this.stop()`); flush any pending microtasks.
     await Promise.resolve();
 
@@ -117,11 +114,7 @@ describe('onTerminalError', () => {
       events.push('stop');
     });
 
-    // RECONNECT_MAX_RETRIES is a hardcoded module constant in pulse-runtime.ts (no reconnect
-    // knobs), not a per-runtime config surface — mirror its value (10) directly.
-    (runtime as any).run = { abort: new AbortController(), attempts: 10 };
-
-    (runtime as any).giveUp();
+    await (runtime as any).handleFatal(new Error('replication gave up'));
     await Promise.resolve();
 
     expect(events).toEqual(['stop']);

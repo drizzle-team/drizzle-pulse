@@ -20,7 +20,10 @@ if (result.status !== 0) {
   process.exit(1);
 }
 
-const [packResult] = JSON.parse(result.stdout);
+// npm 11 and earlier emit an array of pack results; npm 12 emits an object keyed by package
+// name. Accept either so the gate does not silently depend on the local npm major.
+const parsed = JSON.parse(result.stdout);
+const [packResult] = Array.isArray(parsed) ? parsed : Object.values(parsed);
 const packedPaths = packResult.files.map((file) => file.path);
 
 const errors = [];

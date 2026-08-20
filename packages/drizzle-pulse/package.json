@@ -78,7 +78,7 @@
   "peerDependencies": {
     "drizzle-orm": "^1.0.0-rc.4",
     "hono": "^4.6.0",
-    "minipg": ">=0.3.1",
+    "minipg": ">=0.4.0",
     "react": ">=18.0.0",
     "zod": "^4.0.0"
   },
@@ -94,7 +94,7 @@
     "superjson": "^2.2.6"
   },
   "devDependencies": {
-    "minipg": "file:../../vendor/minipg-0.3.1.tgz",
+    "minipg": "https://pkg.pr.new/@drizzle-team/minipg@46591fc",
     "@arethetypeswrong/cli": "^0.18.4",
     "@types/node": "^20.11.30",
     "@types/react": "^18.2.0",

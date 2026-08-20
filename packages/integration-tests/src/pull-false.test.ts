@@ -115,9 +115,11 @@ describe('pull: false — embedded-only runtime writes nothing to events tables'
     try {
       await s.runtime.start();
 
+      // The temporary slot's NAME belongs to the driver, so this scenario's own ephemeral
+      // database is the locator — what matters is that the slot is temporary, is not the
+      // configured durable name, and does not outlive the runtime.
       const slots = await s.sql.unsafe<{ slot_name: string; temporary: boolean }[]>(
-        `SELECT slot_name, temporary FROM pg_replication_slots WHERE slot_name LIKE $1`,
-        [`${s.slotName}\\_%`],
+        `SELECT slot_name, temporary FROM pg_replication_slots WHERE database = current_database()`,
       );
       expect(slots).toHaveLength(1);
       expect(slots[0]?.slot_name).not.toBe(s.slotName);
@@ -127,8 +129,7 @@ describe('pull: false — embedded-only runtime writes nothing to events tables'
 
       await waitFor(async () => {
         const remaining = await s.sql.unsafe(
-          `SELECT 1 FROM pg_replication_slots WHERE slot_name LIKE $1`,
-          [`${s.slotName}\\_%`],
+          `SELECT 1 FROM pg_replication_slots WHERE database = current_database()`,
         );
         return remaining.length === 0;
       });
@@ -264,11 +265,10 @@ describe('pull: false — embedded-only runtime writes nothing to events tables'
       );
       await waitFor(() => collection.list().length === 1);
 
-      // Locate the active temp slot (randomized-suffix, never the base slotName) and its
-      // walsender backend.
+      // Locate the active temp slot and its walsender backend. This scenario owns its
+      // database outright, so it is the only slot in it.
       const before = await s.sql.unsafe<{ slot_name: string; active_pid: number | null }[]>(
-        `SELECT slot_name, active_pid FROM pg_replication_slots WHERE slot_name LIKE $1`,
-        [`${s.slotName}\\_%`],
+        `SELECT slot_name, active_pid FROM pg_replication_slots WHERE database = current_database()`,
       );
       expect(before).toHaveLength(1);
       const killedSlotName = before[0]?.slot_name;
@@ -285,11 +285,10 @@ describe('pull: false — embedded-only runtime writes nothing to events tables'
         `INSERT INTO "orders" (driver_id, status, price) VALUES (2, 'accepted', 20)`,
       );
 
-      // First reconnect lands ~1-2s after the edge (RECONNECT_BASE_DELAY_MS * 2^0 + jitter).
+      // First reconnect lands ~1-2s after the edge (the driver's base backoff plus jitter).
       await waitFor(async () => {
         const rows = await s.sql.unsafe<{ slot_name: string }[]>(
-          `SELECT slot_name FROM pg_replication_slots WHERE slot_name LIKE $1`,
-          [`${s.slotName}\\_%`],
+          `SELECT slot_name FROM pg_replication_slots WHERE database = current_database()`,
         );
         return rows.length > 0 && rows[0]?.slot_name !== killedSlotName;
       }, 10000);
