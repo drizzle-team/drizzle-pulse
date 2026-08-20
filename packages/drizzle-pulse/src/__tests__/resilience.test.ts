@@ -76,13 +76,15 @@ describe('runtime reconnect edge', () => {
 
     await opts.backfill(window);
 
-    // openSession settles on ready, not on backfill completing — race it against an
-    // already-resolved sentinel while ready is still unresolved to prove it is still pending.
-    const raceResult = await Promise.race([
-      opening.then(() => 'opened'),
-      Promise.resolve('pending'),
-    ]);
-    expect(raceResult).toBe('pending');
+    // openSession settles on ready, not on backfill completing. A Promise.race against an
+    // already-resolved sentinel cannot show this: .then() costs a microtask tick, so the
+    // sentinel wins even when opening has settled. Flush the queue and read the flag instead.
+    let opened = false;
+    void opening.then(() => {
+      opened = true;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(opened).toBe(false);
 
     resolveReady();
     await opening;

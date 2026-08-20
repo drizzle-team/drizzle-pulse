@@ -245,12 +245,15 @@ describe('Slot recovery: backfill/resume auto-heal', () => {
       epochBefore = await eventsTableEpoch(sql);
       expect(epochBefore).toBeDefined();
 
-      await sql.unsafe(
-        `INSERT INTO "orders" (driver_id, status, price) VALUES (1, 'accepted', 10)`,
-      );
+      // Subscribe before the write. /subscribe reads the events-table cursor before its
+      // baseline SELECT, so a row inserted first can already sit behind the cursor and the
+      // pull then waits out its deadline for an event it will never be offered.
       const preStopCursor = await subscribeClient(first.router, 'ordersByStatus', {
         status: 'accepted',
       });
+      await sql.unsafe(
+        `INSERT INTO "orders" (driver_id, status, price) VALUES (1, 'accepted', 10)`,
+      );
       const preStopPull = await pullUntilEvents(first.router, preStopCursor);
       expect(preStopPull.events.length).toBeGreaterThan(0);
     } finally {
