@@ -94,7 +94,7 @@
     "superjson": "^2.2.6"
   },
   "devDependencies": {
-    "minipg": "https://pkg.pr.new/@drizzle-team/minipg@46591fc",
+    "minipg": "https://pkg.pr.new/@drizzle-team/minipg@e15568d",
     "@arethetypeswrong/cli": "^0.18.4",
     "@types/node": "^20.11.30",
     "@types/react": "^18.2.0",
