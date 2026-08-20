@@ -37,11 +37,12 @@ export enum LogLevel {
   Debug = 3,
 }
 
-/** Fired once per (table, op) group of each transaction the runtime applies */
+/** Fired once per (table, op) group of each transaction the runtime applies, plus once per
+ * collection on a reconnect rebaseline. */
 export type TelemetryEvent = {
   schema: string;
   table: string;
-  op: 'insert' | 'update' | 'delete';
+  op: 'insert' | 'update' | 'delete' | 'rebaseline';
   rowCount: number;
   committedAt: number;
   appliedAt: number;
@@ -75,7 +76,8 @@ export type PulseRuntimeConfig = {
       };
   wal?: PulseRuntimeWalConfig;
   logLevel?: LogLevel;
-  /** Fires once per (table, op) group of each transaction the runtime applies. */
+  /** Fires once per (table, op) group of each transaction the runtime applies, plus once per
+   * collection on a reconnect rebaseline. */
   telemetry?: (event: TelemetryEvent) => void;
 };
 
@@ -407,25 +409,56 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   async readCollectionBaseline(
     resolved: ResolvedPulseQuery,
     snapshot?: BaselineSnapshot | null,
+    opts?: { recovered?: boolean },
   ): Promise<{ rows: Record<string, unknown>[]; watermark: string }> {
+    let rows: Record<string, unknown>[];
+    let watermark: string;
+
     if (snapshot) {
-      const rows = await buildSelectQuery(snapshot.db, resolved.table, resolved);
-      return { rows, watermark: snapshot.watermark };
+      rows = await buildSelectQuery(snapshot.db, resolved.table, resolved);
+      watermark = snapshot.watermark;
+    } else {
+      // 'objects' mode is the one execute() overload whose return type doesn't route through the
+      // driver-specific PgQueryResultKind mapping — the only shape that type-checks generically
+      // across every driver PulseSourceDb may wrap (pg, postgres.js, minipg, ...).
+      const watermarkRows = await this.config.sourceDb.execute<{ lsn: string }>(
+        sql`SELECT pg_current_wal_lsn()::text AS lsn`,
+        'objects',
+      );
+      const lsn = watermarkRows[0]?.lsn;
+      if (!lsn) {
+        throw new Error('pg_current_wal_lsn() returned no watermark row');
+      }
+      watermark = lsn;
+      rows = await buildSelectQuery(this.config.sourceDb, resolved.table, resolved);
     }
 
-    // 'objects' mode is the one execute() overload whose return type doesn't route through the
-    // driver-specific PgQueryResultKind mapping — the only shape that type-checks generically
-    // across every driver PulseSourceDb may wrap (pg, postgres.js, minipg, ...).
-    const watermarkRows = await this.config.sourceDb.execute<{ lsn: string }>(
-      sql`SELECT pg_current_wal_lsn()::text AS lsn`,
-      'objects',
-    );
-    const watermark = watermarkRows[0]?.lsn;
-    if (!watermark) {
-      throw new Error('pg_current_wal_lsn() returned no watermark row');
+    const telemetry = this.config.telemetry;
+    if (opts?.recovered && telemetry) {
+      const tableConfig = getTableConfig(resolved.table);
+      const schema = tableConfig.schema ?? 'public';
+      const table = tableConfig.name;
+      const rowCount = rows.length;
+      const recoveredWatermark = watermark;
+      // Recovered rows have no single commit clock, so the latency delta reads zero by construction.
+      const appliedAt = Math.round((performance.timeOrigin + performance.now()) * 1000);
+      queueMicrotask(() => {
+        try {
+          telemetry({
+            schema,
+            table,
+            op: 'rebaseline',
+            rowCount,
+            commitLsn: recoveredWatermark,
+            committedAt: appliedAt,
+            appliedAt,
+          });
+        } catch (err) {
+          this.logError('telemetry callback error:', err);
+        }
+      });
     }
 
-    const rows = await buildSelectQuery(this.config.sourceDb, resolved.table, resolved);
     return { rows, watermark };
   }
 
