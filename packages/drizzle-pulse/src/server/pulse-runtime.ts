@@ -118,7 +118,9 @@ const REBASELINE_TIMEOUT_MS = 30_000;
 // Ceiling on the WHOLE backfill window: the events-table seed plus every collection's baseline,
 // all of which run inside the exported snapshot before the stream opens. Nothing consumes WAL
 // until it returns, so an unbounded window grows the slot's retained WAL for as long as it hangs
-// — and the seed, unlike the reads above, carries no statement_timeout of its own.
+// — and the seed, unlike the reads above, carries no statement_timeout of its own. This sits over
+// REBASELINE_TIMEOUT_MS per collection, so two slow collection baselines fit inside it and three
+// or more exceed it and fail the whole backfill terminally.
 const BACKFILL_TIMEOUT_MS = 60_000;
 
 const DEFAULT_PUBLICATION_NAME = 'drizzle_pulse';
