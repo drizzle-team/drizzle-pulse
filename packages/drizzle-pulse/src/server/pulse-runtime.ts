@@ -746,8 +746,9 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       url: this.config.databaseUrl,
       // pull:true keeps a durable slot so a disconnected consumer resumes where it left off.
       // pull:false takes a fresh random-suffixed temporary slot per session: nothing durable to
-      // resume into, and a crashed process can never leak a WAL-retaining slot.
-      slot: durable ? { name: this.slotName } : 'temporary',
+      // resume into, and a crashed process can never leak a WAL-retaining slot. The configured
+      // slot name is the prefix, so an operator can attribute the slot back to its runtime.
+      slot: durable ? { name: this.slotName } : { temporary: true, prefix: this.slotName },
       publications: [this.publicationName],
       shapes: this.tableShapes,
       // Another backend holding our durable slot is a stale walsender from a previous process,

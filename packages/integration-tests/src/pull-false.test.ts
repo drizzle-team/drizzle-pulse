@@ -14,6 +14,7 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createPulseClient, createPulseEvents } from 'drizzle-pulse/client/embedded';
 import { createPulseRegistry, LogLevel, PulseRuntime } from 'drizzle-pulse/server';
+import { InvalidSlotName } from 'minipg';
 import postgres from 'postgres';
 import { orders, ordersByStatusArgsSchema } from './fixtures/minimal-orders/schema.js';
 import { createScenarioDb, waitFor } from './helpers/scenario.js';
@@ -115,11 +116,9 @@ describe('pull: false — embedded-only runtime writes nothing to events tables'
     try {
       await s.runtime.start();
 
-      // The temporary slot's NAME belongs to the driver, so this scenario's own ephemeral
-      // database is the locator — what matters is that the slot is temporary, is not the
-      // configured durable name, and does not outlive the runtime.
       const slots = await s.sql.unsafe<{ slot_name: string; temporary: boolean }[]>(
-        `SELECT slot_name, temporary FROM pg_replication_slots WHERE database = current_database()`,
+        `SELECT slot_name, temporary FROM pg_replication_slots WHERE slot_name LIKE $1`,
+        [`${s.slotName}\\_%`],
       );
       expect(slots).toHaveLength(1);
       expect(slots[0]?.slot_name).not.toBe(s.slotName);
@@ -129,12 +128,52 @@ describe('pull: false — embedded-only runtime writes nothing to events tables'
 
       await waitFor(async () => {
         const remaining = await s.sql.unsafe(
-          `SELECT 1 FROM pg_replication_slots WHERE database = current_database()`,
+          `SELECT 1 FROM pg_replication_slots WHERE slot_name LIKE $1`,
+          [`${s.slotName}\\_%`],
         );
         return remaining.length === 0;
       });
     } finally {
       await teardownScenario(s, { alreadyStopped: true });
+    }
+  });
+
+  test('slot-name prefix cap: 54 accepted, 55 rejected', async () => {
+    const scenario = await createScenarioDb('pulse_pullfalse_slotcap');
+    const sourceSql = postgres(withQuietPostgresUrl(scenario.databaseUrl));
+    const sourceDb = drizzle({ client: sourceSql });
+
+    function buildRuntime(slotName: string) {
+      return new PulseRuntime(buildRegistry(), {
+        databaseUrl: scenario.databaseUrl,
+        sourceDb,
+        pull: false,
+        wal: { publicationName: 'pullfalse_pub_slotcap', slotName },
+        logLevel: LogLevel.Error,
+      });
+    }
+
+    try {
+      const tooLong = 'a'.repeat(55);
+      await expect(buildRuntime(tooLong).start()).rejects.toBeInstanceOf(InvalidSlotName);
+
+      const atCap = 'a'.repeat(54);
+      const runtime = buildRuntime(atCap);
+      try {
+        await runtime.start();
+
+        const slots = await scenario.sql.unsafe<{ slot_name: string; temporary: boolean }[]>(
+          `SELECT slot_name, temporary FROM pg_replication_slots WHERE slot_name LIKE $1`,
+          [`${atCap}\\_%`],
+        );
+        expect(slots).toHaveLength(1);
+        expect(slots[0]?.temporary).toBe(true);
+      } finally {
+        await runtime.stop();
+      }
+    } finally {
+      await sourceSql.end();
+      await scenario.drop();
     }
   });
 
@@ -265,10 +304,11 @@ describe('pull: false — embedded-only runtime writes nothing to events tables'
       );
       await waitFor(() => collection.list().length === 1);
 
-      // Locate the active temp slot and its walsender backend. This scenario owns its
-      // database outright, so it is the only slot in it.
+      // Locate the active temp slot (randomized-suffix, never the base slotName) and its
+      // walsender backend.
       const before = await s.sql.unsafe<{ slot_name: string; active_pid: number | null }[]>(
-        `SELECT slot_name, active_pid FROM pg_replication_slots WHERE database = current_database()`,
+        `SELECT slot_name, active_pid FROM pg_replication_slots WHERE slot_name LIKE $1`,
+        [`${s.slotName}\\_%`],
       );
       expect(before).toHaveLength(1);
       const killedSlotName = before[0]?.slot_name;
@@ -288,7 +328,8 @@ describe('pull: false — embedded-only runtime writes nothing to events tables'
       // First reconnect lands ~1-2s after the edge (the driver's base backoff plus jitter).
       await waitFor(async () => {
         const rows = await s.sql.unsafe<{ slot_name: string }[]>(
-          `SELECT slot_name FROM pg_replication_slots WHERE database = current_database()`,
+          `SELECT slot_name FROM pg_replication_slots WHERE slot_name LIKE $1`,
+          [`${s.slotName}\\_%`],
         );
         return rows.length > 0 && rows[0]?.slot_name !== killedSlotName;
       }, 10000);

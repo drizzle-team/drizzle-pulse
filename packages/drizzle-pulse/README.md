@@ -193,7 +193,7 @@ await runtime.stop();
 - `runtime.client` / `runtime.events` — the same surfaces `drizzle-pulse/client/embedded` builds from a full `PulseRuntime` (see below).
 - `runtime.provision()` — the split-role deploy step: provisions replication prerequisites under an elevated role without opening WAL (see "Provisioning & privileges" above). Refuses to run on a started runtime.
 - `runtime.onFatalError(cb)` — fires once replication gives up permanently; the runtime stops itself right after.
-- No events tables exist in this mode, and the replication slot is temporary with a randomized suffix — a crashed process can't leak WAL-retaining slot state.
+- No events tables exist in this mode, and the replication slot is temporary, named from the configured `slotName` plus an underscore and an eight-character random suffix — a crashed process can't leak WAL-retaining slot state. Postgres truncates slot names at 63 bytes, so `slotName` is capped at 54 characters here to leave room for the suffix; a longer name rejects `start()`.
 
 ## `drizzle-pulse/client`
 
