@@ -1,11 +1,11 @@
 /**
- * Integration proof: the resolveSlotStartup resume path — an intact, continuous slot resumes
- * from confirmed_flush with no recreate, no epoch rotation, and replay-tail dedupe; a slot whose
- * active_pid belongs to a stale occupier is evicted and the resume proceeds the same way. Both
- * scenarios build
- * their own standalone ephemeral database and tear themselves down in a `finally` block, per
- * the self-managed pattern in slot-recovery.test.ts — this file's runtimes stop/restart against
- * the SAME slot, which the shared cached harness cannot express.
+ * Integration proof: the resume continuity check in the runtime's session callbacks — an intact,
+ * continuous slot resumes from confirmed_flush with no recreate, no epoch rotation, and
+ * replay-tail dedupe; a slot whose active_pid belongs to a stale occupier is evicted and the
+ * resume proceeds the same way. Both scenarios build their own standalone ephemeral database and
+ * tear themselves down in a `finally` block, per the self-managed pattern in
+ * slot-recovery.test.ts — this file's runtimes stop/restart against the SAME slot, which the
+ * shared cached harness cannot express.
  */
 
 import { describe, expect, spyOn, test } from 'bun:test';
@@ -123,6 +123,17 @@ async function streamLastLsn(
   return rows[0]?.last_lsn;
 }
 
+async function confirmedFlushLsn(
+  sql: ReturnType<typeof postgres>,
+  slotName: string,
+): Promise<string | null> {
+  const rows = await sql.unsafe<{ confirmed_flush_lsn: string | null }[]>(
+    `SELECT confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name = $1`,
+    [slotName],
+  );
+  return rows[0]?.confirmed_flush_lsn ?? null;
+}
+
 // Poll until the stream floor stops advancing across a settle interval — a resume replays the
 // downtime commit(s) as floor advances that a single read can race, so return the value only once
 // two consecutive reads agree.
@@ -142,19 +153,20 @@ async function waitForStableStreamLsn(
 }
 
 // DISCOVERY (verified empirically against unmodified pulse-runtime.ts + minipg, not a test flake):
-// resolveSlotStartup's continuity gate compares the persisted `pulse_stream.last_lsn` watermark
-// against the slot's `confirmed_flush_lsn`. The watermark is written from a commit's OWN record
-// LSN (`begin.finalLsn`, protocol-identical to `commit.lsn`), while `rep.ack(commit.endLsn)`
-// advances confirmed_flush to the LSN immediately AFTER that commit record — strictly greater,
-// by the commit record's own size (~48 bytes), for every transaction, unconditionally (confirmed
-// against a raw minipg replication() consumer: begin.finalLsn === commit.lsn !== commit.endLsn).
-// A normal ack therefore ALWAYS leaves confirmed_flush_lsn ahead of the just-persisted watermark,
-// so the intact-slot resume branch this test targets is unreachable via ordinary stop/restart
-// once at least one commit has been processed — nothing in the current suite exercises it (the
-// gap self-closes only in the single instant right after a fresh recreate, before the first
-// commit). Seeding the watermark to the observed confirmed_flush_lsn reproduces the precondition
-// resolveSlotStartup's gate checks for, exercising its real (unmodified) resume logic
-// deterministically instead of chasing a race that can never be won. No production code changes.
+// the resume continuity check in the runtime's session callbacks compares the persisted
+// `pulse_stream.last_lsn` watermark against the slot's `confirmed_flush_lsn`. The watermark is
+// written from a commit's OWN record LSN (`begin.finalLsn`, protocol-identical to `commit.lsn`),
+// while `rep.ack(commit.endLsn)` advances confirmed_flush to the LSN immediately AFTER that
+// commit record — strictly greater, by the commit record's own size (~48 bytes), for every
+// transaction, unconditionally (confirmed against a raw minipg replication() consumer:
+// begin.finalLsn === commit.lsn !== commit.endLsn). A normal ack therefore ALWAYS leaves
+// confirmed_flush_lsn ahead of the just-persisted watermark, so the intact-slot resume branch
+// this test targets is unreachable via ordinary stop/restart once at least one commit has been
+// processed — nothing in the current suite exercises it (the gap self-closes only in the single
+// instant right after a fresh recreate, before the first commit). Seeding the watermark to the
+// observed confirmed_flush_lsn reproduces the precondition the continuity check's gate looks for,
+// exercising its real (unmodified) resume logic deterministically instead of chasing a race that
+// can never be won. No production code changes.
 async function seedContinuousWatermark(
   sql: ReturnType<typeof postgres>,
   slotName: string,
@@ -192,7 +204,7 @@ function mentionsRecreated(spy: ReturnType<typeof spyOn>): boolean {
   return spy.mock.calls.some((call: unknown[]) => String(call[0]).includes('recreated'));
 }
 
-describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeover', () => {
+describe('Slot resume: intact-slot resume + stale-PID takeover', () => {
   test('intact-slot resume — no recreate, no rotation, replay-tail dedupe, floor advances only on new work', async () => {
     const scenario = await createScenarioDb('pulse_slotresume_g1');
     const { sql } = scenario;
@@ -246,8 +258,8 @@ describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeo
       );
 
       // See seedContinuousWatermark's DISCOVERY comment: closes the structural
-      // watermark-vs-confirmed_flush gap so resolveSlotStartup's continuity precondition
-      // actually holds, exercising the real resume branch instead of an unreachable race.
+      // watermark-vs-confirmed_flush gap so the continuity check's precondition actually holds,
+      // exercising the real resume branch instead of an unreachable race.
       lsnBefore = await seedContinuousWatermark(sql, slotName);
 
       const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
@@ -337,8 +349,8 @@ describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeo
         await a.sourceSql.end();
       }
 
-      // See seedContinuousWatermark's DISCOVERY comment on the intact-slot resume test above: the stale-PID
-      // eviction branch lives INSIDE resolveSlotStartup's continuity gate, so the same
+      // See seedContinuousWatermark's DISCOVERY comment on the intact-slot resume test above: the
+      // stale-PID eviction branch lives INSIDE the continuity check's gate, so the same
       // watermark-vs-confirmed_flush gap must be closed here too, or B recreates before it ever
       // reaches the eviction logic this test targets.
       await seedContinuousWatermark(sql, slotName);
@@ -414,6 +426,44 @@ describe('Slot resume (resolveSlotStartup): intact-slot resume + stale-PID takeo
         }
       }
     } finally {
+      await dropSlotWithRetry(sql, slotName).catch(() => {});
+      await scenario.drop();
+    }
+  });
+});
+
+describe('Prompt confirmed-flush advance', () => {
+  test('confirmed_flush_lsn advances within five seconds of an applied commit', async () => {
+    const scenario = await createScenarioDb('pulse_slotresume_ackflush');
+    const { sql } = scenario;
+    const publicationName = `slotresume_ackflush_pub_${randomSuffix()}`;
+    const slotName = `slotresume_ackflush_slot_${randomSuffix()}`;
+
+    const { runtime, sourceSql } = buildRuntime(scenario.databaseUrl, publicationName, slotName);
+    try {
+      await runtime.start();
+      await waitForSlotActive(sql, slotName);
+
+      const before = await confirmedFlushLsn(sql, slotName);
+      expect(before).not.toBeNull();
+
+      await sql.unsafe(
+        `INSERT INTO "orders" (driver_id, status, price) VALUES (1, 'accepted', 10)`,
+      );
+
+      // On a default cluster the derived status timer is 45s and the idle keepalive answers
+      // around 30s (wal_sender_timeout defaults to 60s) — a five-second ceiling only passes if
+      // the ack followed the applied commit directly, never either idle-driven cadence.
+      await waitFor(async () => {
+        const rows = await sql.unsafe<{ advanced: boolean }[]>(
+          `SELECT pg_wal_lsn_diff(confirmed_flush_lsn, $2) > 0 AS advanced FROM pg_replication_slots WHERE slot_name = $1`,
+          [slotName, before],
+        );
+        return rows[0]?.advanced === true;
+      }, 5000);
+    } finally {
+      await runtime.stop();
+      await sourceSql.end();
       await dropSlotWithRetry(sql, slotName).catch(() => {});
       await scenario.drop();
     }
