@@ -8,7 +8,7 @@ import {
   type TableShape,
   type TransactionBatch,
 } from 'minipg';
-import { type ReplicateHandle, replicate, SlotInvalidatedError } from 'minipg/cdc';
+import { type ReplicateHandle, replicate } from 'minipg/cdc';
 import type { ResolvedPulseQuery } from '../types.js';
 import { emitEventsTableDdl } from './events-table-ddl.js';
 import { buildEventsTable, DEFAULT_EVENTS_SCHEMA } from './events-table-resolver.js';
@@ -121,11 +121,6 @@ const REBASELINE_TIMEOUT_MS = 30_000;
 // — and the seed, unlike the reads above, carries no statement_timeout of its own.
 const BACKFILL_TIMEOUT_MS = 60_000;
 
-// A durable slot that vanished or lost its WAL is recreatable, but only pulse knows that its
-// events tables and cursors can be rebuilt from a fresh exported snapshot, so the driver reports
-// it terminally and pulse re-enters. Bounded so a slot that cannot survive creation can't spin.
-const MAX_SLOT_RECOVERIES = 3;
-
 const DEFAULT_PUBLICATION_NAME = 'drizzle_pulse';
 const DEFAULT_SLOT_NAME = 'drizzle_pulse';
 
@@ -138,17 +133,6 @@ export type BaselineSnapshot = {
   db: PulseSourceDb;
   watermark: string;
 };
-
-// drizzle-orm's postgres executor wraps every driver error in a DrizzleQueryError, which does
-// not forward the underlying PgError's `code` — it lives on `.cause` instead. Pg-error-code
-// switches must unwrap it or every branch always misses.
-function getPgErrorCode(error: unknown): string | undefined {
-  const cause = (error as { cause?: unknown } | null | undefined)?.cause;
-  return (
-    (cause as { code?: string } | null | undefined)?.code ??
-    (error as { code?: string } | null | undefined)?.code
-  );
-}
 
 // A resolve() with idempotent settling — start() resolves from several exits (slot administered,
 // first attempt failed, gave up) and only the first must count.
@@ -185,11 +169,6 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   private store: PulseStore | null = null;
   // The managed CDC session. Null when the runtime is stopped.
   private session: ReplicateHandle | null = null;
-
-  // Bounds the drop-and-recreate re-entry in handleFatal so a slot that cannot survive creation
-  // can't spin. Reset by real progress (see applyTransaction), so a long-lived runtime that
-  // legitimately loses its slot months apart never exhausts it.
-  private slotRecoveries = 0;
 
   // True once a stream has opened at least once for this runtime, across sessions. Gates the
   // collection rebaseline so the very first connect (no collections yet) never fires a round.
@@ -796,16 +775,26 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       // Another backend holding our durable slot is a stale walsender from a previous process,
       // not a competitor — terminate it rather than failing the boot.
       onSlotBusy: 'evict',
+      // Inert on a temporary (pull:false) slot per the driver's own docs; set unconditionally.
+      onSlotInvalidated: 'recreate',
 
-      backfill: async ({ snapshot, streamStartLsn }) => {
+      backfill: async ({ snapshot, streamStartLsn, isReconnect }) => {
+        // Operators must see a recreate: it resets every registered events table and every
+        // client cursor. Name the slot only, never databaseUrl. The durable gate matters because
+        // an embedded (pull:false) runtime takes a fresh temporary slot on every connect, where
+        // the reconnect flag alone would be noise.
+        if (durable && isReconnect) {
+          this.logError(`Replication slot '${this.slotName}' was recreated`);
+        }
         // A created slot means there was nothing to resume into: for pull:true the events tables
         // and their cursors have to be rebuilt from this snapshot before anything streams.
         if (durable) await this.rotateAndSeedEvents(snapshot, streamStartLsn);
         // Live collections rebaseline to completion BEFORE the stream opens, so a collection is
         // never rebuilding while events for it are already arriving. Only once a stream has run
         // before: at boot no collection exists yet (the embedded factory requires a running
-        // runtime). Tracked here rather than off `isReconnect` because a slot recovery opens a
-        // fresh session whose own reconnect count restarts, while the collections do not.
+        // runtime). Tracked here rather than off `isReconnect` because the reconnect flag is also
+        // true on the first successful connect after a failed attempt, when no collection has
+        // ever streamed, so `hasStreamed` is the correct gate.
         if (this.hasStreamed) await this.rebaselineCollections(snapshot, streamStartLsn);
         this.hasStreamed = true;
         startupSettled.resolve();
@@ -815,15 +804,13 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       onResume: async ({ confirmedFlush }) => {
         // pull:true only. The slot survived, so the events tables are still continuous with it —
         // seed each table's baseline row and adopt the durable watermark as the replay-dedupe
-        // floor. A watermark behind confirmed_flush means the events tables lost commits the slot
-        // already acked, and resuming would stream past the gap forever. The driver has no channel
-        // for "recreate rather than resume", so pulse raises the driver's own permanent error:
-        // SlotInvalidatedError skips the retry budget and lands in onFatalError, where handleFatal
-        // drops the slot and re-enters on the backfill path above. An ordinary throw here would
-        // retry the same doomed resume instead.
+        // floor. A watermark that is null or behind confirmed_flush means the events tables lost
+        // commits the slot already acked, so resuming would stream past the gap forever — the
+        // recreate verdict has the driver drop and recreate the slot and re-enter through
+        // backfill.
         const watermark = await this.getPulseStore().getStreamWatermark(this.slotName);
         if (watermark === null || lsnFromString(watermark) < lsnFromString(confirmedFlush)) {
-          throw new SlotInvalidatedError(this.slotName, 'no-confirmed-flush');
+          return 'recreate';
         }
         await this.ensureBaselines();
         this.lastPersistedCommitLsn = watermark;
@@ -854,31 +841,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     await startupSettled.promise;
   }
 
-  // A durable slot that vanished or lost its WAL is recoverable, but only pulse knows the events
-  // tables and cursors can be rebuilt from a fresh exported snapshot — so the driver reports it
-  // terminally and pulse drops the slot and opens a new session, which then takes the backfill
-  // path. Everything else is the terminal path: fan out and stop.
   private async handleFatal(error: Error): Promise<void> {
-    const recoverable =
-      this.pullEnabled && error instanceof SlotInvalidatedError && error.cause !== 'system-changed';
-
-    if (recoverable && this.slotRecoveries < MAX_SLOT_RECOVERIES) {
-      this.slotRecoveries += 1;
-      // Operators must see this: a recreate resets events tables and every client cursor. Name
-      // the slot, never databaseUrl (info disclosure).
-      this.logError(
-        `Replication slot '${this.slotName}' was ${error.cause} and is being recreated (recovery ${this.slotRecoveries}/${MAX_SLOT_RECOVERIES})`,
-      );
-      try {
-        await this.dropSlotIfPresent(this.slotName);
-        this.session = null;
-        await this.openSession();
-        return;
-      } catch (recoveryError) {
-        this.logError('Slot recovery failed:', recoveryError);
-      }
-    }
-
     this.logError('Replication failed permanently:', error);
     for (const listener of [...this.terminalErrorListeners]) {
       try {
@@ -888,29 +851,6 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       }
     }
     void this.stop();
-  }
-
-  // Poll-retry a slot drop: the previous owning backend's "active" flag can lag its actual
-  // termination by a beat, so a single attempt can spuriously hit 55006 (object_in_use).
-  private async dropSlotIfPresent(
-    slotName: string,
-    opts: { timeoutMs?: number; pollIntervalMs?: number } = {},
-  ): Promise<void> {
-    const adminDb = this.getPulseStore().getDb();
-    const deadline = Date.now() + (opts.timeoutMs ?? 3000);
-    const pollIntervalMs = opts.pollIntervalMs ?? 100;
-
-    for (;;) {
-      try {
-        await adminDb.execute(sql`SELECT pg_drop_replication_slot(${slotName})`);
-        return;
-      } catch (error) {
-        const code = getPgErrorCode(error);
-        if (code === '42704') return; // undefined_object — already gone
-        if (code !== '55006' || Date.now() >= deadline) throw error; // in-use exhausted, or unexpected
-        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-      }
-    }
   }
 
   // One pinned repeatable-read admin transaction rotates every registered events table's
@@ -1057,10 +997,6 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       await this.getPulseStore().ingestCommit(decoded, this.slotName, batch.commitLsn);
       this.lastPersistedCommitLsn = batch.commitLsn;
     }
-
-    // A commit applied end to end proves the recreated slot works; only consecutive failures
-    // should exhaust the recovery budget.
-    this.slotRecoveries = 0;
 
     for (const pendingEvent of decoded) {
       this.emitTap(pendingEvent, batch.commitLsn);

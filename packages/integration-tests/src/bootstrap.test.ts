@@ -105,8 +105,8 @@ async function nonSnapshotEventCount(sql: HealthyScenario['sql']): Promise<numbe
 }
 
 // DISCOVERY (see slot-resume.test.ts for the full empirical trail against unmodified
-// pulse-runtime.ts + minipg): resolveSlotStartup's continuity gate compares the persisted
-// pulse_stream.last_lsn watermark (a commit's own record LSN) against the slot's
+// pulse-runtime.ts + minipg): the resume check in the runtime's session options compares the
+// persisted pulse_stream.last_lsn watermark (a commit's own record LSN) against the slot's
 // confirmed_flush_lsn (the transaction's end LSN, always strictly greater after a normal ack) —
 // unreachable via ordinary stop/restart once any commit has landed. Seeding the watermark to the
 // observed confirmed_flush_lsn reproduces the precondition deterministically, isolating the
@@ -291,9 +291,9 @@ describe('runtime-owned events-table bootstrap', () => {
       );
 
       // See seedContinuousWatermark's DISCOVERY comment: closes the structural
-      // watermark-vs-confirmed_flush gap so resolveSlotStartup's continuity precondition
-      // actually holds — this test's "slot resumed, not recreated" assertion needs the real
-      // resume branch, isolated from the bootstrap()-level recreate it targets.
+      // watermark-vs-confirmed_flush gap so the runtime's resume check actually holds — this
+      // test's "slot resumed, not recreated" assertion needs the real resume branch, isolated
+      // from the bootstrap()-level recreate it targets.
       lsn1 = await seedContinuousWatermark(s.sql, slotName);
 
       const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
@@ -312,15 +312,16 @@ describe('runtime-owned events-table bootstrap', () => {
         expect(await snapshotRowCount(s.sql)).toBeGreaterThanOrEqual(1);
         expect(await nonSnapshotEventCount(s.sql)).toBe(0);
 
-        // The slot itself was resumed, not recreated: recoverSlot logs the recreate
-        // unconditionally (asserted absent here) and would rebase pulse_stream onto a fresh
-        // consistentPoint. Resume instead keeps the floor continuous from the seeded watermark —
-        // it never regresses below it. The exact-value pin over-specified: this scenario's
-        // publication is FOR ALL TABLES, so ingestCommit's own writes to the published
-        // drizzle_pulse bookkeeping tables (and the pre-boot ddl_hash/watermark UPDATEs) are
-        // themselves commits past the watermark that the resumed stream continually advances the
-        // floor over — the floor is legitimately in motion, not pinnable to one byte position, and
-        // the pre-START_REPLICATION probe round-trip only shifts which position an instant sees.
+        // The slot itself was resumed, not recreated: a recreated durable slot's reconnect log
+        // (asserted absent here) fires unconditionally on that path, and a recreate would rebase
+        // pulse_stream onto a fresh consistentPoint. Resume instead keeps the floor continuous
+        // from the seeded watermark — it never regresses below it. The exact-value pin
+        // over-specified: this scenario's publication is FOR ALL TABLES, so ingestCommit's own
+        // writes to the published drizzle_pulse bookkeeping tables (and the pre-boot
+        // ddl_hash/watermark UPDATEs) are themselves commits past the watermark that the resumed
+        // stream continually advances the floor over — the floor is legitimately in motion, not
+        // pinnable to one byte position, and the pre-START_REPLICATION probe round-trip only
+        // shifts which position an instant sees.
         expect(
           errorSpy.mock.calls.some((call: unknown[]) => String(call[0]).includes('recreated')),
         ).toBe(false);

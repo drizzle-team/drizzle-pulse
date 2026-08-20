@@ -118,11 +118,11 @@ describe('Reconnect rebaseline', () => {
       await waitFor(() => collection.list().length === 2);
       const changesBeforeReconnect = changes.length;
 
-      // Real edge: destroys the walsender's client socket — the minipg iterator fails,
-      // handleDisconnect schedules the reconnect (backoff ~1-2s). resolveSlotStartup's
-      // continuity gate is unreachable once any commit has landed (watermark only
-      // advances on recreate, confirmed_flush always outruns it), so this takes the recreate
-      // path in practice — onReplicationStart still fires the reconnect listeners either way.
+      // Real edge: destroys the walsender's client socket. The driver reconnects after its
+      // backoff (~1-2s); the resume check is unreachable once any commit has landed (the
+      // watermark only advances on recreate, confirmed_flush always outruns it), so this takes
+      // the recreate path in practice — the slot is recreated with a fresh exported snapshot and
+      // the reconnect listeners rebaseline from it either way.
       proxy.dropClient();
 
       // waitFor timeout 10000ms — the backoff makes the old 2000ms timeouts too tight.
