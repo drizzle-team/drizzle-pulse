@@ -17,12 +17,19 @@ import { makePulseRuntime } from './mock-runtime.js';
 type ReplicateOpts = Parameters<typeof realCdc.replicate>[0];
 
 let captured: ReplicateOpts | null = null;
+let handleReady: Promise<void>;
+let stopCalls = 0;
 
 mock.module('minipg/cdc', () => ({
   ...realCdc,
   replicate: (opts: ReplicateOpts) => {
     captured = opts;
-    return { stop: async () => {} };
+    return {
+      stop: async () => {
+        stopCalls++;
+      },
+      ready: handleReady,
+    };
   },
 }));
 
@@ -48,8 +55,13 @@ describe('runtime reconnect edge', () => {
       fired++;
     });
 
+    let resolveReady!: () => void;
+    handleReady = new Promise<void>((res) => {
+      resolveReady = res;
+    });
+
     // openSession is the private seam that builds the replicate() options; awaiting it settles
-    // once the mocked driver reports the slot administered.
+    // once the mocked driver's ready promise resolves.
     const opening = (runtime as any).openSession();
     const opts = captured;
     if (!opts?.backfill) throw new Error('replicate() was called without a backfill callback');
@@ -63,10 +75,32 @@ describe('runtime reconnect edge', () => {
     };
 
     await opts.backfill(window);
+
+    // openSession settles on ready, not on backfill completing — race it against an
+    // already-resolved sentinel while ready is still unresolved to prove it is still pending.
+    const raceResult = await Promise.race([
+      opening.then(() => 'opened'),
+      Promise.resolve('pending'),
+    ]);
+    expect(raceResult).toBe('pending');
+
+    resolveReady();
     await opening;
     expect(fired).toBe(0);
 
     await opts.backfill({ ...window, snapshot: 'snap-2', isReconnect: true });
     expect(fired).toBe(1);
+  });
+
+  test('a rejected ready stops the session and openSession rejects with the same error', async () => {
+    // A real first-connect failure fails bootstrap() before a session ever exists, so this path
+    // is only reachable against the mock.
+    stopCalls = 0;
+    handleReady = Promise.reject(new Error('connect refused'));
+
+    const runtime = makePulseRuntime({ pull: false });
+
+    await expect((runtime as any).openSession()).rejects.toThrow('connect refused');
+    expect(stopCalls).toBe(1);
   });
 });

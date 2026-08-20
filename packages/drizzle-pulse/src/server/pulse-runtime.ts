@@ -134,24 +134,6 @@ export type BaselineSnapshot = {
   watermark: string;
 };
 
-// A resolve() with idempotent settling — start() resolves from several exits (slot administered,
-// first attempt failed, gave up) and only the first must count.
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
-  let resolveFn!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
-    resolveFn = res;
-  });
-  let settled = false;
-  return {
-    promise,
-    resolve: (value: T) => {
-      if (settled) return;
-      settled = true;
-      resolveFn(value);
-    },
-  };
-}
-
 export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   private readonly sourceTableMetadata: Map<string, SourceTableMetadata>;
   private readonly tableShapes: TableShape[];
@@ -759,10 +741,6 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   // this runtime's events tables, cursors, and live collections.
   private async openSession(): Promise<void> {
     const durable = this.pullEnabled;
-    // Resolves once the slot is administered and the stream is about to open, or once the first
-    // attempt has failed — start() has always returned on the first settled attempt, not on the
-    // first successful one.
-    const startupSettled = deferred<void>();
 
     const session = replicate({
       url: this.config.databaseUrl,
@@ -797,7 +775,6 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         // ever streamed, so `hasStreamed` is the correct gate.
         if (this.hasStreamed) await this.rebaselineCollections(snapshot, streamStartLsn);
         this.hasStreamed = true;
-        startupSettled.resolve();
       },
       backfillTimeoutMs: BACKFILL_TIMEOUT_MS,
 
@@ -818,27 +795,26 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
         // Nothing was exported, so collections re-sync through the watermark handshake instead.
         if (this.hasStreamed) await this.rebaselineCollections(undefined, undefined);
         this.hasStreamed = true;
-        startupSettled.resolve();
       },
 
       onTransaction: (batch) => this.applyTransaction(batch),
 
-      onWarning: (warning) => {
-        this.logWarn(warning.message);
-        // A consumed retry attempt is the only signal that a connect failed. start() has always
-        // returned once the first attempt settled, rather than blocking on the whole retry budget
-        // while the database is unreachable.
-        if (warning.kind === 'reconnect-attempt') startupSettled.resolve();
-      },
+      onWarning: (warning) => this.logWarn(warning.message),
 
-      onFatalError: (error) => {
-        startupSettled.resolve();
-        void this.handleFatal(error);
-      },
+      onFatalError: (error) => void this.handleFatal(error),
     });
 
     this.session = session;
-    await startupSettled.promise;
+    try {
+      await session.ready;
+    } catch (error) {
+      // A rejected ready does not stop the session — the driver keeps retrying. Leaving it
+      // running while start()'s catch closes the store would have the next backfill build
+      // against nothing.
+      this.session = null;
+      await session.stop();
+      throw error;
+    }
   }
 
   private async handleFatal(error: Error): Promise<void> {

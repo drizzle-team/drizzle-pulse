@@ -77,11 +77,11 @@ Suite contexts are reference-counted per fixture variant and reused safely acros
 - Snapshot rows in the events table trigger `{ reset: true, reason: 'snapshot' }` on pull
 - Each test needing valid `orders.driver_id` should create a unique user first
 - WAL startup is asynchronous; wait for slot readiness instead of sleeping
+- `runtime.start()` resolves once the stream is open and rejects if the first connect fails
 
 ## Anti-Patterns (DO NOT)
 
 - ❌ Hardcode publication or slot names
-- ❌ Await `runtime.start()` directly; start it non-blocking and poll readiness
 - ❌ Use fixed sleeps for WAL propagation; use `waitForEventsForFixture(...)`
 - ❌ Reintroduce manual `pkMap` merge assertions where `PulseQuery` already covers the production path
 - ❌ Weaken test assertions just to make runtime changes pass
