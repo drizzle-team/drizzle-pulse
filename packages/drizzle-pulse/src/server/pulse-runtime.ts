@@ -934,10 +934,10 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   }
 
   // Rebaselines every live collection, to completion, while the replication stream is still
-  // closed: each reads the slot's exported snapshot — the exact state rep.start() will stream
+  // closed: each reads the slot's exported snapshot — the exact state the stream will resume
   // forward from — so the recreate boundary is gapless with no buffering and no watermark
-  // filtering. Runs before rep.start() because the export dies on the replication connection's
-  // next command.
+  // filtering. Runs before the stream opens because the export dies on the replication
+  // connection's next command.
   //
   // `snapshot` is absent when a resumed slot was intact (nothing exported): listeners take their
   // own watermark handshake instead, and the stream replays from confirmed_flush — behind that

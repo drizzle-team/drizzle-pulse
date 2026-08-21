@@ -266,8 +266,9 @@ describe('runtime-owned events-table bootstrap', () => {
 
     try {
       try {
-        // Full boot: bootstrap() provisions, then connectReplication() creates the persistent
-        // slot (unlike the provision()-only tests above, which never open a replication stream).
+        // Full boot: bootstrap() provisions, then start() opens the replication stream and
+        // creates the persistent slot (unlike the provision()-only tests above, which never
+        // open a replication stream).
         await s.runtime.start();
 
         await s.sql.unsafe(

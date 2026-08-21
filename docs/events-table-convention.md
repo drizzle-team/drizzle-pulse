@@ -36,10 +36,8 @@ The events table name is:
 
 The events table itself lives in a dedicated **events schema** — never in the source
 table's own schema, and independent of the project's migrations schema. It defaults to
-**`drizzle_pulse`**, a constant both the runtime resolver and drizzle-kit's codegen
-hardcode, so the two agree with no configuration. It can be overridden at runtime via
-`PulseRuntimeConfig.eventsSchema`, but the override must then match whatever drizzle-kit
-generated.
+**`drizzle_pulse`**, the resolver's `DEFAULT_EVENTS_SCHEMA` constant. It can be overridden
+at runtime via `pull.eventsSchema`.
 
 **Worked example:** a source table `orders` in the default `public` schema, with
 `eventsSchema` left at its default, resolves to:
@@ -280,7 +278,7 @@ changes a pulsed table's shape (hence recreates its events table) resets that ta
 subscribers. This is accepted by design.
 
 The same reset path covers the per-pull event cap: a pull that would replay more than
-`PulseRuntimeConfig.pullEventLimit` events (default 1000) resets instead of streaming an unbounded batch.
+`pull.eventLimit` events (default 1000) resets instead of streaming an unbounded batch.
 
 ### 5.4 Orphan policy
 
@@ -318,7 +316,7 @@ a replication-enabled connection); `wal_level = logical` must be set server-wide
 drizzle-kit is not involved in events-table DDL, but your `drizzle-kit push`/`pull` must not try
 to manage or drop the pulse-owned schema. kit's `schemaFilter` is an **allowlist** of schemas it
 manages (default `['public']`): make sure your pulse events schema — `'drizzle_pulse'` by default,
-or whatever you pass as `PulseRuntimeConfig.eventsSchema` — is **not** in it. At the default it already
+or whatever you pass as `pull.eventsSchema` — is **not** in it. At the default it already
 is excluded; only a config that widens `schemaFilter` (or moves your app off `public`) needs the
 explicit exclusion.
 

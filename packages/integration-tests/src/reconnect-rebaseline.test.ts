@@ -1,9 +1,7 @@
 /**
- * A REAL dropped walsender socket — not the private onReplicationStart hook —
- * must still trigger the embedded collection's rebaseline handshake: one onChange with an
- * empty event batch and a fresh watermark lsn, no row loss or duplication, and continued
- * delivery afterwards. Supersedes the deleted resilience.test.ts, which drove the same
- * assertions off a faked edge ((runtime as any).onReplicationStart()).
+ * A REAL dropped walsender socket must still trigger the embedded collection's rebaseline
+ * handshake: one onChange with an empty event batch and a fresh watermark lsn, no row loss
+ * or duplication, and continued delivery afterwards.
  *
  * The second test pins the ordering that makes that gapless: every live collection rebaselines
  * from the new slot's exported snapshot BEFORE the stream opens, so no event can be delivered
@@ -223,7 +221,7 @@ describe('Reconnect rebaseline', () => {
 
       // The ordering itself: the probe row existed and was streamable the whole time the
       // rebaseline ran, and still nothing was delivered — the stream had not opened yet. Moving
-      // the rebaseline back after rep.start() fails here.
+      // the rebaseline until after the stream opens fails here.
       expect(probeWritten).toBe(true);
       expect(deliveredDuringRebaseline).toBe(0);
       expect(Date.now() - tEdge).toBeGreaterThan(REBASELINE_MS);

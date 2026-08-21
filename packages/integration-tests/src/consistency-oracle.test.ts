@@ -250,10 +250,11 @@ describe('Consistency Oracle', () => {
             const expectedCount = liveIds.size;
 
             // Drain the server's WAL listener fully before asserting or letting the next fc
-            // run truncate the events table again: persistWalEvent() (events-table INSERT)
-            // runs BEFORE the tap emits, so an in-flight persist for this run's tail events can
-            // otherwise be lock-queued behind the next run's TRUNCATE, delaying that event's tap
-            // delivery by an entire run and surfacing as a spurious embedded/HTTP divergence.
+            // run truncate the events table again: the runtime's events-table INSERT through
+            // the store runs BEFORE the tap emits, so an in-flight persist for this run's tail
+            // events can otherwise be lock-queued behind the next run's TRUNCATE, delaying that
+            // event's tap delivery by an entire run and surfacing as a spurious embedded/HTTP
+            // divergence.
             await waitForEventsForFixture(fixture, pool, 0, sequence.length, { timeoutMs: 20_000 });
 
             // Every commit is already durable at this point — the ground truth read here is

@@ -123,7 +123,7 @@ await runtime.start();
 
 ### Events tables
 
-Every pulsed source table gets a matching **events table** — WAL changes are persisted there and replayed to clients. Events tables are runtime-owned infrastructure, resolved entirely by convention (no hand-declared Drizzle table, no `.$eventsTable()` linkage, no drizzle-kit migration):
+Every pulsed source table gets a matching **events table** — WAL changes are persisted there and replayed to clients. Events tables are runtime-owned infrastructure, resolved entirely by convention (no hand-declared Drizzle table, no drizzle-kit migration):
 
 - **Location:** `<eventsSchema>.<sourceSchema>_<sourceTable>`, with each component's `_` doubled to `__` before joining — `eventsSchema` defaults to `'drizzle_pulse'` (override via `pull.eventsSchema`)
 - **Self-provisioning:** `runtime.start()` provisions everything itself inside one advisory-locked transaction — creates the events schema, the events tables and their `pulse_meta` bookkeeping, the publication (plus membership diff), and sets `REPLICA IDENTITY FULL` on each registered source (resetting it to `DEFAULT` on un-pulse). Full old tuples are what every update/delete decodes from, in both pull modes — the runtime never reads old-row data back from your tables. An events table is recreated when the sha256 of its rendered DDL diverges (a source-column change), which rotates a per-table epoch so stale client cursors reset. `wal_level = logical` is the one precondition the runtime can't fix — it stays a fail-fast assert.

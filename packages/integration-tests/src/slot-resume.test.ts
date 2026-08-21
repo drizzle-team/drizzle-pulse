@@ -93,12 +93,11 @@ async function nonSnapshotEventCount(
   return rows.length;
 }
 
-// connectReplication() fires runReplicationLoop without awaiting it (`void this.runReplicationLoop(...)`),
-// so start() can resolve before the walsender's START_REPLICATION command actually reaches the
-// server — under scheduler contention this bootstrap can lag enough that an insert issued
-// immediately after start() resolves races the loop's very first iteration. Waiting for the
-// slot to report `active` is a real, observable readiness condition (not a fixed sleep) that
-// closes that window before any test issues its first tracked write.
+// start() resolves once the driver's own session is ready, which happens on this same
+// connection that opened the replication stream. Polling for the slot to report `active` is
+// an independent, observable readiness check against a separate connection (not a fixed
+// sleep), closing the gap between the driver's own readiness signal and that state becoming
+// visible elsewhere before any test issues its first tracked write.
 async function waitForSlotActive(
   sql: ReturnType<typeof postgres>,
   slotName: string,
@@ -156,8 +155,8 @@ async function waitForStableStreamLsn(
 // the resume continuity check in the runtime's session callbacks compares the persisted
 // `pulse_stream.last_lsn` watermark against the slot's `confirmed_flush_lsn`. The watermark is
 // written from a commit's OWN record LSN (`begin.finalLsn`, protocol-identical to `commit.lsn`),
-// while `rep.ack(commit.endLsn)` advances confirmed_flush to the LSN immediately AFTER that
-// commit record — strictly greater, by the commit record's own size (~48 bytes), for every
+// while acking a commit advances confirmed_flush_lsn to the LSN immediately AFTER that commit
+// record (`commit.endLsn`) — strictly greater, by the commit record's own size (~48 bytes), for every
 // transaction, unconditionally (confirmed against a raw minipg replication() consumer:
 // begin.finalLsn === commit.lsn !== commit.endLsn). A normal ack therefore ALWAYS leaves
 // confirmed_flush_lsn ahead of the just-persisted watermark, so the intact-slot resume branch

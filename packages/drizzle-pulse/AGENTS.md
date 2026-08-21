@@ -41,7 +41,7 @@ purity test).
 | `src/shared/` | protocol request/response types, filter AST helpers, PK utilities, `pulse-merge-core.ts` (merge state machine reused by HTTP `PulseQuery` and embedded `PulseCollection`; keys rows by out-of-band pks — rebuild entries + each event's `pk` field — so rows carry no identity property; the ranged/HTTP subclass derives entry pks from wire rows' `$pk`) |
 | `src/embedded/index.ts` | embedded-only factory: `createRuntime({ queries, databaseUrl, sourceDb, wal?, logLevel?, telemetry? })` → `{ client, events, start, stop, provision, onFatalError }`; wires `createPulseRegistry` + a `pull: false` `PulseRuntime` internally and delegates the lifecycle straight through |
 | `src/client/create-client.ts` | proxy-based typed HTTP client + `PullClient` (batched auto-poll, default 1s, `pollIntervalMs: 0` disables) |
-| `src/client/transport.ts` | `createHttpTransport` (fetch+superjson) + the `PulseHttpTransport` inferred type — the HTTP client's single transport (the old `PulseQueryTransport` interface was deleted with the embedded direct transport) |
+| `src/client/transport.ts` | `createHttpTransport` (fetch+superjson) + the `PulseHttpTransport` inferred type — the HTTP client's single transport |
 | `src/client/pulse-query.ts` | framework-agnostic subscribe/poll/load-more state machine (`PulseQuery`); `destroy()` stops polling — the client holds no server-side state to release |
 | `src/client/superjson.ts` | response deserialization helper |
 | `src/client/react/use-pulse-query.ts` | `usePulseQuery` wrapper around `PulseQuery` |
@@ -57,7 +57,7 @@ purity test).
 | `src/server/pulse-sql.ts` | query compilation / row predicate evaluation |
 | `src/server/sdk.ts` | `PulseRequestHandler` — the transport-agnostic SDK core: subscribe/pull/loadMore, cursor-token mint/validate, `DEFAULT_PULL_EVENT_LIMIT` overflow→reset. Stateless: auth re-resolved per pull, no subscription registry |
 | `src/server/hono.ts` | `createPulseHonoRouter` — optional Hono wrapper over the SDK's three routes (`/subscribe`, `/pull`, `/load-more`); superjson-encoded responses; `./server/hono` subpath |
-| `src/server/pulse-runtime.ts` | `PulseRuntime` assembly, `PulseRuntimeConfig` (publication/slot default `drizzle_pulse`, `eventsSchema`, `pullEventLimit`, `logLevel`, `telemetry`), `bootstrap()` self-provisioning + `provision()`, WAL listener lifecycle |
+| `src/server/pulse-runtime.ts` | `PulseRuntime` assembly, `PulseRuntimeConfig` (publication/slot default `drizzle_pulse`, `pull` (boolean or an object carrying `eventsSchema` and `eventLimit`), `logLevel`, `telemetry`), `bootstrap()` self-provisioning + `provision()`, WAL listener lifecycle |
 | `src/server/pulse-store.ts` | `PulseStore` — events-table reads/writes over the pulse-owned pool |
 | `src/__tests__/` | runtime/unit tests for SDK internals |
 
@@ -133,8 +133,8 @@ Embedded (in-process, tap-direct):
 ## Runtime Notes
 
 - `PulseQuery` is the canonical merge engine used by tests and `usePulseQuery` (HTTP-only); the embedded client owns a full-set `PulseMergeCore` directly and never constructs a `PulseQuery` — the HTTP client is the only `PulseQuery` consumer
-- The server is **stateless**: no `SubscriptionManager`, no `unsubscribe`, no TTL/idle sweep; auth is re-resolved per pull
-- Cursor tokens are opaque `"<epoch>:<snapshot>"`; a pull echoes its token, the handler compares its epoch to the current one. A recreate rotates the epoch → stale tokens reset (rebaseline). A pull exceeding `pullEventLimit` (default 1000) also resets.
+- The server is **stateless**: no per-subscription server state, no `unsubscribe`, no TTL/idle sweep; auth is re-resolved per pull
+- Cursor tokens are opaque `"<epoch>:<snapshot>"`; a pull echoes its token, the handler compares its epoch to the current one. A recreate rotates the epoch → stale tokens reset (rebaseline). A pull exceeding `pull.eventLimit` (default 1000) also resets.
 - Every migration that changes a pulsed table's shape recreates its events table and thus resets that table's subscribers (accepted design)
 - range tracking uses PK boundaries (`rangeStart`, `rangeEnd`) plus a monotonic `snapshot`; SuperJSON crosses the server/client boundary
 
