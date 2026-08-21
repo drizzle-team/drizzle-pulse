@@ -24,6 +24,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.4",
-    "minipg": "https://pkg.pr.new/@drizzle-team/minipg@e15568d"
+    "minipg": "https://pkg.pr.new/@drizzle-team/minipg@e15568d",
+    "pkg-pr-new": "0.0.88"
   }
 }
