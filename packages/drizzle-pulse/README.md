@@ -4,6 +4,12 @@ Type-safe Pulse SDK for Drizzle ORM — server-defined queries that stream live 
 
 ## Install
 
+**Read this before you run anything below.** Installing this package with npm resolves its declared `minipg` peer from the public registry, and that name belongs to an unrelated PostgreSQL binding last published years ago, whose install runs `node-gyp rebuild`. It is not the driver this package uses.
+
+The driver is `@drizzle-team/minipg`. The server entrypoints, `drizzle-pulse/server` and `drizzle-pulse/embedded`, import its `minipg/cdc` subpath, and no version published to the registry ships that subpath yet, so those two entrypoints cannot be installed from the registry today. The client entrypoints, `drizzle-pulse/client`, `drizzle-pulse/client/react`, and `drizzle-pulse/client/embedded`, never load the driver.
+
+A working install needs two things in place. First, `drizzle-orm` resolved from its `rc5` dist-tag: the `latest` tag does not satisfy the declared range, and the public `rc.4` build has no `./postgres/*` subpaths this package imports. Second, a CDC-capable `@drizzle-team/minipg` build resolvable under both names, `minipg` for this package's own imports and `@drizzle-team/minipg` for drizzle-orm's (an npm alias covers the bare name). With both in place, all seven entrypoints import and every named export in this README resolves.
+
 ```bash
 npm install drizzle-pulse
 ```
@@ -11,10 +17,8 @@ npm install drizzle-pulse
 `drizzle-pulse` declares peer dependencies your app must also install — see the [Compatibility](#compatibility) table below for exact ranges. At minimum:
 
 ```bash
-npm install drizzle-orm zod
+npm install drizzle-orm@rc5 zod
 ```
-
-`minipg` is also a required peer for the server-side entrypoints (`/server`, `/embedded`), at `>=0.4.0` — the runtime consumes its managed CDC layer (`minipg/cdc`) for slot administration, reconnect, and the exported-snapshot backfill window. Do not install it from the public npm registry — that name is held by an unrelated package.
 
 `react` is only required if you use the [`drizzle-pulse/client/react`](#drizzle-pulseclientreact) entrypoint.
 
@@ -100,6 +104,7 @@ Derive queries from collections outside the schema file, register them, and expo
 - `new PulseRuntime(registry, config)` — call `.start()` to self-provision infrastructure and connect WAL, `runtime.handlers.{subscribe,pull,loadMore}` to serve requests
 - `PulseRuntime` — WAL listener + request handlers; `.start()` / `.stop()`. The server is stateless: each pull re-resolves auth and validates its own opaque cursor token, so there's no per-subscription server state, no TTL, and no `unsubscribe` — a client simply stops pulling.
 - `PulseRuntime.provision()` — runs the same infrastructure bootstrap as `.start()` without opening the WAL stream, for split-role deploys (see "Provisioning & privileges" below)
+- `config` also accepts a `telemetry` callback, fired for every applied batch; the full contract is documented in [`drizzle-pulse/embedded`](#drizzle-pulseembedded) below
 
 ```ts
 import { pulse } from 'drizzle-pulse';
@@ -120,7 +125,7 @@ await runtime.start();
 
 Every pulsed source table gets a matching **events table** — WAL changes are persisted there and replayed to clients. Events tables are runtime-owned infrastructure, resolved entirely by convention (no hand-declared Drizzle table, no `.$eventsTable()` linkage, no drizzle-kit migration):
 
-- **Location:** `<eventsSchema>.<sourceSchema>_<sourceTable>`, with each component's `_` doubled to `__` before joining — `eventsSchema` defaults to `'drizzle_pulse'` (override via `PulseRuntime`'s `eventsSchema` option)
+- **Location:** `<eventsSchema>.<sourceSchema>_<sourceTable>`, with each component's `_` doubled to `__` before joining — `eventsSchema` defaults to `'drizzle_pulse'` (override via `pull.eventsSchema`)
 - **Self-provisioning:** `runtime.start()` provisions everything itself inside one advisory-locked transaction — creates the events schema, the events tables and their `pulse_meta` bookkeeping, the publication (plus membership diff), and sets `REPLICA IDENTITY FULL` on each registered source (resetting it to `DEFAULT` on un-pulse). Full old tuples are what every update/delete decodes from, in both pull modes — the runtime never reads old-row data back from your tables. An events table is recreated when the sha256 of its rendered DDL diverges (a source-column change), which rotates a per-table epoch so stale client cursors reset. `wal_level = logical` is the one precondition the runtime can't fix — it stays a fail-fast assert.
 
 **WHERE gating for updates/deletes:** every delivery surface (the HTTP pull protocol, embedded collections, `createPulseEvents`) evaluates the query's `WHERE` against both the old and new row (the full old tuple makes that always possible). An event neither side matches is suppressed, and a delivered update includes each side only when that side matches — the out-of-scope side ships redacted (pk-only on the HTTP wire, an empty object on the embedded feed with the pk on the event) — so a subscriber can maintain membership without ever receiving column data its `WHERE` does not admit.
@@ -274,9 +279,9 @@ Updates are push-shaped: each decoded WAL commit is applied to the collection as
 
 | Dependency | Range | Notes |
 |---|---|---|
-| `drizzle-orm` | `^1.0.0-rc.4` | Tested against `1.0.0-rc.4` |
+| `drizzle-orm` | `^1.0.0-rc.4` | Needs a build whose exports include `./postgres/*`, which the `rc5` dist-tag provides and the `latest` tag does not |
 | `zod` | `^4.0.0` | |
-| `minipg` | `>=0.4.0` | Required peer for `/server` and `/embedded`; the runtime uses its `minipg/cdc` subpath. Not the (squatted) public npm package |
+| `minipg` | `>=0.4.0` | The bare npm name belongs to an unrelated package; see [Install](#install) above. The runtime consumes its `minipg/cdc` subpath |
 | `react` | `>=18.0.0` | Optional — only required for `drizzle-pulse/client/react` |
 | `hono` | `^4.6.0` | Optional — only required for `drizzle-pulse/server/hono` |
 | `node` | `>=20` | |
