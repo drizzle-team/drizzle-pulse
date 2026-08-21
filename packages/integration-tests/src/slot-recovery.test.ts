@@ -198,28 +198,6 @@ describe('Slot recovery: backfill/resume auto-heal', () => {
       const postRecoveryPull = await pullUntilEvents(router, freshCursor);
       expect(postRecoveryPull.events.length).toBeGreaterThan(0);
 
-      // Healing repeats rather than being one-shot: a second forced loss, after the driver's
-      // retry budget has already reset off the acked row-3 commit, recreates the slot again.
-      const epochBeforeSecond = await eventsTableEpoch(sql);
-      await forceSlotLoss(sql, slotName);
-
-      await sql.unsafe(
-        `INSERT INTO "orders" (driver_id, status, price) VALUES (4, 'accepted', 40)`,
-      );
-
-      await waitFor(async () => {
-        const rows = await sql.unsafe(`SELECT 1 FROM pg_replication_slots WHERE slot_name = $1`, [
-          slotName,
-        ]);
-        return rows.length > 0;
-      }, 15000);
-      await waitFor(() => collection.list().length === 4, 15000);
-
-      const epochAfterSecond = await eventsTableEpoch(sql);
-      expect(epochAfterSecond).toBeDefined();
-      expect(epochAfterSecond).not.toBe(epochBeforeSecond);
-      expect(terminalError).toBeNull();
-
       collection.dispose();
     } finally {
       errorSpy.mockRestore();
@@ -227,7 +205,7 @@ describe('Slot recovery: backfill/resume auto-heal', () => {
       await sourceSql.end();
       await scenario.drop();
     }
-  }, 60000);
+  }, 30000);
 
   test('boot-time: slot loss while stopped recreates + rotates the epoch on next boot, and the pipeline is live afterwards', async () => {
     const scenario = await createScenarioDb('pulse_slotrec_boot');

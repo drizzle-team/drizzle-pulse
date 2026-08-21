@@ -409,7 +409,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   async readCollectionBaseline(
     resolved: ResolvedPulseQuery,
     snapshot?: BaselineSnapshot | null,
-    opts?: { recovered?: boolean },
+    recovered?: boolean,
   ): Promise<{ rows: Record<string, unknown>[]; watermark: string }> {
     let rows: Record<string, unknown>[];
     let watermark: string;
@@ -434,12 +434,11 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     }
 
     const telemetry = this.config.telemetry;
-    if (opts?.recovered && telemetry) {
+    if (recovered && telemetry) {
       const tableConfig = getTableConfig(resolved.table);
       const schema = tableConfig.schema ?? 'public';
       const table = tableConfig.name;
       const rowCount = rows.length;
-      const recoveredWatermark = watermark;
       // Recovered rows have no single commit clock, so the latency delta reads zero by construction.
       const appliedAt = Math.round((performance.timeOrigin + performance.now()) * 1000);
       queueMicrotask(() => {
@@ -449,7 +448,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
             table,
             op: 'rebaseline',
             rowCount,
-            commitLsn: recoveredWatermark,
+            commitLsn: watermark,
             committedAt: appliedAt,
             appliedAt,
           });

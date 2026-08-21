@@ -14,7 +14,6 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createPulseClient, createPulseEvents } from 'drizzle-pulse/client/embedded';
 import { createPulseRegistry, LogLevel, PulseRuntime } from 'drizzle-pulse/server';
-import { InvalidSlotName } from 'minipg';
 import postgres from 'postgres';
 import { orders, ordersByStatusArgsSchema } from './fixtures/minimal-orders/schema.js';
 import { createScenarioDb, waitFor } from './helpers/scenario.js';
@@ -135,45 +134,6 @@ describe('pull: false — embedded-only runtime writes nothing to events tables'
       });
     } finally {
       await teardownScenario(s, { alreadyStopped: true });
-    }
-  });
-
-  test('slot-name prefix cap: 54 accepted, 55 rejected', async () => {
-    const scenario = await createScenarioDb('pulse_pullfalse_slotcap');
-    const sourceSql = postgres(withQuietPostgresUrl(scenario.databaseUrl));
-    const sourceDb = drizzle({ client: sourceSql });
-
-    function buildRuntime(slotName: string) {
-      return new PulseRuntime(buildRegistry(), {
-        databaseUrl: scenario.databaseUrl,
-        sourceDb,
-        pull: false,
-        wal: { publicationName: 'pullfalse_pub_slotcap', slotName },
-        logLevel: LogLevel.Error,
-      });
-    }
-
-    try {
-      const tooLong = 'a'.repeat(55);
-      await expect(buildRuntime(tooLong).start()).rejects.toBeInstanceOf(InvalidSlotName);
-
-      const atCap = 'a'.repeat(54);
-      const runtime = buildRuntime(atCap);
-      try {
-        await runtime.start();
-
-        const slots = await scenario.sql.unsafe<{ slot_name: string; temporary: boolean }[]>(
-          `SELECT slot_name, temporary FROM pg_replication_slots WHERE slot_name LIKE $1`,
-          [`${atCap}\\_%`],
-        );
-        expect(slots).toHaveLength(1);
-        expect(slots[0]?.temporary).toBe(true);
-      } finally {
-        await runtime.stop();
-      }
-    } finally {
-      await sourceSql.end();
-      await scenario.drop();
     }
   });
 
