@@ -18,9 +18,11 @@ Type-safe Pulse SDK shared by server, client, React, and embedded layers.
 
 ## Dependencies
 
-`superjson` is the only hard `dependency`; `minipg` is a **required peer** (consumers install
-the vendored tarball — the public npm name is squatted by an unrelated package). `minipg` is
-value-reached only from the `./server` and `./embedded` entrypoints (replication + admin pool,
+`superjson` is the only hard `dependency`; `minipg` is a **required peer**. In this workspace
+the dev install of it comes from a commit-pinned preview URL declared in all three manifests;
+the public npm name `minipg` belongs to an unrelated package, and the real driver is
+`@drizzle-team/minipg`. `minipg` is value-reached only from the `./server` and `./embedded`
+entrypoints (replication + admin pool,
 via `pulse-runtime.ts`/`pulse-store.ts`); client entrypoints (`./client`, `./client/react`,
 `./client/embedded`) never reach it on a value-import path (enforced by the platform-imports
 purity test).
