@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, mock, test } from 'bun:test';
-import * as realCdc from 'minipg/cdc';
+import * as realCdc from '@drizzle-team/minipg/cdc';
 import { makePulseRuntime } from './mock-runtime.js';
 
 // ---------------------------------------------------------------------------
@@ -20,7 +20,7 @@ let captured: ReplicateOpts | null = null;
 let handleReady: Promise<void>;
 let stopCalls = 0;
 
-mock.module('minipg/cdc', () => ({
+mock.module('@drizzle-team/minipg/cdc', () => ({
   ...realCdc,
   replicate: (opts: ReplicateOpts) => {
     captured = opts;
@@ -34,7 +34,7 @@ mock.module('minipg/cdc', () => ({
 }));
 
 afterAll(() => {
-  mock.module('minipg/cdc', () => realCdc);
+  mock.module('@drizzle-team/minipg/cdc', () => realCdc);
 });
 
 describe('runtime reconnect edge', () => {

@@ -4,11 +4,9 @@ Type-safe Pulse SDK for Drizzle ORM — server-defined queries that stream live 
 
 ## Install
 
-**Read this before you run anything below.** Installing this package with npm resolves its declared `minipg` peer from the public registry, and that name belongs to an unrelated PostgreSQL binding last published years ago, whose install runs `node-gyp rebuild`. It is not the driver this package uses.
+`drizzle-orm` must resolve from its `rc5` dist-tag. The `latest` tag does not satisfy the declared range, and the public `rc.4` build has no `./postgres/*` subpaths this package imports.
 
-The driver is `@drizzle-team/minipg`. The server entrypoints, `drizzle-pulse/server` and `drizzle-pulse/embedded`, import its `minipg/cdc` subpath, and no version published to the registry ships that subpath yet, so those two entrypoints cannot be installed from the registry today. The client entrypoints, `drizzle-pulse/client`, `drizzle-pulse/client/react`, and `drizzle-pulse/client/embedded`, never load the driver.
-
-A working install needs two things in place. First, `drizzle-orm` resolved from its `rc5` dist-tag: the `latest` tag does not satisfy the declared range, and the public `rc.4` build has no `./postgres/*` subpaths this package imports. Second, a CDC-capable `@drizzle-team/minipg` build resolvable under both names, `minipg` for this package's own imports and `@drizzle-team/minipg` for drizzle-orm's (an npm alias covers the bare name). With both in place, all seven entrypoints import and every named export in this README resolves.
+The PostgreSQL driver is `@drizzle-team/minipg`. The server entrypoints, `drizzle-pulse/server` and `drizzle-pulse/embedded`, import its `@drizzle-team/minipg/cdc` subpath. The client entrypoints, `drizzle-pulse/client`, `drizzle-pulse/client/react`, and `drizzle-pulse/client/embedded`, never load the driver.
 
 ```bash
 npm install drizzle-pulse
@@ -17,7 +15,7 @@ npm install drizzle-pulse
 `drizzle-pulse` declares peer dependencies your app must also install — see the [Compatibility](#compatibility) table below for exact ranges. At minimum:
 
 ```bash
-npm install drizzle-orm@rc5 zod
+npm install drizzle-orm@rc5 zod @drizzle-team/minipg
 ```
 
 `react` is only required if you use the [`drizzle-pulse/client/react`](#drizzle-pulseclientreact) entrypoint.
@@ -281,7 +279,7 @@ Updates are push-shaped: each decoded WAL commit is applied to the collection as
 |---|---|---|
 | `drizzle-orm` | `^1.0.0-rc.4` | Needs a build whose exports include `./postgres/*`, which the `rc5` dist-tag provides and the `latest` tag does not |
 | `zod` | `^4.0.0` | |
-| `minipg` | `>=0.4.0` | The bare npm name belongs to an unrelated package; see [Install](#install) above. The runtime consumes its `minipg/cdc` subpath |
+| `@drizzle-team/minipg` | `>=0.4.0` | The PostgreSQL driver. The runtime consumes its `@drizzle-team/minipg/cdc` subpath |
 | `react` | `>=18.0.0` | Optional — only required for `drizzle-pulse/client/react` |
 | `hono` | `^4.6.0` | Optional — only required for `drizzle-pulse/server/hono` |
 | `node` | `>=20` | |

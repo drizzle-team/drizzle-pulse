@@ -39,8 +39,8 @@ function bannedReason(specifier: string): string | null {
   if (specifier.startsWith('node:') || NODE_BUILTINS.has(specifier)) {
     return 'node builtin';
   }
-  if (specifier === 'minipg' || specifier.startsWith('minipg/')) {
-    return 'minipg (server-only replication/store driver)';
+  if (specifier === '@drizzle-team/minipg' || specifier.startsWith('@drizzle-team/minipg/')) {
+    return '@drizzle-team/minipg (server-only replication/store driver)';
   }
   if (specifier === 'hono' || specifier.startsWith('hono/')) {
     return 'hono (server-only HTTP framework)';

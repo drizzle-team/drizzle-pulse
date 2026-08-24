@@ -18,11 +18,8 @@ Type-safe Pulse SDK shared by server, client, React, and embedded layers.
 
 ## Dependencies
 
-`superjson` is the only hard `dependency`; `minipg` is a **required peer**. In this workspace
-the dev install of it comes from a commit-pinned preview URL declared in all three manifests;
-the public npm name `minipg` belongs to an unrelated package, and the real driver is
-`@drizzle-team/minipg`. `minipg` is value-reached only from the `./server` and `./embedded`
-entrypoints (replication + admin pool,
+`superjson` is the only hard `dependency`; `@drizzle-team/minipg` is a **required peer**. It is
+value-reached only from the `./server` and `./embedded` entrypoints (replication + admin pool,
 via `pulse-runtime.ts`/`pulse-store.ts`); client entrypoints (`./client`, `./client/react`,
 `./client/embedded`) never reach it on a value-import path (enforced by the platform-imports
 purity test).
@@ -201,7 +198,7 @@ remaining consumer).
 
 - Internal source imports require explicit `.js` extensions
 - Keep server-only code out of the `client`, `client/react`, and `client/embedded` entrypoints (the embedded client reaches the runtime through `import type` edges only)
-- `src/embedded/` is a server-side entrypoint (value-imports `pulse-runtime` and `minipg`) — never add it to platform-imports.test.ts's `ENTRY_POINTS`, and never import it from client codepaths
+- `src/embedded/` is a server-side entrypoint (value-imports `pulse-runtime` and `@drizzle-team/minipg`) — never add it to platform-imports.test.ts's `ENTRY_POINTS`, and never import it from client codepaths
 - If `PulseQuery`, the transport interface, or protocol types change, update the SDK handler, both transports, and client consumers together
 
 ## DO NOT

@@ -1,14 +1,14 @@
 import { createHash } from 'node:crypto';
-import { desc, eq, getColumns, getTableUniqueName, sql } from 'drizzle-orm';
-import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
-import { buildShape } from 'drizzle-orm/postgres/shape';
 import {
   lsnFromString,
   type ReplicationEvent,
   type TableShape,
   type TransactionBatch,
-} from 'minipg';
-import { type ReplicateHandle, replicate } from 'minipg/cdc';
+} from '@drizzle-team/minipg';
+import { type ReplicateHandle, replicate } from '@drizzle-team/minipg/cdc';
+import { desc, eq, getColumns, getTableUniqueName, sql } from 'drizzle-orm';
+import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
+import { buildShape } from 'drizzle-orm/postgres/shape';
 import type { ResolvedPulseQuery } from '../types.js';
 import { emitEventsTableDdl } from './events-table-ddl.js';
 import { buildEventsTable, DEFAULT_EVENTS_SCHEMA } from './events-table-resolver.js';

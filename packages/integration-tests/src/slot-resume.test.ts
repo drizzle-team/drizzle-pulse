@@ -9,13 +9,13 @@
  */
 
 import { describe, expect, spyOn, test } from 'bun:test';
+import { replication } from '@drizzle-team/minipg';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createPulseClient } from 'drizzle-pulse/client/embedded';
 import { createPulseRegistry, LogLevel, PulseRuntime } from 'drizzle-pulse/server';
 import { createPulseHonoRouter as createServerRouter } from 'drizzle-pulse/server/hono';
 import type { Hono } from 'hono';
-import { replication } from 'minipg';
 import postgres from 'postgres';
 import { orders, ordersByStatusArgsSchema } from './fixtures/minimal-orders/schema.js';
 import { createScenarioDb, waitFor } from './helpers/scenario.js';
