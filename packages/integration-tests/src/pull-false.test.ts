@@ -285,7 +285,7 @@ describe('pull: false — embedded-only runtime writes nothing to events tables'
         `INSERT INTO "orders" (driver_id, status, price) VALUES (2, 'accepted', 20)`,
       );
 
-      // First reconnect lands ~1-2s after the edge (RECONNECT_BASE_DELAY_MS * 2^0 + jitter).
+      // First reconnect lands ~1-2s after the edge (the driver's base backoff plus jitter).
       await waitFor(async () => {
         const rows = await s.sql.unsafe<{ slot_name: string }[]>(
           `SELECT slot_name FROM pg_replication_slots WHERE slot_name LIKE $1`,

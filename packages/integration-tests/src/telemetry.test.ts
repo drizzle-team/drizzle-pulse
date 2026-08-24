@@ -138,4 +138,91 @@ describe('drizzle-pulse/embedded — telemetry', () => {
       await scenario.drop();
     }
   });
+
+  test('a reconnect rebaseline reports the recovered rows', async () => {
+    const scenario = await createScenarioDb('pulse_telemetry_reconnect');
+    const sourceSql = postgres(withQuietPostgresUrl(scenario.databaseUrl));
+    const received: TelemetryEvent[] = [];
+    const slotName = 'telemetry_reconnect_slot';
+    try {
+      const runtime = createRuntime({
+        queries: { ordersByStatus },
+        databaseUrl: scenario.databaseUrl,
+        sourceDb: drizzle({ client: sourceSql }),
+        wal: { publicationName: 'telemetry_reconnect_pub', slotName },
+        logLevel: LogLevel.Error,
+        telemetry: (event) => {
+          received.push(event);
+        },
+      });
+
+      await runtime.start();
+
+      const collection = await runtime.client.ordersByStatus({ status: 'accepted' });
+
+      await scenario.sql.unsafe(
+        `INSERT INTO "orders" (driver_id, status, price) VALUES (1, 'accepted', 10)`,
+      );
+      await waitFor(() => received.filter((event) => event.op === 'insert').length === 1);
+
+      // Locate the active temp slot (randomized-suffix, never the base slotName) and its
+      // walsender backend.
+      const before = await scenario.sql.unsafe<{ slot_name: string; active_pid: number | null }[]>(
+        `SELECT slot_name, active_pid FROM pg_replication_slots WHERE slot_name LIKE $1`,
+        [`${slotName}\\_%`],
+      );
+      expect(before).toHaveLength(1);
+      const activePid = before[0]?.active_pid;
+      expect(activePid).not.toBeNull();
+
+      // Terminate only — do NOT drop. The temporary slot dies with its backend, and the
+      // reconnect creates a fresh one.
+      await scenario.sql.unsafe(`SELECT pg_terminate_backend($1)`, [activePid ?? null]);
+
+      // Downtime write while disconnected — the row only a rebaseline can recover.
+      await scenario.sql.unsafe(
+        `INSERT INTO "orders" (driver_id, status, price) VALUES (2, 'accepted', 20)`,
+      );
+
+      // First reconnect lands ~1-2s after the edge (the driver's base backoff plus jitter).
+      await waitFor(() => collection.list().length === 2, 10000);
+      await waitFor(() => received.some((event) => event.op === 'rebaseline'));
+
+      const rebaselineEvents = received.filter((event) => event.op === 'rebaseline');
+      expect(rebaselineEvents).toHaveLength(1);
+      const rebaseline = rebaselineEvents[0]!;
+      expect(rebaseline.rowCount).toBe(2);
+      expect(rebaseline.schema).toBe('public');
+      expect(rebaseline.table).toBe('orders');
+      expect(rebaseline.commitLsn).toMatch(/^[0-9A-F]+\/[0-9A-F]+$/i);
+      expect(rebaseline.committedAt).toBe(rebaseline.appliedAt);
+      expect(Object.keys(rebaseline).sort()).toEqual([
+        'appliedAt',
+        'commitLsn',
+        'committedAt',
+        'op',
+        'rowCount',
+        'schema',
+        'table',
+      ]);
+
+      // No double count: the downtime row is accounted for by the rebaseline event and by
+      // nothing else — the insert count from before the reconnect still stands alone.
+      expect(received.filter((event) => event.op === 'insert')).toHaveLength(1);
+
+      // Counts continue past the edge.
+      await scenario.sql.unsafe(
+        `INSERT INTO "orders" (driver_id, status, price) VALUES (3, 'accepted', 30)`,
+      );
+      await waitFor(() => received.filter((event) => event.op === 'insert').length === 2);
+      const secondInsert = received.filter((event) => event.op === 'insert')[1]!;
+      expect(secondInsert.rowCount).toBe(1);
+
+      collection.dispose();
+      await runtime.stop();
+    } finally {
+      await sourceSql.end();
+      await scenario.drop();
+    }
+  }, 30000);
 });

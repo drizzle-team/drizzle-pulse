@@ -10,7 +10,7 @@
  * `finally` block.
  */
 
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { pulse } from 'drizzle-pulse';
 import { createPulseClient } from 'drizzle-pulse/client/embedded';
@@ -128,6 +128,7 @@ describe('Slot recovery: backfill/resume auto-heal', () => {
       terminalError = error;
     });
 
+    const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
     try {
       await runtime.start();
 
@@ -159,9 +160,16 @@ describe('Slot recovery: backfill/resume auto-heal', () => {
           slotName,
         ]);
         return rows.length > 0;
-      });
-      await waitFor(() => collection.list().length === 2);
+      }, 15000);
+      await waitFor(() => collection.list().length === 2, 15000);
       expect(new Set(collection.list().map((row) => row.driverId))).toEqual(new Set([1, 2]));
+
+      // The driver's own recreate is silent on the warning channel — this is the operator
+      // signal's sole producer, and the positive control that keeps the absence assertions
+      // elsewhere (slot-resume.test.ts, bootstrap.test.ts) meaningful.
+      expect(
+        errorSpy.mock.calls.some((call: unknown[]) => String(call[0]).includes('recreated')),
+      ).toBe(true);
 
       // No terminal error — the recreate auto-healed inside the reconnect cycle.
       expect(terminalError).toBeNull();
@@ -192,11 +200,12 @@ describe('Slot recovery: backfill/resume auto-heal', () => {
 
       collection.dispose();
     } finally {
+      errorSpy.mockRestore();
       await runtime.stop();
       await sourceSql.end();
       await scenario.drop();
     }
-  });
+  }, 30000);
 
   test('boot-time: slot loss while stopped recreates + rotates the epoch on next boot, and the pipeline is live afterwards', async () => {
     const scenario = await createScenarioDb('pulse_slotrec_boot');
@@ -214,12 +223,15 @@ describe('Slot recovery: backfill/resume auto-heal', () => {
       epochBefore = await eventsTableEpoch(sql);
       expect(epochBefore).toBeDefined();
 
-      await sql.unsafe(
-        `INSERT INTO "orders" (driver_id, status, price) VALUES (1, 'accepted', 10)`,
-      );
+      // Subscribe before the write. /subscribe reads the events-table cursor before its
+      // baseline SELECT, so a row inserted first can already sit behind the cursor and the
+      // pull then waits out its deadline for an event it will never be offered.
       const preStopCursor = await subscribeClient(first.router, 'ordersByStatus', {
         status: 'accepted',
       });
+      await sql.unsafe(
+        `INSERT INTO "orders" (driver_id, status, price) VALUES (1, 'accepted', 10)`,
+      );
       const preStopPull = await pullUntilEvents(first.router, preStopCursor);
       expect(preStopPull.events.length).toBeGreaterThan(0);
     } finally {

@@ -1,14 +1,14 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
+import {
+  lsnFromString,
+  type ReplicationEvent,
+  type TableShape,
+  type TransactionBatch,
+} from '@drizzle-team/minipg';
+import { type ReplicateHandle, replicate } from '@drizzle-team/minipg/cdc';
 import { desc, eq, getColumns, getTableUniqueName, sql } from 'drizzle-orm';
 import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
 import { buildShape } from 'drizzle-orm/postgres/shape';
-import {
-  lsnFromString,
-  type ReplicationConnection,
-  type ReplicationEvent,
-  replication,
-  type TableShape,
-} from 'minipg';
 import type { ResolvedPulseQuery } from '../types.js';
 import { emitEventsTableDdl } from './events-table-ddl.js';
 import { buildEventsTable, DEFAULT_EVENTS_SCHEMA } from './events-table-resolver.js';
@@ -37,11 +37,12 @@ export enum LogLevel {
   Debug = 3,
 }
 
-/** Fired once per (table, op) group of each transaction the runtime applies */
+/** Fired once per (table, op) group of each transaction the runtime applies, plus once per
+ * collection on a reconnect rebaseline. */
 export type TelemetryEvent = {
   schema: string;
   table: string;
-  op: 'insert' | 'update' | 'delete';
+  op: 'insert' | 'update' | 'delete' | 'rebaseline';
   rowCount: number;
   committedAt: number;
   appliedAt: number;
@@ -75,7 +76,8 @@ export type PulseRuntimeConfig = {
       };
   wal?: PulseRuntimeWalConfig;
   logLevel?: LogLevel;
-  /** Fires once per (table, op) group of each transaction the runtime applies. */
+  /** Fires once per (table, op) group of each transaction the runtime applies, plus once per
+   * collection on a reconnect rebaseline. */
   telemetry?: (event: TelemetryEvent) => void;
 };
 
@@ -111,93 +113,30 @@ export type PendingWalEvent = {
 // field it lacks, so it is passed alongside. `lsn` is shared by every event in the commit.
 export type TapListener = (event: PendingWalEvent, lsn: string) => void;
 
-// `===` misses same-value Date/Buffer pks decoded from separate WAL events (distinct instances).
-function pkValuesEqual(a: unknown, b: unknown): boolean {
-  if (a === b) return true;
-  if (a instanceof Date && b instanceof Date) return a.getTime() === b.getTime();
-  if (Buffer.isBuffer(a) && Buffer.isBuffer(b)) return a.equals(b);
-  return false;
-}
-
-const RECONNECT_MAX_RETRIES = 10;
-const RECONNECT_BASE_DELAY_MS = 1000;
-const RECONNECT_MAX_DELAY_MS = 30000;
-
-// Ceiling on one pre-stream rebaseline read (see rebaselineCollections) — generous enough for a
+// Ceiling on one pre-stream baseline read (see rebaselineCollections) — generous enough for a
 // large collection's baseline SELECT, short enough that a stuck one can't hold WAL indefinitely.
 const REBASELINE_TIMEOUT_MS = 30_000;
+
+// Ceiling on the WHOLE backfill window: the events-table seed plus every collection's baseline,
+// all of which run inside the exported snapshot before the stream opens. Nothing consumes WAL
+// until it returns, so an unbounded window grows the slot's retained WAL for as long as it hangs
+// — and the seed, unlike the reads above, carries no statement_timeout of its own. This sits over
+// REBASELINE_TIMEOUT_MS per collection, so two slow collection baselines fit inside it and three
+// or more exceed it and fail the whole backfill terminally.
+const BACKFILL_TIMEOUT_MS = 60_000;
 
 const DEFAULT_PUBLICATION_NAME = 'drizzle_pulse';
 const DEFAULT_SLOT_NAME = 'drizzle_pulse';
 
 const WAL_LOG_PREFIX = '[WAL Listener] ';
 
-// One connection lifecycle attempt: aborting finishes the active stream cleanly (rep.start()'s
-// AbortSignal) and wakes an in-progress backoff sleep; `done` settles when the loop exits, so
-// stop() can await full teardown. `attempts` is the terminal-path test seam.
-type Run = { abort: AbortController; attempts: number; done?: Promise<void> };
-
-// A read handle on the slot recreate's exported snapshot, live only for the duration of
+// A read handle on the slot creation's exported snapshot, live only for the duration of
 // rebaselineCollections() — the collections read the exact state the stream is about to start
-// from. `watermark` is that start position (the slot's consistent point).
+// from. `watermark` is that start position.
 export type BaselineSnapshot = {
   db: PulseSourceDb;
   watermark: string;
 };
-
-// drizzle-orm's postgres executor wraps every driver error in a DrizzleQueryError, which does
-// not forward the underlying PgError's `code` — it lives on `.cause` instead. Pg-error-code
-// switches (55006/42704 retry logic) must unwrap it or every branch always misses.
-function getPgErrorCode(error: unknown): string | undefined {
-  const cause = (error as { cause?: unknown } | null | undefined)?.cause;
-  return (
-    (cause as { code?: string } | null | undefined)?.code ??
-    (error as { code?: string } | null | undefined)?.code
-  );
-}
-
-// A resolve() with idempotent settling — runReplicationLoop() resolves `startupSettled` from
-// several exits (connected, retry scheduled, gave up) and only the first must count.
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
-  let resolveFn!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
-    resolveFn = res;
-  });
-  let settled = false;
-  return {
-    promise,
-    resolve: (value: T) => {
-      if (settled) return;
-      settled = true;
-      resolveFn(value);
-    },
-  };
-}
-
-// stop()-during-backoff must be the abort waking this sleep, never a timer-vs-flag race.
-function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    if (signal.aborted) {
-      resolve();
-      return;
-    }
-    const onAbort = () => {
-      clearTimeout(timer);
-      resolve();
-    };
-    const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-}
-
-function backoffDelay(attempts: number): number {
-  const exponential = RECONNECT_BASE_DELAY_MS * 2 ** attempts;
-  const jitter = Math.random() * 1000;
-  return Math.min(exponential + jitter, RECONNECT_MAX_DELAY_MS);
-}
 
 export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   private readonly sourceTableMetadata: Map<string, SourceTableMetadata>;
@@ -214,9 +153,12 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   private eventsEpochs = new Map<string, string>();
 
   private store: PulseStore | null = null;
-  // The in-flight replication lifecycle — runReplicationLoop()'s abort handle + reconnect-attempt
-  // counter. Null when the runtime is stopped.
-  private run: Run | null = null;
+  // The managed CDC session. Null when the runtime is stopped.
+  private session: ReplicateHandle | null = null;
+
+  // True once a stream has opened at least once for this runtime, across sessions. Gates the
+  // collection rebaseline so the very first connect (no collections yet) never fires a round.
+  private hasStreamed = false;
   // In-memory mirror of the durable pulse_stream watermark — dedupes at-least-once replay after
   // a reconnect without a store round trip on every commit.
   private lastPersistedCommitLsn: string | null = null;
@@ -228,7 +170,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   private readonly terminalErrorListeners = new Set<(error: Error) => void>();
 
   get isRunning(): boolean {
-    return this.run !== null;
+    return this.session !== null;
   }
 
   get sourceDb(): PulseSourceDb {
@@ -333,11 +275,14 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       });
     }
 
-    // Handed to every rep.start() so minipg decodes each declared column exactly as its query()
-    // spec would — new and old tuples alike — instead of at the OID's default JS target.
-    this.tableShapes = [...this.sourceTableMetadata.values()].map((meta) =>
-      buildShape.fromTableOrView(meta.sourceTable),
-    );
+    // Handed to the replication session so minipg decodes each declared column exactly as its
+    // query() spec would — new and old tuples alike — instead of at the OID's default JS target.
+    // `key` names the pk so the driver reports `keyChanged` on updates; under the REPLICA IDENTITY
+    // FULL bootstrap() forces, that comparison is over the real old tuple and is exact.
+    this.tableShapes = [...this.sourceTableMetadata.values()].map((meta) => ({
+      ...buildShape.fromTableOrView(meta.sourceTable),
+      key: [meta.pkKey],
+    }));
 
     this.logLevel = this.config.logLevel ?? LogLevel.Info;
 
@@ -464,30 +409,60 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   async readCollectionBaseline(
     resolved: ResolvedPulseQuery,
     snapshot?: BaselineSnapshot | null,
+    recovered?: boolean,
   ): Promise<{ rows: Record<string, unknown>[]; watermark: string }> {
+    let rows: Record<string, unknown>[];
+    let watermark: string;
+
     if (snapshot) {
-      const rows = await buildSelectQuery(snapshot.db, resolved.table, resolved);
-      return { rows, watermark: snapshot.watermark };
+      rows = await buildSelectQuery(snapshot.db, resolved.table, resolved);
+      watermark = snapshot.watermark;
+    } else {
+      // 'objects' mode is the one execute() overload whose return type doesn't route through the
+      // driver-specific PgQueryResultKind mapping — the only shape that type-checks generically
+      // across every driver PulseSourceDb may wrap (pg, postgres.js, minipg, ...).
+      const watermarkRows = await this.config.sourceDb.execute<{ lsn: string }>(
+        sql`SELECT pg_current_wal_lsn()::text AS lsn`,
+        'objects',
+      );
+      const lsn = watermarkRows[0]?.lsn;
+      if (!lsn) {
+        throw new Error('pg_current_wal_lsn() returned no watermark row');
+      }
+      watermark = lsn;
+      rows = await buildSelectQuery(this.config.sourceDb, resolved.table, resolved);
     }
 
-    // 'objects' mode is the one execute() overload whose return type doesn't route through the
-    // driver-specific PgQueryResultKind mapping — the only shape that type-checks generically
-    // across every driver PulseSourceDb may wrap (pg, postgres.js, minipg, ...).
-    const watermarkRows = await this.config.sourceDb.execute<{ lsn: string }>(
-      sql`SELECT pg_current_wal_lsn()::text AS lsn`,
-      'objects',
-    );
-    const watermark = watermarkRows[0]?.lsn;
-    if (!watermark) {
-      throw new Error('pg_current_wal_lsn() returned no watermark row');
+    const telemetry = this.config.telemetry;
+    if (recovered && telemetry) {
+      const tableConfig = getTableConfig(resolved.table);
+      const schema = tableConfig.schema ?? 'public';
+      const table = tableConfig.name;
+      const rowCount = rows.length;
+      // Recovered rows have no single commit clock, so the latency delta reads zero by construction.
+      const appliedAt = Math.round((performance.timeOrigin + performance.now()) * 1000);
+      queueMicrotask(() => {
+        try {
+          telemetry({
+            schema,
+            table,
+            op: 'rebaseline',
+            rowCount,
+            commitLsn: watermark,
+            committedAt: appliedAt,
+            appliedAt,
+          });
+        } catch (err) {
+          this.logError('telemetry callback error:', err);
+        }
+      });
     }
 
-    const rows = await buildSelectQuery(this.config.sourceDb, resolved.table, resolved);
     return { rows, watermark };
   }
 
   async start(): Promise<void> {
-    if (this.run) {
+    if (this.session) {
       this.logInfo('Already running');
       return;
     }
@@ -496,16 +471,11 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
 
     try {
       await this.bootstrap();
-
-      const run: Run = { abort: new AbortController(), attempts: 0 };
-      this.run = run;
-      const startupSettled = deferred<void>();
-      run.done = this.runReplicationLoop(run, startupSettled);
-      await startupSettled.promise;
+      await this.openSession();
     } catch (error) {
       // Mirrors stop()'s pool teardown so a failed guard doesn't leak connections — callers
       // await start() rejections and then discard the runtime.
-      this.run = null;
+      this.session = null;
       const store = this.store;
       this.store = null;
       await store?.end();
@@ -522,12 +492,11 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       }
     }
 
-    const run = this.run;
-    this.run = null;
-    run?.abort.abort(); // finishes the active stream cleanly, wakes a backoff sleep
-    // No in-flight decode/persist — nor an in-flight rebaseline, which the loop owns and always
-    // releases its connection — survives past this line, so the store below closes under no load.
-    await run?.done;
+    const session = this.session;
+    this.session = null;
+    // Settles in-flight work, acks what completed, closes — so no decode, persist, or rebaseline
+    // survives past this line and the store below closes under no load.
+    await session?.stop();
 
     const store = this.store;
     this.store = null;
@@ -548,7 +517,7 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     // On a running runtime the ??= below would adopt the LIVE admin store and the finally
     // would close it under the replication loop — every later store access (rebaseline,
     // commit persistence) would then throw until the loop gives up.
-    if (this.run) {
+    if (this.session) {
       throw new Error(
         'provision() must run before start() — it closes its admin connection when it returns',
       );
@@ -800,248 +769,99 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     this.eventsEpochs = epochs;
   }
 
-  // The replication connection loop: one connection attempt per iteration, `try/catch/finally` in
-  // statement order. `signal.aborted` is the only teardown signal — exactly one connection
-  // exists per iteration, so nothing can be superseded.
-  private async runReplicationLoop(
-    run: Run,
-    startupSettled: { promise: Promise<void>; resolve: () => void },
-  ) {
-    const { signal } = run.abort;
-    // True once THIS run has established a replication connection at least once. The reconnect
-    // listeners (live embedded collections rebaselining to catch up) must fire only on
-    // RE-connections, so the first successful connect must not trigger a round. It is per-run
-    // because a stopped-then-restarted runtime starts a fresh run whose first connect is again
-    // not a reconnection.
-    let hasConnectedBefore = false;
+  // The replication session: minipg's managed CDC layer owns connect, slot administration,
+  // reconnect/backoff, the exported-snapshot backfill window, and ack-on-handler-resolution.
+  // What stays here is the part the driver cannot see — what a backfill and a resume MEAN for
+  // this runtime's events tables, cursors, and live collections.
+  private async openSession(): Promise<void> {
+    const durable = this.pullEnabled;
 
-    while (!signal.aborted) {
-      let rep: ReplicationConnection | undefined;
-      try {
-        rep = await replication({ url: this.config.databaseUrl });
+    const session = replicate({
+      url: this.config.databaseUrl,
+      // pull:true keeps a durable slot so a disconnected consumer resumes where it left off.
+      // pull:false takes a fresh random-suffixed temporary slot per session: nothing durable to
+      // resume into, and a crashed process can never leak a WAL-retaining slot. The configured
+      // slot name is the prefix, so an operator can attribute the slot back to its runtime.
+      slot: durable ? { name: this.slotName } : { temporary: true, prefix: this.slotName },
+      publications: [this.publicationName],
+      shapes: this.tableShapes,
+      // Another backend holding our durable slot is a stale walsender from a previous process,
+      // not a competitor — terminate it rather than failing the boot.
+      onSlotBusy: 'evict',
+      // Inert on a temporary (pull:false) slot per the driver's own docs; set unconditionally.
+      onSlotInvalidated: 'recreate',
 
-        const { slot, from, snapshot } = this.pullEnabled
-          ? await this.resolveSlot(rep) // recovery lives INSIDE the try — never consumes a retry
-          : await this.createTempSlot(rep);
-
-        // Live collections rebaseline to completion BEFORE the stream opens, so a collection is
-        // never rebuilding while events for it are already arriving. Only re-connections: at boot
-        // no collection exists yet (the embedded factory requires a running runtime).
-        if (hasConnectedBefore) {
-          await this.rebaselineCollections(snapshot, from);
-          if (signal.aborted) return; // stop() landed while the collections were reading
+      backfill: async ({ snapshot, streamStartLsn, isReconnect }) => {
+        // Operators must see a recreate: it resets every registered events table and every
+        // client cursor. Name the slot only, never databaseUrl. The durable gate matters because
+        // an embedded (pull:false) runtime takes a fresh temporary slot on every connect, where
+        // the reconnect flag alone would be noise.
+        if (durable && isReconnect) {
+          this.logError(`Replication slot '${this.slotName}' was recreated`);
         }
+        // A created slot means there was nothing to resume into: for pull:true the events tables
+        // and their cursors have to be rebuilt from this snapshot before anything streams.
+        if (durable) await this.rotateAndSeedEvents(snapshot, streamStartLsn);
+        // Live collections rebaseline to completion BEFORE the stream opens, so a collection is
+        // never rebuilding while events for it are already arriving. Only once a stream has run
+        // before: at boot no collection exists yet (the embedded factory requires a running
+        // runtime). Tracked here rather than off `isReconnect` because the reconnect flag is also
+        // true on the first successful connect after a failed attempt, when no collection has
+        // ever streamed, so `hasStreamed` is the correct gate.
+        if (this.hasStreamed) await this.rebaselineCollections(snapshot, streamStartLsn);
+        this.hasStreamed = true;
+      },
+      backfillTimeoutMs: BACKFILL_TIMEOUT_MS,
 
-        this.logInfo(`Subscribing to slot '${slot}'`);
-        const iterator = rep.start({
-          slot,
-          publications: [this.publicationName],
-          // Per-table decode shapes: minipg lands each declared column in the same JS type its
-          // query() spec would, keyed by SQL column name (see buildTableShape).
-          shapes: this.tableShapes,
-          from,
-          statusIntervalMs: 1000,
-          idleAck: true,
-          messages: false,
-          // Abort = this run's own stop: the iterator finishes cleanly and the socket closes.
-          signal,
-        });
+      onResume: async ({ confirmedFlush }) => {
+        // pull:true only. The slot survived, so the events tables are still continuous with it —
+        // seed each table's baseline row and adopt the durable watermark as the replay-dedupe
+        // floor. A watermark that is null or behind confirmed_flush means the events tables lost
+        // commits the slot already acked, so resuming would stream past the gap forever — the
+        // recreate verdict has the driver drop and recreate the slot and re-enter through
+        // backfill.
+        const watermark = await this.getPulseStore().getStreamWatermark(this.slotName);
+        if (watermark === null || lsnFromString(watermark) < lsnFromString(confirmedFlush)) {
+          return 'recreate';
+        }
+        await this.ensureBaselines();
+        this.lastPersistedCommitLsn = watermark;
+        this.logInfo(`Replication slot '${this.slotName}' resumed`);
+        // Nothing was exported, so collections re-sync through the watermark handshake instead.
+        if (this.hasStreamed) await this.rebaselineCollections(undefined, undefined);
+        this.hasStreamed = true;
+      },
 
-        hasConnectedBefore = true;
-        startupSettled.resolve();
-        this.logInfo('Replication started');
+      onTransaction: (batch) => this.applyTransaction(batch),
 
-        // A server-initiated end (CopyDone) throws ReplicationStreamEnded into the catch below;
-        // a clean return only follows this run's own abort.
-        await this.stream(rep, iterator, run);
-      } catch (error) {
-        if (signal.aborted) return;
-        this.logError('Replication error:', error);
-      } finally {
-        rep?.end();
-      }
+      onWarning: (warning) => this.logWarn(warning.message),
 
-      if (signal.aborted) return;
+      onFatalError: (error) => void this.handleFatal(error),
+    });
 
-      if (run.attempts >= RECONNECT_MAX_RETRIES) {
-        startupSettled.resolve();
-        this.giveUp();
-        return;
-      }
-
-      run.attempts += 1;
-      startupSettled.resolve(); // first-connect failure still resolves start() (today's behavior)
-      this.logInfo(`Reconnecting (attempt ${run.attempts}/${RECONNECT_MAX_RETRIES})`);
-      await abortableSleep(backoffDelay(run.attempts - 1), signal);
+    this.session = session;
+    try {
+      await session.ready;
+    } catch (error) {
+      // A rejected ready does not stop the session — the driver keeps retrying. Leaving it
+      // running while start()'s catch closes the store would have the next backfill build
+      // against nothing.
+      this.session = null;
+      await session.stop();
+      throw error;
     }
   }
 
-  // The terminal path: reachable only once run.attempts exhausts RECONNECT_MAX_RETRIES.
-  private giveUp(): void {
-    this.logError('Max reconnection attempts reached. Giving up.');
-    const terminalError = new Error(
-      `WAL replication failed permanently after ${RECONNECT_MAX_RETRIES} reconnect attempts`,
-    );
+  private async handleFatal(error: Error): Promise<void> {
+    this.logError('Replication failed permanently:', error);
     for (const listener of [...this.terminalErrorListeners]) {
       try {
-        listener(terminalError);
+        listener(error);
       } catch (err) {
         this.logError('onTerminalError listener error:', err);
       }
     }
     void this.stop();
-  }
-
-  // pull:true only — the resume-vs-recover decision table. The intact-slot resume branch stays
-  // structurally dead in production (the persisted watermark is the commit record's own LSN,
-  // and ack always advances confirmed_flush past it); it exists for the case Postgres itself
-  // guards against below and as documentation of intent. Tests reach it via seeded watermarks.
-  private async resolveSlot(
-    rep: ReplicationConnection,
-  ): Promise<{ slot: string; from?: string; snapshot?: string }> {
-    const adminDb = this.getPulseStore().getDb();
-    const {
-      rows: [slot],
-    } = await adminDb.execute<{
-      slot_name: string;
-      active: boolean;
-      active_pid: number | null;
-      wal_status: string | null;
-      confirmed_flush_lsn: string | null;
-    }>(
-      sql`SELECT slot_name, active, active_pid, wal_status, confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name = ${this.slotName}`,
-    );
-
-    if (!slot || slot.wal_status === 'lost') {
-      return { slot: this.slotName, ...(await this.recoverSlot(rep)) };
-    }
-
-    const watermark = await this.getPulseStore().getStreamWatermark(this.slotName);
-    // The null guard on confirmed_flush_lsn is load-bearing: lsnFromString throws on null, and
-    // null must route to recovery, not a caught exception that would burn a reconnect retry.
-    if (
-      watermark === null ||
-      !slot.confirmed_flush_lsn ||
-      lsnFromString(watermark) < lsnFromString(slot.confirmed_flush_lsn)
-    ) {
-      return { slot: this.slotName, ...(await this.recoverSlot(rep)) };
-    }
-
-    if (slot.active && slot.active_pid) {
-      this.logInfo(
-        `Terminating stale connection on slot '${this.slotName}' (PID ${slot.active_pid})`,
-      );
-      await this.evictWalsender(this.slotName);
-    }
-
-    await this.ensureBaselines();
-
-    this.logInfo(`Replication slot '${this.slotName}' ready`);
-    this.lastPersistedCommitLsn = watermark;
-    // Resumes from confirmed_flush; nothing was exported, so collections rebaseline through the
-    // watermark handshake instead.
-    return { slot: this.slotName, from: undefined, snapshot: undefined };
-  }
-
-  // Full recovery machine (pull:true only now): drop any broken persistent slot, recreate with an
-  // exported snapshot, and rotate-and-seed the events tables from it. The snapshot is returned so
-  // the caller can rebaseline live collections from it too — every read of it must happen before
-  // rep.start(), since the export dies on this connection's next command.
-  private async recoverSlot(
-    rep: ReplicationConnection,
-  ): Promise<{ from: string; snapshot: string }> {
-    await this.evictWalsender(this.slotName);
-    await this.dropSlotWithRetry(this.slotName);
-
-    const { consistentPoint, snapshot } = await rep.createSlot(this.slotName, {
-      temporary: false,
-      snapshot: 'export',
-    });
-
-    await this.rotateAndSeedEvents(snapshot, consistentPoint);
-
-    // Operators must see this: a recreate resets events/baselines. Name the slot, never
-    // databaseUrl (info disclosure).
-    this.logError(
-      `Replication slot '${this.slotName}' was missing or invalidated and has been recreated`,
-    );
-
-    return { from: consistentPoint, snapshot };
-  }
-
-  // pull:false: a fresh session-scoped, randomized-suffix temporary slot on every
-  // (re)connect, never persisted — a crashed process can never leak a WAL-retaining slot. Never
-  // threads the pull:true recovery machine (no continuity to check for a slot that never
-  // survives past its own connection).
-  private async createTempSlot(
-    rep: ReplicationConnection,
-  ): Promise<{ slot: string; from: string; snapshot: string }> {
-    const slot = `${this.slotName}_${randomBytes(4).toString('hex')}`;
-    const { consistentPoint, snapshot } = await rep.createSlot(slot, {
-      temporary: true,
-      snapshot: 'export',
-    });
-
-    this.logInfo(`Created temporary slot '${slot}'`);
-    return { slot, from: consistentPoint, snapshot };
-  }
-
-  // Poll-retry a slot drop: the previous owning backend's "active" flag can lag its actual
-  // termination by a beat, so a single attempt can spuriously hit 55006 (object_in_use).
-  private async dropSlotWithRetry(
-    slotName: string,
-    opts: { timeoutMs?: number; pollIntervalMs?: number } = {},
-  ): Promise<void> {
-    const adminDb = this.getPulseStore().getDb();
-    const timeoutMs = opts.timeoutMs ?? 3000;
-    const pollIntervalMs = opts.pollIntervalMs ?? 100;
-    const deadline = Date.now() + timeoutMs;
-
-    for (;;) {
-      try {
-        await adminDb.execute(sql`SELECT pg_drop_replication_slot(${slotName})`);
-        return;
-      } catch (error) {
-        const code = getPgErrorCode(error);
-        if (code === '42704') return; // undefined_object — already gone
-        if (code !== '55006' || Date.now() >= deadline) throw error; // object_in_use exhausted, or unexpected
-        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-      }
-    }
-  }
-
-  // Shared zombie-walsender remedy: terminate the backend still attached to the slot, then poll
-  // pg_replication_slots until it reports inactive — replaces a fixed sleep with the same
-  // poll-retry shape dropSlotWithRetry uses above. Degrades to today's proceed-regardless
-  // behavior if the deadline passes with the walsender still marked active.
-  private async evictWalsender(
-    slotName: string,
-    opts: { timeoutMs?: number; pollIntervalMs?: number } = {},
-  ): Promise<void> {
-    const adminDb = this.getPulseStore().getDb();
-    const timeoutMs = opts.timeoutMs ?? 3000;
-    const pollIntervalMs = opts.pollIntervalMs ?? 100;
-    const deadline = Date.now() + timeoutMs;
-
-    const {
-      rows: [{ active_pid: activePid } = {}],
-    } = await adminDb.execute<{ active_pid: number | null }>(
-      sql`SELECT active_pid FROM pg_replication_slots WHERE slot_name = ${slotName}`,
-    );
-    if (!activePid) return;
-
-    await adminDb.execute(sql`SELECT pg_terminate_backend(${activePid})`);
-
-    for (;;) {
-      const {
-        rows: [{ active } = {}],
-      } = await adminDb.execute<{ active: boolean | null }>(
-        sql`SELECT active FROM pg_replication_slots WHERE slot_name = ${slotName}`,
-      );
-      if (!active) return;
-      if (Date.now() >= deadline) return;
-      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-    }
   }
 
   // One pinned repeatable-read admin transaction rotates every registered events table's
@@ -1113,10 +933,10 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
   }
 
   // Rebaselines every live collection, to completion, while the replication stream is still
-  // closed: each reads the slot's exported snapshot — the exact state rep.start() will stream
+  // closed: each reads the slot's exported snapshot — the exact state the stream will resume
   // forward from — so the recreate boundary is gapless with no buffering and no watermark
-  // filtering. Runs before rep.start() because the export dies on the replication connection's
-  // next command.
+  // filtering. Runs before the stream opens because the export dies on the replication
+  // connection's next command.
   //
   // `snapshot` is absent when a resumed slot was intact (nothing exported): listeners take their
   // own watermark handshake instead, and the stream replays from confirmed_flush — behind that
@@ -1153,88 +973,60 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
     );
   }
 
-  // One `tx` local per connection, so a reconnect can never observe a stale half-buffered
-  // transaction. The iterator only ends cleanly on this run's own abort; every server-initiated
-  // end arrives as a throw and reconnects via the replication loop's tail.
-  private async stream(
-    rep: ReplicationConnection,
-    iterator: AsyncGenerator<ReplicationEvent>,
-    run: Run,
-  ): Promise<void> {
-    let tx: {
-      commitLsn: string;
-      events: PendingWalEvent[];
-      wireCounts: Map<string, Pick<TelemetryEvent, 'schema' | 'table' | 'op' | 'rowCount'>>;
-    } | null = null;
+  // One assembled transaction from the driver. Ack follows this method resolving, so every
+  // statement here runs strictly before the commit is acknowledged.
+  private async applyTransaction(batch: TransactionBatch): Promise<void> {
+    // The driver only chunks a transaction when maxTransactionEvents is set, which this runtime
+    // never passes, so a partial batch cannot reach here.
+    if (!batch.done) {
+      return;
+    }
+    const events = batch.events;
 
-    for await (const event of iterator) {
-      if (event.kind === 'begin') {
-        tx = { commitLsn: event.finalLsn, events: [], wireCounts: new Map() };
-        continue;
-      }
+    // minipg replication is at-least-once: a reconnect replays the tail, so a commit at or below
+    // the durable watermark is a replay — re-persisting or re-emitting it would make clients
+    // double-apply. Returning still acks, so the server stops resending.
+    if (
+      this.lastPersistedCommitLsn !== null &&
+      lsnFromString(batch.commitLsn) <= lsnFromString(this.lastPersistedCommitLsn)
+    ) {
+      return;
+    }
+
+    const decoded: PendingWalEvent[] = [];
+    const wireCounts = new Map<
+      string,
+      Pick<TelemetryEvent, 'schema' | 'table' | 'op' | 'rowCount'>
+    >();
+    for (const event of events) {
       if (event.kind === 'insert' || event.kind === 'update' || event.kind === 'delete') {
-        if (!tx) {
-          // pgoutput streams transactions whole (begin always precedes its row events), so this
-          // is a protocol anomaly, not routine — there is no per-message LSN to fall back to.
-          this.logError(
-            `Protocol anomaly: no tracked begin.finalLsn for ${event.schema}.${event.table}; skipping event`,
-          );
-          continue;
-        }
-        this.decodeInto(tx, event);
-        continue;
+        this.decodeInto({ events: decoded, wireCounts }, event);
       }
-      if (event.kind !== 'commit') continue; // relation/truncate/message: ignored
+    }
 
-      const batch = tx;
-      tx = null;
+    if (this.pullEnabled) {
+      await this.getPulseStore().ingestCommit(decoded, this.slotName, batch.commitLsn);
+      this.lastPersistedCommitLsn = batch.commitLsn;
+    }
 
-      // Skip persist AND the tap emits when no begin was observed, or this commit was already
-      // durably persisted. minipg replication is at-least-once: a reconnect replays the tail, so
-      // a commit at or below the watermark is a replay — re-persisting or re-emitting it would
-      // make clients double-apply. The ack still advances so the server stops resending.
-      if (
-        !batch ||
-        (this.lastPersistedCommitLsn !== null &&
-          lsnFromString(batch.commitLsn) <= lsnFromString(this.lastPersistedCommitLsn))
-      ) {
-        rep.ack(event.endLsn);
-        continue;
-      }
+    for (const pendingEvent of decoded) {
+      this.emitTap(pendingEvent, batch.commitLsn);
+    }
 
-      if (this.pullEnabled) {
-        await this.getPulseStore().ingestCommit(batch.events, this.slotName, batch.commitLsn);
-        this.lastPersistedCommitLsn = batch.commitLsn;
-      }
-
-      // Reset only after real progress, not right after rep.start() — an instantly-clean-ending
-      // server (zero commits per connection) must still exhaust run.attempts and reach the
-      // terminal path instead of reconnecting forever.
-      run.attempts = 0;
-
-      for (const pendingEvent of batch.events) {
-        this.emitTap(pendingEvent, batch.commitLsn);
-      }
-
-      const telemetry = this.config.telemetry;
-      if (telemetry && batch.wireCounts.size > 0) {
-        const appliedAt = Math.round((performance.timeOrigin + performance.now()) * 1000);
-        const committedAt = event.commitTimeUs;
-        const { commitLsn, wireCounts } = batch;
-        queueMicrotask(() => {
-          for (const group of wireCounts.values()) {
-            try {
-              telemetry({ ...group, committedAt, appliedAt, commitLsn });
-            } catch (err) {
-              this.logError('telemetry callback error:', err);
-            }
+    const telemetry = this.config.telemetry;
+    if (telemetry && wireCounts.size > 0) {
+      const appliedAt = Math.round((performance.timeOrigin + performance.now()) * 1000);
+      const committedAt = batch.commitTimeUs;
+      const commitLsn = batch.commitLsn;
+      queueMicrotask(() => {
+        for (const group of wireCounts.values()) {
+          try {
+            telemetry({ ...group, committedAt, appliedAt, commitLsn });
+          } catch (err) {
+            this.logError('telemetry callback error:', err);
           }
-        });
-      }
-
-      // Only after persist resolves — acking earlier reopens the data-loss window this
-      // design closes. endLsn is the commit's ack target.
-      rep.ack(event.endLsn);
+        }
+      });
     }
   }
 
@@ -1314,17 +1106,17 @@ export class PulseRuntime<TQueries extends AnyPulseBuilders> {
       return;
     }
 
-    // pgoutput omits an UPDATE's unchanged TOASTed columns from the new tuple; the old-under-new
-    // spread carries them forward (a full old tuple always has them).
-    const row = { ...oldRow, ...event.new };
+    // The driver hydrates an UPDATE's unchanged TOASTed columns into `new` from the full old
+    // tuple (hydrateToast, on by default), so `event.new` is already the row after the update.
+    const row = event.new;
     const pkValue = row[metadata.pkKey];
     if (!usablePk(pkValue)) return;
 
     const oldPk = oldRow[metadata.pkKey];
-    if (oldPk != null && !pkValuesEqual(oldPk, pkValue)) {
+    if (event.keyChanged && oldPk != null) {
       // pk-changing UPDATE: a single update entry keyed by the new pk leaves every consumer
       // holding a ghost row under the old pk. Synthesize delete(oldPk) then insert(newPk) —
-      // delete MUST precede insert since stream()'s commit case fans out `events` in order
+      // delete MUST precede insert since applyTransaction fans `events` out in order
       // (per-index snapshots for the events table, emit order for the tap).
       tx.events.push({ ...base, op: 'delete', pkValue: oldPk, row: {}, oldRow });
       tx.events.push({ ...base, op: 'insert', pkValue, row, oldRow: null });

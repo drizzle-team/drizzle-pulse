@@ -31,41 +31,39 @@ Live PostgreSQL + WAL integration coverage for the Pulse SDK runtime. These test
 
 ```text
 beforeAll
-  → setupTestSuiteForFixture(fixture, registry)
-    → create unique database
-    → apply fixture migrations
-    → create runtime via new PulseRuntime(...)
-    → void runtime.start()
-    → waitForWalStartup(...)
-    → runtime ensures baseline snapshots
+  → const suite = await setupTestSuiteForFixture(fixture, registry)
+    → creates a fresh, isolated database
+    → applies fixture migrations
+    → creates runtime via new PulseRuntime(...)
+    → void runtime.start(), then waits for the slot to report active
+    → runtime provisions baseline snapshots
 
 beforeEach
-  → cleanupBetweenTestsForFixture(fixture, pool)
-    → truncates fixture tables/events
+  → await suite.cleanupBetweenTests()
+    → truncates fixture tables and the events table
     → runtime.ensureBaselines()
 
 afterAll
-  → teardownTestSuiteForFixture(fixture)
+  → await suite.teardown()
+    → idempotent: stops the runtime, drops the slot/publication, drops the database
 ```
 
-Suite contexts are reference-counted per fixture variant and reused safely across tests in the same file.
+Each test file's `beforeAll` creates one fresh suite context, reused by every test in that file; nothing is shared or counted across files.
 
 ## Key Helpers
 
-- `setupTestSuiteForFixture(fixture, registry)` → returns `{ router, pool, db, databaseUrl, publicationName, slotName, processDbOperations, initTestQuery }`
-- `teardownTestSuiteForFixture(fixture)` → stops runtime, drops slot/publication, drops database
-- `cleanupBetweenTestsForFixture(fixture, pool)` → truncates fixture tables and events table, then recreates baseline snapshot if needed
+- `setupTestSuiteForFixture(fixture, registry)` → returns a suite context carrying `runtime`, `router`, `pool`, `db`, `databaseUrl`, `publicationName`, `slotName`, `fixture`, `processDbOperations`, `initTestQuery`, plus the lifecycle methods `teardown()` and `cleanupBetweenTests()`
 - `waitForEventsForFixture(fixture, pool, sinceSnapshot, expectedCount, opts?)` → polls events table until enough non-snapshot events arrive
 - `createRouterFetchAdapter(router)` → wraps `router.request()` as a fetch-compatible function with `preconnect()`
 - `subscribeClient(router, queryName, args)` → typed `/subscribe` helper
-- `pullClient(router, subscriptionId, snapshot)` → typed `/pull` helper with reset handling
-- `processDbOperations(operations)` from `setupTestSuiteForFixture(...)` is the preferred fixture-local mutation helper in tests
-- `processDbOperations(fixture, pool, operations)`, `insertTestUser(...)`, `getLastEventSnapshot(...)` are shared helpers from `db-helpers.ts`
+- `pullClient(router, cursor)` → typed `/pull` helper with reset handling; `cursor` is the `PullCursor` returned by `subscribeClient` or a prior `pullClient` call
+- `processDbOperations(operations)` from the suite context is the preferred fixture-local mutation helper in tests
+- `processDbOperations(fixture, pool, operations)`, `insertTestUser(...)`, `waitFor(...)` are shared helpers from `db-helpers.ts`
 - `initTestQuery(descriptor)` creates a `PulseQuery` runtime against the fixture router and subscribes it for state-focused tests
 
 ## Query / Client Pattern
 
-- Tests build registries with the same `createPulse` + `createPulseRegistry` API as production and pass them into `setupTestSuiteForFixture(...)`
+- Tests build registries with the same `pulse(table)` + `createPulseRegistry` API as production and pass them into `setupTestSuiteForFixture(...)`
 - Client-state assertions should prefer `PulseQuery` / `initTestQuery(...)` over hand-rolled merge logic
 - `router.request()` is enough for most endpoint tests; use `createRouterFetchAdapter()` when a real fetch implementation is needed
 - Prefer fixture-local `processDbOperations(...)` in test files so fixture/pool plumbing stays inside the harness
@@ -77,11 +75,11 @@ Suite contexts are reference-counted per fixture variant and reused safely acros
 - Snapshot rows in the events table trigger `{ reset: true, reason: 'snapshot' }` on pull
 - Each test needing valid `orders.driver_id` should create a unique user first
 - WAL startup is asynchronous; wait for slot readiness instead of sleeping
+- `runtime.start()` resolves once the stream is open and rejects if the first connect fails
 
 ## Anti-Patterns (DO NOT)
 
 - ❌ Hardcode publication or slot names
-- ❌ Await `runtime.start()` directly; start it non-blocking and poll readiness
 - ❌ Use fixed sleeps for WAL propagation; use `waitForEventsForFixture(...)`
-- ❌ Reintroduce manual `pkMap` merge assertions where `PulseQuery` already covers the production path
+- ❌ Reintroduce manual `_pkMap` merge assertions where `PulseQuery` already covers the production path
 - ❌ Weaken test assertions just to make runtime changes pass

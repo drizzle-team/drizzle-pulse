@@ -1,7 +1,7 @@
+import { type Connection, createPool, type Pool } from '@drizzle-team/minipg';
 import { eq, getColumns, sql } from 'drizzle-orm';
 import { type PgTable, pgSchema, text, uuid } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/postgres';
-import { type Connection, createPool, type Pool } from 'minipg';
 import type { PendingWalEvent } from './pulse-runtime.js';
 
 type DbHandle = ReturnType<typeof drizzle>;

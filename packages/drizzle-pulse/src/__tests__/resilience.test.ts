@@ -1,120 +1,108 @@
 import { afterAll, describe, expect, mock, test } from 'bun:test';
-import * as realMinipg from 'minipg';
+import * as realCdc from '@drizzle-team/minipg/cdc';
 import { makePulseRuntime } from './mock-runtime.js';
 
 // ---------------------------------------------------------------------------
-// Runtime reconnect edge. The embedded client wires this edge to query.poll()
-// (catch up on events missed while the WAL stream was down); the rebaseline
-// engine that used to live here is gone. The push pipeline itself is covered by
-// the embedded-collection integration tests.
+// The reconnect edge that stayed in pulse after the CDC layer took the connection loop.
+// minipg's `replicate()` owns connect, slot administration, backoff and the retry budget, and
+// tests those itself. What is still pulse policy — and only observable here — is WHICH session
+// events rebuild consumer state: a rebaseline round must fire when a stream re-opens under live
+// collections, and must not fire on the very first one, when no collection exists yet.
 //
-// Why mocked at all: the original issues here are connection-loop pathologies — a reconnect
-// round firing on the first connect, and a server that accepts then cleanly ends every
-// connection keeping the runtime in a reconnect loop forever. Reproducing the second for
-// real means orchestrating ~10 socket-level accept-then-close cycles through a proxy while
-// sitting out real exponential backoff; the reconnect edge itself IS covered against real
-// socket drops in the integration suites (reconnect-rebaseline, pull-false mid-run
-// reconnect). This file keeps only the loop-policy half that would be disproportionate to
-// reproduce live.
-//
-// runReplicationLoop() opens its connection via minipg's free `replication()` function, not a
-// method on the runtime — there's no instance seam to override for it, so the module
-// itself is mocked (live-binding update, per Bun's mock.module docs) with every other
-// minipg export passed through untouched. `resolveSlot`/`stream` ARE instance methods
-// and are overridden directly per test, same technique as the rest of this file's mocks.
+// `replicate()` is a free function, not a method on the runtime, so there is no instance seam to
+// override — the module is mocked (live-binding update, per Bun's mock.module docs) to capture
+// the options object, and the test drives the driver's callbacks directly.
 // ---------------------------------------------------------------------------
 
-let replicationImpl: (databaseUrl: string) => Promise<{
-  start: (...args: unknown[]) => unknown;
-  end: () => void;
-}> = async () => {
-  throw new Error('replicationImpl not configured for this test');
-};
+type ReplicateOpts = Parameters<typeof realCdc.replicate>[0];
 
-mock.module('minipg', () => ({
-  ...realMinipg,
-  replication: (databaseUrl: string) => replicationImpl(databaseUrl),
+let captured: ReplicateOpts | null = null;
+let handleReady: Promise<void>;
+let stopCalls = 0;
+
+mock.module('@drizzle-team/minipg/cdc', () => ({
+  ...realCdc,
+  replicate: (opts: ReplicateOpts) => {
+    captured = opts;
+    return {
+      stop: async () => {
+        stopCalls++;
+      },
+      ready: handleReady,
+    };
+  },
 }));
 
 afterAll(() => {
-  mock.module('minipg', () => realMinipg);
+  mock.module('@drizzle-team/minipg/cdc', () => realCdc);
 });
 
-function makeFakeRep() {
-  return {
-    start: () => ({}) as unknown,
-    end: () => {},
-  };
-}
-
-// runReplicationLoop()'s `startupSettled` parameter only needs to be resolve()-able — its promise
-// isn't consumed by these tests, which await runReplicationLoop() itself.
-function makeStartupSettled(): { promise: Promise<void>; resolve: () => void } {
-  return { promise: Promise.resolve(), resolve: () => {} };
-}
-
-// The backoff sleep between reconnect rounds uses real setTimeout delays (seconds, growing
-// exponentially) — fast-forward it for these tests so multi-round scenarios stay well under
-// a second instead of tens of seconds.
-function withFastTimers<T>(fn: () => Promise<T>): Promise<T> {
-  const realSetTimeout = globalThis.setTimeout;
-  globalThis.setTimeout = ((cb: (...args: unknown[]) => void, _ms?: number, ...args: unknown[]) =>
-    realSetTimeout(cb, 0, ...args)) as typeof setTimeout;
-  return fn().finally(() => {
-    globalThis.setTimeout = realSetTimeout;
-  });
-}
-
 describe('runtime reconnect edge', () => {
-  test('onReconnect fires on reconnect but not on the first connect', async () => {
-    const runtime = makePulseRuntime();
-    // resolveSlot/stream/runReplicationLoop are private seams; onReconnect stays typed.
-    const internals = runtime as any;
+  test('the rebaseline round fires when a stream re-opens, not on the first one', async () => {
+    // pull:false: no events tables and no store, so the backfill callback's only job here
+    // is the collection rebaseline round this test observes.
+    const runtime = makePulseRuntime({ pull: false });
+    // rebaselineCollections pins the exported snapshot in an admin transaction before firing the
+    // round; the store is normally opened by start(), which this test bypasses.
+    (runtime as any).store = {
+      getDb: () => ({
+        transaction: async (fn: (tx: unknown) => Promise<void>) =>
+          fn({ execute: async () => ({ rows: [] }) }),
+      }),
+    };
     let fired = 0;
     runtime.onReconnect(() => {
       fired++;
     });
 
-    replicationImpl = async () => makeFakeRep();
-    internals.resolveSlot = async () => ({ slot: 'test_slot', from: undefined });
-
-    const run = { abort: new AbortController(), attempts: 0 };
-    let streamCalls = 0;
-    internals.stream = async () => {
-      streamCalls++;
-      // Clean end each time (zero commits) — after the second connect's round has fired,
-      // stop the loop so the test doesn't run a third round.
-      if (streamCalls >= 2) run.abort.abort();
-    };
-
-    await withFastTimers(() => internals.runReplicationLoop(run, makeStartupSettled()));
-
-    expect(streamCalls).toBe(2);
-    expect(fired).toBe(1);
-  });
-});
-
-describe('zero-progress connections never reset attempts', () => {
-  test('connections that end with zero commits exhaust attempts and reach the terminal path', async () => {
-    const runtime = makePulseRuntime();
-    // resolveSlot/stream/runReplicationLoop are private seams; onTerminalError stays typed.
-    const internals = runtime as any;
-    let terminalError: Error | null = null;
-    runtime.onTerminalError((error) => {
-      terminalError = error;
+    let resolveReady!: () => void;
+    handleReady = new Promise<void>((res) => {
+      resolveReady = res;
     });
 
-    replicationImpl = async () => makeFakeRep();
-    internals.resolveSlot = async () => ({ slot: 'test_slot', from: undefined });
-    // Every connection ends without processing a single commit — a runtime whose connections
-    // never land a commit must still run out of reconnect attempts and reach giveUp(),
-    // instead of reconnecting forever.
-    internals.stream = async () => {};
+    // openSession is the private seam that builds the replicate() options; awaiting it settles
+    // once the mocked driver's ready promise resolves.
+    const opening = (runtime as any).openSession();
+    const opts = captured;
+    if (!opts?.backfill) throw new Error('replicate() was called without a backfill callback');
 
-    const run = { abort: new AbortController(), attempts: 0 };
+    // A temporary slot is recreated per session, so every stream open arrives as a backfill.
+    const window = {
+      snapshot: 'snap-1',
+      streamStartLsn: '0/1000000',
+      isReconnect: false,
+      signal: new AbortController().signal,
+    };
 
-    await withFastTimers(() => internals.runReplicationLoop(run, makeStartupSettled()));
+    await opts.backfill(window);
 
-    expect(terminalError).toBeInstanceOf(Error);
+    // openSession settles on ready, not on backfill completing. A Promise.race against an
+    // already-resolved sentinel cannot show this: .then() costs a microtask tick, so the
+    // sentinel wins even when opening has settled. Flush the queue and read the flag instead.
+    let opened = false;
+    void opening.then(() => {
+      opened = true;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(opened).toBe(false);
+
+    resolveReady();
+    await opening;
+    expect(fired).toBe(0);
+
+    await opts.backfill({ ...window, snapshot: 'snap-2', isReconnect: true });
+    expect(fired).toBe(1);
+  });
+
+  test('a rejected ready stops the session and openSession rejects with the same error', async () => {
+    // A real first-connect failure fails bootstrap() before a session ever exists, so this path
+    // is only reachable against the mock.
+    stopCalls = 0;
+    handleReady = Promise.reject(new Error('connect refused'));
+
+    const runtime = makePulseRuntime({ pull: false });
+
+    await expect((runtime as any).openSession()).rejects.toThrow('connect refused');
+    expect(stopCalls).toBe(1);
   });
 });

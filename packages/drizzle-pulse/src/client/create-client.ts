@@ -105,7 +105,7 @@ export class PullClient {
 
 /**
  * Creates a type-safe client proxy for calling pulse queries.
- * TClient is typically `ClientContract<...>` from the server's `typeof drizzlePulse.$client`.
+ * TClient is typically `PulseClientContract<...>` from the server's `typeof drizzlePulse.$client`.
  * At runtime, returns a Proxy that constructs QueryDescriptor objects.
  */
 export function createPulseClient<TClient>(config: {

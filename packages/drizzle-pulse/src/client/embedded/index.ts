@@ -217,13 +217,16 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
         // handshake's state. Returns `null` when superseded — the caller must not treat that
         // as "no watermark", only as "a newer handshake owns the collection now".
         let handshakeGen = 0;
-        async function runHandshake(snapshot?: BaselineSnapshot | null): Promise<string | null> {
+        async function runHandshake(
+          snapshot?: BaselineSnapshot | null,
+          recovered?: boolean,
+        ): Promise<string | null> {
           const gen = ++handshakeGen;
           baselining = true;
           buffer = [];
           let baseline: { rows: Record<string, unknown>[]; watermark: string };
           try {
-            baseline = await runtime.readCollectionBaseline(query, snapshot);
+            baseline = await runtime.readCollectionBaseline(query, snapshot, recovered);
           } catch (err) {
             // A rejected rebaseline must not leave the collection permanently latched into
             // buffering: only reset when this handshake still owns the state (a newer
@@ -259,7 +262,7 @@ export function createPulseClient<TQueries extends AnyPulseBuilders>(
             // replication loop's reconnect round actually await every listener's handshake.
             return (async () => {
               try {
-                const watermark = await runHandshake(snapshot);
+                const watermark = await runHandshake(snapshot, true);
                 if (watermark === null) return; // superseded by a newer reconnect handshake
                 if (collection.isDisposed) return;
                 collection.fireOnChange([], watermark);

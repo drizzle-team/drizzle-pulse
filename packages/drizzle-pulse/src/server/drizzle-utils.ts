@@ -146,7 +146,10 @@ function buildWhereAstPredicate(
   if (ast.not) {
     const notClause = buildWhereAstPredicate(ast.not, columns, allowedColumnNames);
     if (notClause) {
-      clauses.push(not(notClause));
+      const negated = not(notClause);
+      if (negated) {
+        clauses.push(negated);
+      }
     }
   }
 
