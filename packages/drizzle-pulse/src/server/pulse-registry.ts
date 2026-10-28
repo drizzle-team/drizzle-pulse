@@ -1,4 +1,5 @@
 import type { PgTable } from 'drizzle-orm/pg-core';
+import type { StandardSchemaV1 } from '../shared/standard-schema.js';
 import { getPulsePkColumn } from '../pulse-table.js';
 import type {
   PulseAuthContext,
@@ -17,6 +18,17 @@ export type AnyPulseBuilder = PulseBuilder<
 >;
 
 export type AnyPulseBuilders = Record<string, AnyPulseBuilder>;
+
+function validateSyncArgs(schema: StandardSchemaV1, rawArgs: unknown): Record<string, unknown> {
+  const result = schema['~standard'].validate(rawArgs);
+  if (result instanceof Promise) {
+    throw new Error('args schema must validate synchronously');
+  }
+  if (result.issues) {
+    throw new Error(JSON.stringify(result.issues, null, 2));
+  }
+  return result.value as Record<string, unknown>;
+}
 
 function buildPulseQuery(query: AnyPulseBuilder): PulseRegistryQuery {
   const { config } = query;
@@ -69,7 +81,9 @@ export class PulseRegistry<TQueries extends AnyPulseBuilders> {
     // `.args()` — a queryFn that reads `ctx.args` without declaring a schema would
     // otherwise let attacker-controlled JSON reach buildColumnFilterPredicate as
     // operator-shaped filters. Queries that need args MUST chain `.args(schema)`.
-    const args = registryQuery.argsSchema ? registryQuery.argsSchema.parse(rawArgs) : {};
+    const args = registryQuery.argsSchema
+      ? validateSyncArgs(registryQuery.argsSchema, rawArgs)
+      : {};
     const where =
       registryQuery.queryFn?.({
         query: (clause: WhereClause) => clause,

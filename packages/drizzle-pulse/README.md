@@ -278,7 +278,7 @@ Updates are push-shaped: each decoded WAL commit is applied to the collection as
 | Dependency | Range | Notes |
 |---|---|---|
 | `drizzle-orm` | `^1.0.0-rc.4` | Needs a build whose exports include `./postgres/*`, which the `rc5` dist-tag provides and the `latest` tag does not |
-| `zod` | `^4.0.0` | |
+| `zod` | `^3.24.0 \|\| ^4.0.0` | 3.24.0 added Standard Schema support |
 | `@drizzle-team/minipg` | `>=0.4.0` | The PostgreSQL driver. The runtime consumes its `@drizzle-team/minipg/cdc` subpath |
 | `react` | `>=18.0.0` | Optional — only required for `drizzle-pulse/client/react` |
 | `hono` | `^4.6.0` | Optional — only required for `drizzle-pulse/server/hono` |

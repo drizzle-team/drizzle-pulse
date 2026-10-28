@@ -1,6 +1,6 @@
+import type { StandardSchemaV1 } from '../shared/standard-schema.js';
 import type { InferSelectModel, Simplify } from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
-import type { z } from 'zod';
 import type { PulseAuthContext, QueryDescriptor, WhereClause, WhereCondition } from '../types.js';
 import type { PulseBuilder } from './pulse-builder.js';
 
@@ -72,7 +72,7 @@ export type PulseQueryConfig<
   readonly pkColumn: PgColumn;
   readonly columns: Record<string, PgColumn>;
   readonly selectedColumns: Record<string, PgColumn>;
-  readonly argsSchema: z.ZodType<TArgs> | null;
+  readonly argsSchema: StandardSchemaV1<TArgs> | null;
   readonly queryFn: QueryFn<TArgs, InferSelectModel<TTable>> | null;
   readonly transformFn: PulseTransformFn<Record<string, unknown>, TResult> | null;
   readonly order: 'asc' | 'desc' | null;

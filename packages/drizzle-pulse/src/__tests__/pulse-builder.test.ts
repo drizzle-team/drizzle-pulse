@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { getColumns, getTableUniqueName } from 'drizzle-orm';
 import { boolean, integer, pgSchema, primaryKey, serial, text, varchar } from 'drizzle-orm/pg-core';
+import type { StandardSchemaV1 } from '../shared/standard-schema.js';
 import { z } from 'zod';
 import { pulse } from '../pulse-table.js';
 import { PulseBuilder } from '../server/pulse-builder.js';
@@ -68,6 +69,28 @@ const varcharPkTable = testSchema.table('varchar_items', {
   code: varchar('code', { length: 64 }).primaryKey(),
   name: text('name').notNull(),
 });
+
+const driverSchema: StandardSchemaV1<{ driverId: number }> = {
+  '~standard': {
+    version: 1,
+    vendor: 'test',
+    validate: (value) => {
+      const { driverId } = value as { driverId?: unknown };
+      return typeof driverId === 'number'
+        ? { value: { driverId } }
+        : { issues: [{ message: 'driverId must be a number' }] };
+    },
+  },
+};
+
+const asyncDriverSchema: StandardSchemaV1<{ driverId: number }> = {
+  '~standard': {
+    version: 1,
+    vendor: 'test',
+    validate: (value) =>
+      Promise.resolve({ value: { driverId: (value as { driverId: number }).driverId } }),
+  },
+};
 
 describe('PulseBuilder', () => {
   test('.columns() stores resolved selected columns and returns new instance', () => {
@@ -324,5 +347,43 @@ describe('createPulseRegistry — derived-queries-only contract', () => {
     expect(() =>
       registry.resolve('ordersByStatus', { status: { isNotNull: true } }, { userId: null }),
     ).toThrow();
+  });
+
+  test('resolve() validates args through a Standard Schema', () => {
+    const registry = createPulseRegistry({
+      ordersByDriver: pulse(testTable)
+        .query()
+        .args(driverSchema)
+        .query((ctx) => ctx.query({ status: `driver-${ctx.args.driverId}` })),
+    });
+
+    const query = registry.resolve('ordersByDriver', { driverId: 7 }, { userId: null });
+    expect(query.where).toEqual({ status: 'driver-7' });
+  });
+
+  test('resolve() throws with the standard-schema issues on validation failure', () => {
+    const registry = createPulseRegistry({
+      ordersByDriver: pulse(testTable)
+        .query()
+        .args(driverSchema)
+        .query(() => null),
+    });
+
+    expect(() =>
+      registry.resolve('ordersByDriver', { driverId: 'nope' }, { userId: null }),
+    ).toThrow(JSON.stringify([{ message: 'driverId must be a number' }], null, 2));
+  });
+
+  test('resolve() rejects an async Standard Schema instead of returning a promise result', () => {
+    const registry = createPulseRegistry({
+      ordersByDriver: pulse(testTable)
+        .query()
+        .args(asyncDriverSchema)
+        .query(() => null),
+    });
+
+    expect(() => registry.resolve('ordersByDriver', { driverId: 1 }, { userId: null })).toThrow(
+      /synchronous/i,
+    );
   });
 });

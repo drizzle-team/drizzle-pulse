@@ -1,7 +1,7 @@
 import type { InferModelFromColumns, InferSelectModel } from 'drizzle-orm';
 import { getColumns } from 'drizzle-orm';
 import { getTableConfig, type PgColumn, type PgTable } from 'drizzle-orm/pg-core';
-import type { z } from 'zod';
+import type { StandardSchemaV1 } from './shared/standard-schema.js';
 import { PulseBuilder } from './server/pulse-builder.js';
 import type {
   ColumnsSelection,
@@ -119,7 +119,7 @@ export class PulseTable<TTable extends PgTable = PgTable> {
   }
 
   /** Start a builder chain with a typed args schema — `pulse(t).args(schema).query(fn)`. */
-  args<TNewArgs>(schema: z.ZodType<TNewArgs>) {
+  args<TSchema extends StandardSchemaV1>(schema: TSchema) {
     return this.query().args(schema);
   }
 

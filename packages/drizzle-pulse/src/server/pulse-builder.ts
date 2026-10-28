@@ -1,6 +1,6 @@
+import type { StandardSchemaV1 } from '../shared/standard-schema.js';
 import type { InferModelFromColumns, InferSelectModel } from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
-import type { z } from 'zod';
 import type { WhereClause } from '../types.js';
 import type {
   ColumnsSelection,
@@ -65,15 +65,25 @@ export class PulseBuilder<
     } as PulseQueryConfig<TTable, TNewSelection, TArgs, ColumnsSelection<TTable, TNewSelection>>);
   }
 
-  args<TNewArgs>(schema: z.ZodType<TNewArgs>): PulseBuilder<TTable, TSelection, TNewArgs, TResult> {
-    return new PulseBuilder<TTable, TSelection, TNewArgs, TResult>({
+  args<TSchema extends StandardSchemaV1>(
+    schema: TSchema,
+  ): PulseBuilder<TTable, TSelection, StandardSchemaV1.InferOutput<TSchema>, TResult> {
+    return new PulseBuilder<TTable, TSelection, StandardSchemaV1.InferOutput<TSchema>, TResult>({
       ...this.config,
       argsSchema: schema,
       // The second QueryFn type param is the full source row type (PulseQueryConfig's
       // `queryFn: QueryFn<TArgs, InferSelectModel<TTable>>`), not the column-selection
       // map TSelection — the row shape doesn't change across .args(), only TArgs does.
-      queryFn: this.config.queryFn as QueryFn<TNewArgs, InferSelectModel<TTable>> | null,
-    } as unknown as PulseQueryConfig<TTable, TSelection, TNewArgs, TResult>);
+      queryFn: this.config.queryFn as QueryFn<
+        StandardSchemaV1.InferOutput<TSchema>,
+        InferSelectModel<TTable>
+      > | null,
+    } as unknown as PulseQueryConfig<
+      TTable,
+      TSelection,
+      StandardSchemaV1.InferOutput<TSchema>,
+      TResult
+    >);
   }
 
   transform<TTransformed extends Record<string, unknown>>(

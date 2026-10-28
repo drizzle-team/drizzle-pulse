@@ -1,4 +1,5 @@
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
+import type { StandardSchemaV1 } from './shared/standard-schema.js';
 import type { PullClient } from './client/create-client.js';
 import type { PulseEvent } from './shared/pulse-events.js';
 
@@ -88,7 +89,7 @@ export interface PulseRegistryQuery {
   readonly allowedColumnNames: ReadonlySet<string>;
   readonly order: 'asc' | 'desc';
   readonly limit: number | null;
-  readonly argsSchema: { parse: (input: unknown) => unknown } | null;
+  readonly argsSchema: StandardSchemaV1 | null;
   readonly queryFn:
     | ((ctx: {
         query: (where: WhereClause) => WhereClause;
